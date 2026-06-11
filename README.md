@@ -60,3 +60,7 @@ npm run start:tunnel
 El arranque de la aplicación tiene límites de tiempo para restaurar la sesión y
 cargar Supabase, por lo que un fallo de red debe mostrar el login o un mensaje de
 reintento en lugar de dejar la aplicación bloqueada.
+
+El túnel usa la dependencia local `@expo/ngrok`, por lo que no requiere una
+instalación global. Antes de iniciarlo, cierre cualquier Metro anterior que esté
+ocupando el puerto `8081`.
