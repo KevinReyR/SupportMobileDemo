@@ -47,3 +47,16 @@ npm run typecheck
 npm run export:web
 npx expo install --check
 ```
+
+## Expo Go en iOS físico
+
+Permita el acceso de Expo Go a **Red local** en Ajustes de iOS. Si el dispositivo
+permanece en el splash y Metro no registra la carga del bundle, use:
+
+```bash
+npm run start:tunnel
+```
+
+El arranque de la aplicación tiene límites de tiempo para restaurar la sesión y
+cargar Supabase, por lo que un fallo de red debe mostrar el login o un mensaje de
+reintento en lugar de dejar la aplicación bloqueada.

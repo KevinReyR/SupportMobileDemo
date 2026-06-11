@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -135,6 +135,15 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Ocurrió un error inesperado.";
 }
 
+function withTimeout<T>(promise: Promise<T>, milliseconds: number, message: string) {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error(message)), milliseconds);
+    }),
+  ]);
+}
+
 export default function SupportApp() {
   const [booting, setBooting] = useState(true);
   const [session, setSession] = useState<Session | null>(null);
@@ -147,8 +156,11 @@ export default function SupportApp() {
   const [selectedOperationId, setSelectedOperationId] = useState<number | null>(null);
   const [selectedContractorId, setSelectedContractorId] = useState<number | null>(null);
   const [selectedHistory, setSelectedHistory] = useState<ContractorHistory | null>(null);
+  const mountedRef = useRef(true);
+  const hydrationIdRef = useRef(0);
 
   const hydrate = useCallback(async (nextSession: Session | null) => {
+    const hydrationId = ++hydrationIdRef.current;
     setSession(nextSession);
     if (!nextSession) {
       setContext(null);
@@ -159,30 +171,66 @@ export default function SupportApp() {
     setLoading(true);
     setError("");
     try {
-      const nextContext = await loadUserContext(nextSession.user.id);
-      const nextData = await loadAppData(nextContext);
+      const nextContext = await withTimeout(
+        loadUserContext(nextSession.user.id),
+        12_000,
+        "No fue posible validar la sesión. Revisa tu conexión e inténtalo nuevamente.",
+      );
+      const nextData = await withTimeout(
+        loadAppData(nextContext),
+        15_000,
+        "La carga inicial tardó demasiado. Puedes reintentar desde la aplicación.",
+      );
+      if (!mountedRef.current || hydrationId !== hydrationIdRef.current) return;
       const home: Screen = nextContext.roleCode === "ADMIN" ? "users" : "operations";
       setContext(nextContext);
       setData(nextData);
       setScreen(home);
       setActiveTab(home);
     } catch (cause) {
+      if (!mountedRef.current || hydrationId !== hydrationIdRef.current) return;
       const message = errorMessage(cause);
       setError(message);
-      await supabase.auth.signOut();
+      setSession(null);
+      setContext(null);
+      setData(EMPTY_DATA);
     } finally {
-      setLoading(false);
-      setBooting(false);
+      if (mountedRef.current && hydrationId === hydrationIdRef.current) {
+        setLoading(false);
+        setBooting(false);
+      }
     }
   }, []);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: authData }) => hydrate(authData.session));
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      if (nextSession?.access_token !== session?.access_token) hydrate(nextSession);
+    mountedRef.current = true;
+    let initialSessionHandled = false;
+    const fallbackTimer = setTimeout(() => {
+      if (!initialSessionHandled && mountedRef.current) {
+        setError("No fue posible restaurar la sesión guardada. Intenta iniciar sesión nuevamente.");
+        setBooting(false);
+      }
+    }, 8_000);
+
+    const { data: listener } = supabase.auth.onAuthStateChange((event, nextSession) => {
+      if (!mountedRef.current) return;
+      if (event === "INITIAL_SESSION") {
+        initialSessionHandled = true;
+        clearTimeout(fallbackTimer);
+      }
+
+      // Let the auth callback release its internal lock before querying Supabase.
+      setTimeout(() => {
+        if (mountedRef.current) void hydrate(nextSession);
+      }, 0);
     });
-    return () => listener.subscription.unsubscribe();
-  }, [hydrate, session?.access_token]);
+
+    return () => {
+      mountedRef.current = false;
+      clearTimeout(fallbackTimer);
+      listener.subscription.unsubscribe();
+    };
+  }, [hydrate]);
 
   const refresh = useCallback(async () => {
     if (!context) return;
