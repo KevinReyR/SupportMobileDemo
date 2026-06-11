@@ -51,16 +51,17 @@ npx expo install --check
 ## Expo Go en iOS físico
 
 Permita el acceso de Expo Go a **Red local** en Ajustes de iOS. Si el dispositivo
-permanece en el splash y Metro no registra la carga del bundle, use:
+está conectado al mismo router que el equipo, use primero:
 
 ```bash
-npm run start:tunnel
+npm run start:ios-device
 ```
 
 El arranque de la aplicación tiene límites de tiempo para restaurar la sesión y
 cargar Supabase, por lo que un fallo de red debe mostrar el login o un mensaje de
 reintento en lugar de dejar la aplicación bloqueada.
 
-El túnel usa la dependencia local `@expo/ngrok`, por lo que no requiere una
-instalación global. Antes de iniciarlo, cierre cualquier Metro anterior que esté
-ocupando el puerto `8081`.
+El túnel queda como alternativa con `npm run start:tunnel`, pero depende del
+servicio externo de ngrok y puede fallar aunque Metro y la aplicación estén bien.
+Antes de iniciar cualquiera de los dos modos, cierre cualquier Metro anterior que
+esté ocupando el puerto `8081`.

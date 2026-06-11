@@ -36,6 +36,7 @@
     "start": "expo start",
     "start:tunnel": "expo start --tunnel --clear --port 8081",
     "start:lan": "expo start --lan --clear --port 8081",
+    "start:ios-device": "expo start --lan --clear --port 8081",
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
