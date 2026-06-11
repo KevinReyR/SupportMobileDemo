@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "Support Colombia",
+    "slug": "support-colombia-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/support-icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "co.supportcolombia.mobile"
+    },
+    "android": {
+      "package": "co.supportcolombia.mobile",
+      "adaptiveIcon": {
+        "backgroundColor": "#F8FAFF",
+        "foregroundImage": "./assets/support-icon.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/support-logo.png"
+    },
+    "plugins": [
+      "expo-font"
+    ]
+  }
+}
