@@ -22,7 +22,9 @@
       "favicon": "./assets/support-logo.png"
     },
     "plugins": [
-      "expo-font"
+      "expo-font",
+      "expo-image",
+      "expo-router"
     ]
   }
 }

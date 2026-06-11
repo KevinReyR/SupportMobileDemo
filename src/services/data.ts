@@ -1,0 +1,427 @@
+import { supabase } from "../lib/supabase";
+import type {
+  AdminUser,
+  AppData,
+  Assignment,
+  Contractor,
+  ContractorHistory,
+  Operation,
+  PersonnelRequest,
+  Role,
+  RoleCode,
+  UserContext,
+} from "../types";
+
+const rolePriority: RoleCode[] = ["ADMIN", "DIRECTOR", "COORDINATOR", "CLIENT"];
+const roleNames: Record<RoleCode, Role> = {
+  ADMIN: "Administrador",
+  DIRECTOR: "Director",
+  COORDINATOR: "Coordinador",
+  CLIENT: "Cliente",
+};
+
+function fail(error: { message: string } | null) {
+  if (error) throw new Error(error.message);
+}
+
+function firstRelation<T>(value: T | T[] | null | undefined): T | null {
+  if (Array.isArray(value)) return value[0] ?? null;
+  return value ?? null;
+}
+
+function cleanText(value: string | null | undefined) {
+  if (!value) return "";
+  const replacements: Record<string, string> = {
+    "Ã": "Á",
+    "Ã‰": "É",
+    "Ã": "Í",
+    "Ã“": "Ó",
+    "Ãš": "Ú",
+    "Ã¡": "á",
+    "Ã©": "é",
+    "Ã­": "í",
+    "Ã³": "ó",
+    "Ãº": "ú",
+    "Ã±": "ñ",
+    "Ã¼": "ü",
+  };
+  return Object.entries(replacements).reduce(
+    (text, [broken, correct]) => text.split(broken).join(correct),
+    value,
+  );
+}
+
+export async function loadUserContext(userId: string): Promise<UserContext> {
+  const [profileResult, rolesResult, clientsResult] = await Promise.all([
+    supabase
+      .from("user_profiles")
+      .select("id,name,last_name,email,is_active")
+      .eq("id", userId)
+      .single(),
+    supabase.from("user_roles").select("roles(code)").eq("user_id", userId),
+    supabase.from("user_clients").select("clients(id,name)").eq("user_id", userId),
+  ]);
+
+  fail(profileResult.error);
+  fail(rolesResult.error);
+  fail(clientsResult.error);
+
+  const profile = profileResult.data as any;
+  if (!profile?.is_active) throw new Error("Tu usuario está inactivo. Contacta al administrador.");
+
+  const codes = (rolesResult.data ?? [])
+    .map((row: any) => firstRelation(row.roles)?.code as RoleCode | undefined)
+    .filter(Boolean) as RoleCode[];
+  const roleCode = rolePriority.find((code) => codes.includes(code));
+  if (!roleCode) throw new Error("El usuario no tiene un perfil asignado.");
+
+  return {
+    id: profile.id,
+    name: cleanText(profile.name),
+    lastName: cleanText(profile.last_name),
+    email: profile.email,
+    active: profile.is_active,
+    roleCode,
+    role: roleNames[roleCode],
+    clients: (clientsResult.data ?? [])
+      .map((row: any) => firstRelation(row.clients))
+      .filter(Boolean)
+      .map((client: any) => ({ id: client.id, name: cleanText(client.name) })),
+  };
+}
+
+export async function loadAppData(context: UserContext): Promise<AppData> {
+  const common = await Promise.all([
+    supabase.from("clients").select("id,name").eq("is_active", true).order("id"),
+    supabase
+      .from("operation")
+      .select(
+        "id,operation_date,client_id,area_id,status,observations,review_observations,clients(name),area(name),operation_assignment(id,planned_quantity,worked_quantity,extra_hours)",
+      )
+      .order("operation_date", { ascending: false })
+      .order("id", { ascending: false }),
+    supabase
+      .from("personnel_request")
+      .select("id,client_id,area_id,required_quantity,description,required_date,status,clients(name),area(name)")
+      .order("required_date", { ascending: false }),
+    supabase.from("area").select("id,name,client_id").eq("is_active", true).order("id"),
+    supabase.from("client_services").select("id,area_id").order("id"),
+    supabase.from("attendance_status").select("id,name").order("id"),
+  ]);
+
+  common.forEach((result) => fail(result.error));
+
+  const operations: Operation[] = (common[1].data ?? []).map((row: any) => {
+    const assignments = row.operation_assignment ?? [];
+    return {
+      id: row.id,
+      date: row.operation_date,
+      clientId: row.client_id,
+      client: cleanText(firstRelation<any>(row.clients)?.name),
+      areaId: row.area_id,
+      area: cleanText(firstRelation<any>(row.area)?.name),
+      people: assignments.length,
+      worked: assignments.reduce(
+        (total: number, assignment: any) => total + Number(assignment.worked_quantity ?? 0),
+        0,
+      ),
+      extraHours: assignments.reduce(
+        (total: number, assignment: any) => total + Number(assignment.extra_hours ?? 0),
+        0,
+      ),
+      status: row.status,
+      observations: row.observations,
+      reviewObservations: row.review_observations,
+    };
+  });
+
+  const requests: PersonnelRequest[] = (common[2].data ?? []).map((row: any) => ({
+    id: row.id,
+    clientId: row.client_id,
+      client: cleanText(firstRelation<any>(row.clients)?.name),
+    areaId: row.area_id,
+      area: cleanText(firstRelation<any>(row.area)?.name),
+    quantity: row.required_quantity,
+      description: cleanText(row.description),
+    requiredDate: row.required_date,
+    status: row.status,
+  }));
+
+  let contractors: Contractor[] = [];
+  if (context.roleCode !== "CLIENT") {
+    const [contractorResult, assignmentResult] = await Promise.all([
+      supabase
+        .from("contractor")
+        .select(
+          "id,name,last_name,document_number,phone_number,email,rh,disponibility,shirt_size,pant_size,shoe_size,hire_date,termination_date,transport_type(name),civil_state_type(name)",
+        )
+        .order("name"),
+      supabase
+        .from("operation_assignment")
+        .select("contractor_id,operation(operation_date,clients(name),area(name))")
+        .is("deleted_at", null),
+    ]);
+    fail(contractorResult.error);
+    fail(assignmentResult.error);
+
+    const lastAssignments = new Map<number, any>();
+    for (const row of assignmentResult.data ?? []) {
+      const operation = firstRelation<any>((row as any).operation);
+      if (!operation) continue;
+      const current = lastAssignments.get((row as any).contractor_id);
+      if (!current || operation.operation_date > current.operation_date) {
+        lastAssignments.set((row as any).contractor_id, operation);
+      }
+    }
+
+    contractors = (contractorResult.data ?? []).map((row: any) => {
+      const latest = lastAssignments.get(row.id);
+      const firstName = cleanText(row.name);
+      const lastName = cleanText(row.last_name);
+      const fullName = `${firstName} ${lastName}`.trim();
+      return {
+        id: row.id,
+        name: firstName,
+        lastName,
+        fullName,
+        initials: `${firstName[0] ?? ""}${lastName[0] ?? ""}`.toUpperCase(),
+        document: row.document_number,
+        phone: row.phone_number,
+        email: row.email,
+        rh: row.rh,
+        transport: cleanText(firstRelation<any>(row.transport_type)?.name) || "Sin registrar",
+        civilState: cleanText(firstRelation<any>(row.civil_state_type)?.name) || "Sin registrar",
+        city: "Medellín",
+        available: Boolean(row.disponibility),
+        shirtSize: row.shirt_size,
+        pantSize: row.pant_size,
+        shoeSize: row.shoe_size,
+        hireDate: row.hire_date,
+        terminationDate: row.termination_date,
+        active: !row.termination_date,
+        lastClient: cleanText(firstRelation<any>(latest?.clients)?.name) || "Sin operación",
+        lastArea: cleanText(firstRelation<any>(latest?.area)?.name) || "Sin área",
+        lastDate: latest?.operation_date ?? null,
+      };
+    });
+  }
+
+  let users: AdminUser[] = [];
+  if (context.roleCode === "ADMIN") {
+    const [profilesResult, rolesResult, clientsResult] = await Promise.all([
+      supabase.from("user_profiles").select("id,name,last_name,email,is_active").order("name"),
+      supabase.from("user_roles").select("user_id,roles(name)"),
+      supabase.from("user_clients").select("user_id,clients(id,name)"),
+    ]);
+    fail(profilesResult.error);
+    fail(rolesResult.error);
+    fail(clientsResult.error);
+    users = (profilesResult.data ?? []).map((profile: any) => ({
+      id: profile.id,
+      name: `${cleanText(profile.name)} ${cleanText(profile.last_name)}`.trim(),
+      email: profile.email,
+      active: profile.is_active,
+      role:
+        firstRelation<any>(
+          (rolesResult.data ?? []).find((row: any) => row.user_id === profile.id)?.roles,
+        )?.name ? cleanText(firstRelation<any>(
+          (rolesResult.data ?? []).find((row: any) => row.user_id === profile.id)?.roles,
+        )?.name) : "Sin perfil",
+      clients: (clientsResult.data ?? [])
+        .filter((row: any) => row.user_id === profile.id)
+        .map((row: any) => cleanText(firstRelation<any>(row.clients)?.name))
+        .filter(Boolean),
+      clientIds: (clientsResult.data ?? [])
+        .filter((row: any) => row.user_id === profile.id)
+        .map((row: any) => firstRelation<any>(row.clients)?.id)
+        .filter(Boolean),
+    }));
+  }
+
+  return {
+    clients: (common[0].data ?? []).map((client: any) => ({
+      id: client.id,
+      name: cleanText(client.name),
+    })),
+    operations,
+    requests,
+    contractors,
+    areas: (common[3].data ?? []).map((area: any) => ({
+      id: area.id,
+      name: cleanText(area.name),
+      clientId: area.client_id,
+    })),
+    services: (common[4].data ?? []).map((service: any) => ({
+      id: service.id,
+      areaId: service.area_id,
+    })),
+    attendanceStatuses: (common[5].data ?? []).map((status: any) => ({
+      id: status.id,
+      name: status.name,
+    })),
+    users,
+  };
+}
+
+export async function loadOperationAssignments(operationId: number): Promise<Assignment[]> {
+  const result = await supabase.rpc("get_operation_assignments", {
+    p_operation_id: operationId,
+  });
+  fail(result.error);
+  return (result.data ?? []).map((row: any) => ({
+    assignmentId: row.assignment_id,
+    contractorId: row.contractor_id,
+    contractorName: cleanText(row.contractor_name),
+    areaName: cleanText(row.area_name),
+    attendanceStatus: cleanText(row.attendance_status) || null,
+    workedQuantity: Number(row.worked_quantity ?? 0),
+    extraHours: Number(row.extra_hours ?? 0),
+    observations: cleanText(row.observations) || null,
+  }));
+}
+
+export async function loadContractorHistory(contractorId: number): Promise<ContractorHistory[]> {
+  const result = await supabase.rpc("get_contractor_history", {
+    p_contractor_id: contractorId,
+  });
+  fail(result.error);
+  return (result.data ?? []).map((row: any) => ({
+    assignmentId: row.assignment_id,
+    operationDate: row.operation_date,
+    clientName: cleanText(row.client_name),
+    areaName: cleanText(row.area_name),
+    attendanceStatus: cleanText(row.attendance_status) || null,
+    extraHours: Number(row.extra_hours ?? 0),
+    observations: cleanText(row.observations) || null,
+  }));
+}
+
+export async function createOperation(input: {
+  date: string;
+  clientId: number;
+  areaId: number;
+  contractorIds: number[];
+  clientServiceId: number;
+}) {
+  const result = await supabase.rpc("create_operation_with_assignments", {
+    p_operation_date: input.date,
+    p_client_id: input.clientId,
+    p_area_id: input.areaId,
+    p_assignments: input.contractorIds.map((contractorId) => ({
+      contractor_id: contractorId,
+      client_service_id: input.clientServiceId,
+      planned_quantity: 1,
+    })),
+  });
+  fail(result.error);
+  return result.data as number;
+}
+
+export async function finalizeOperation(
+  operationId: number,
+  assignments: Assignment[],
+  observations: string,
+) {
+  const result = await supabase.rpc("finalize_operation", {
+    p_operation_id: operationId,
+    p_assignments: assignments.map((assignment) => ({
+      assignment_id: assignment.assignmentId,
+      attendance_status_id: assignment.attendanceStatus === "AUSENTE" ? 2 : 1,
+      worked_quantity: assignment.attendanceStatus === "AUSENTE" ? 0 : 1,
+      extra_hours: assignment.extraHours,
+      observations: assignment.observations ?? "",
+    })),
+    p_observations: observations || null,
+  });
+  fail(result.error);
+}
+
+export async function reviewOperation(
+  operationId: number,
+  decision: "CERRADO" | "CAMBIOS_SOLICITADOS",
+  observations?: string,
+) {
+  const result = await supabase.rpc("review_operation", {
+    p_operation_id: operationId,
+    p_decision: decision,
+    p_observations: observations ?? null,
+  });
+  fail(result.error);
+}
+
+export async function createPersonnelRequest(input: {
+  clientId: number;
+  areaId: number;
+  quantity: number;
+  description: string;
+  requiredDate: string;
+  userId: string;
+}) {
+  const result = await supabase.from("personnel_request").insert({
+    client_id: input.clientId,
+    area_id: input.areaId,
+    required_quantity: input.quantity,
+    description: input.description,
+    required_date: input.requiredDate,
+    status: "ABIERTA",
+    created_by: input.userId,
+  });
+  fail(result.error);
+}
+
+export async function cancelPersonnelRequest(requestId: number) {
+  const result = await supabase
+    .from("personnel_request")
+    .update({ status: "CANCELADA" })
+    .eq("id", requestId)
+    .eq("status", "ABIERTA");
+  fail(result.error);
+}
+
+export async function setUserActive(userId: string, active: boolean) {
+  const result = await supabase
+    .from("user_profiles")
+    .update({ is_active: active })
+    .eq("id", userId);
+  fail(result.error);
+}
+
+export async function setUserRole(userId: string, roleName: string) {
+  const roleIds: Record<string, number> = {
+    Administrador: 1,
+    Coordinador: 2,
+    Cliente: 3,
+    "Director/Gerente": 4,
+  };
+  const roleId = roleIds[roleName];
+  if (!roleId) throw new Error("Perfil no válido.");
+
+  const insertResult = await supabase
+    .from("user_roles")
+    .upsert({ user_id: userId, role_id: roleId }, { onConflict: "user_id,role_id" });
+  fail(insertResult.error);
+
+  const deleteResult = await supabase
+    .from("user_roles")
+    .delete()
+    .eq("user_id", userId)
+    .neq("role_id", roleId);
+  fail(deleteResult.error);
+}
+
+export async function toggleUserClient(
+  userId: string,
+  clientId: number,
+  assigned: boolean,
+) {
+  const result = assigned
+    ? await supabase
+        .from("user_clients")
+        .upsert({ user_id: userId, client_id: clientId }, { onConflict: "user_id,client_id" })
+    : await supabase
+        .from("user_clients")
+        .delete()
+        .eq("user_id", userId)
+        .eq("client_id", clientId);
+  fail(result.error);
+}

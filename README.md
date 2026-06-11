@@ -1,27 +1,49 @@
 # Support Colombia Mobile
 
-Prototipo navegable de alta fidelidad para la operación de personal temporal de Support Colombia.
+Aplicación Expo para la operación de personal temporal de Support Colombia, conectada a Supabase.
 
-## Ejecutar
+## Configuración
 
 ```bash
 npm install
-npx expo start
+copy .env.example .env
+npm start
 ```
 
-Abra el proyecto con Expo Go en Android o iOS. Para ejecutar la versión web:
+Configure en `.env` la URL del proyecto y su clave publicable. El archivo `.env` está excluido de Git.
+
+## Alcance V1
+
+- Autenticación con correo y contraseña, sesión persistente y recuperación por correo.
+- Navegación por rol: Administrador, Director, Coordinador y Cliente.
+- Operaciones, registro inicial/final, revisión y aprobación.
+- Solicitudes de personal.
+- Personal, perfil e historial del contratista.
+- Estadísticas calculadas desde los datos operativos.
+- Administración básica de usuarios existentes.
+- RLS por usuario activo, rol y clientes asignados.
+
+## Base de datos
+
+Las migraciones se encuentran en `supabase/migrations`:
+
+- `202606110001_support_colombia_v1.sql`: esquema mínimo, RLS, RPC y semilla.
+- `202606110002_fix_demo_text.sql`: normalización de textos de demostración.
+- `202606110003_harden_functions_and_text.sql`: permisos de funciones y normalización ASCII-safe.
+
+## Cuentas demo
+
+- `coordinador.demo@supportcolombia.com`
+- `cliente.demo@supportcolombia.com`
+- `director.demo@supportcolombia.com`
+- `admin.demo@supportcolombia.com`
+
+La contraseña temporal se entrega fuera del repositorio.
+
+## Verificación
 
 ```bash
-npm run web
+npm run typecheck
+npm run export:web
+npx expo install --check
 ```
-
-## Perfiles de demostración
-
-La pantalla de acceso permite seleccionar el perfil antes de iniciar sesión:
-
-- Coordinador: operaciones, registro inicial/final, solicitudes, personal y estadísticas.
-- Cliente: operación propia, creación de solicitudes y estadísticas.
-- Director: revisión, aprobación o solicitud de cambios y estadísticas globales.
-- Administrador: gestión visual de usuarios y accesos.
-
-La autenticación y los datos son simulados. El prototipo está preparado para conectar sus acciones a una API.
