@@ -3,7 +3,9 @@ import type {
   AdminUser,
   AppData,
   Assignment,
+  ClientContractor,
   Contractor,
+  ContractorDocument,
   ContractorHistory,
   Operation,
   PersonnelRequest,
@@ -148,6 +150,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
   }));
 
   let contractors: Contractor[] = [];
+  let clientContractors: ClientContractor[] = [];
   if (context.roleCode !== "CLIENT") {
     const [contractorResult, assignmentResult] = await Promise.all([
       supabase
@@ -204,6 +207,25 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
         lastDate: latest?.operation_date ?? null,
       };
     });
+  } else {
+    const result = await supabase.rpc("get_client_contractors");
+    fail(result.error);
+    clientContractors = (result.data ?? []).map((row: any) => {
+      const name = cleanText(row.first_name);
+      const lastName = cleanText(row.last_name);
+      return {
+        id: Number(row.contractor_id),
+        name,
+        lastName,
+        fullName: `${name} ${lastName}`.trim(),
+        initials: `${name[0] ?? ""}${lastName[0] ?? ""}`.toUpperCase(),
+        document: cleanText(row.document_number),
+        rh: cleanText(row.rh) || null,
+        civilState: cleanText(row.civil_state) || "Sin registrar",
+        lastArea: cleanText(row.last_area) || "Sin área",
+        lastDate: row.last_operation_date,
+      };
+    });
   }
 
   let users: AdminUser[] = [];
@@ -246,6 +268,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
     operations,
     requests,
     contractors,
+    clientContractors,
     areas: (common[3].data ?? []).map((area: any) => ({
       id: area.id,
       name: cleanText(area.name),
@@ -296,6 +319,61 @@ export async function loadContractorHistory(contractorId: number): Promise<Contr
   }));
 }
 
+export async function loadClientContractorHistory(contractorId: number): Promise<ContractorHistory[]> {
+  const result = await supabase.rpc("get_client_contractor_history", {
+    p_contractor_id: contractorId,
+  });
+  fail(result.error);
+  return (result.data ?? []).map((row: any) => ({
+    assignmentId: row.assignment_id,
+    operationDate: row.operation_date,
+    clientName: cleanText(row.client_name),
+    areaName: cleanText(row.area_name),
+    attendanceStatus: cleanText(row.attendance_status) || null,
+    extraHours: Number(row.extra_hours ?? 0),
+    observations: null,
+  }));
+}
+
+export async function loadContractorDocuments(
+  contractorId: number,
+): Promise<ContractorDocument[]> {
+  const result = await supabase.rpc("get_contractor_documents", {
+    p_contractor_id: contractorId,
+  });
+  fail(result.error);
+  return (result.data ?? []).map((row: any) => ({
+    id: row.document_id,
+    typeCode: row.document_type_code,
+    typeName: cleanText(row.document_type_name),
+    fileId: row.file_id,
+    provider: row.provider,
+    bucket: row.bucket,
+    path: row.path,
+    originalName: cleanText(row.original_name) || "documento.pdf",
+    mimeType: row.mime_type || "application/pdf",
+    sizeBytes: row.size_bytes === null ? null : Number(row.size_bytes),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+}
+
+export async function createContractorDocumentSignedUrl(
+  document: ContractorDocument,
+): Promise<string> {
+  if (document.provider !== "supabase") {
+    throw new Error("El proveedor de este documento no está disponible en la aplicación.");
+  }
+  const result = await supabase.storage
+    .from(document.bucket)
+    .createSignedUrl(document.path, 300);
+  fail(result.error);
+  if (!result.data?.signedUrl) {
+    throw new Error("No fue posible generar el acceso temporal al documento.");
+  }
+  return result.data.signedUrl;
+}
+
 export async function createOperation(input: {
   date: string;
   clientId: number;
@@ -325,7 +403,8 @@ export async function finalizeOperation(
   const result = await supabase.rpc("finalize_operation", {
     p_operation_id: operationId,
     p_assignments: assignments.map((assignment) => ({
-      assignment_id: assignment.assignmentId,
+      assignment_id: assignment.assignmentId > 0 ? assignment.assignmentId : null,
+      contractor_id: assignment.contractorId,
       attendance_status_id: assignment.attendanceStatus === "AUSENTE" ? 2 : 1,
       worked_quantity: assignment.attendanceStatus === "AUSENTE" ? 0 : 1,
       extra_hours: assignment.extraHours,
@@ -334,6 +413,14 @@ export async function finalizeOperation(
     p_observations: observations || null,
   });
   fail(result.error);
+}
+
+export async function loadAvailableContractorIds(operationId: number): Promise<number[]> {
+  const result = await supabase.rpc("get_available_contractors_for_operation", {
+    p_operation_id: operationId,
+  });
+  fail(result.error);
+  return (result.data ?? []).map((row: any) => Number(row.contractor_id));
 }
 
 export async function reviewOperation(

@@ -19,14 +19,19 @@ import { LinearGradient } from "expo-linear-gradient";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import type { Session } from "@supabase/supabase-js";
 
+import PdfViewer from "./components/pdf-viewer";
 import { supabase } from "./lib/supabase";
 import {
   cancelPersonnelRequest,
+  createContractorDocumentSignedUrl,
   createOperation,
   createPersonnelRequest,
   finalizeOperation,
   loadAppData,
+  loadClientContractorHistory,
+  loadContractorDocuments,
   loadContractorHistory,
+  loadAvailableContractorIds,
   loadOperationAssignments,
   loadUserContext,
   reviewOperation,
@@ -37,7 +42,9 @@ import {
 import type {
   AppData,
   Assignment,
+  ClientContractor,
   Contractor,
+  ContractorDocument,
   ContractorHistory,
   Operation,
   OperationStatus,
@@ -55,6 +62,7 @@ type Screen =
   | "new-request"
   | "staff"
   | "contractor"
+  | "document-preview"
   | "history-detail"
   | "statistics"
   | "users";
@@ -73,6 +81,7 @@ const C = {
   greenBg: "#E8F7F0",
   yellow: "#9A6B00",
   yellowBg: "#FFF5D6",
+  orangeBg: "#FFF0E8",
   red: "#C93636",
   redBg: "#FDECEC",
   blueBg: "#EAF0FF",
@@ -83,6 +92,7 @@ const EMPTY_DATA: AppData = {
   operations: [],
   requests: [],
   contractors: [],
+  clientContractors: [],
   areas: [],
   services: [],
   attendanceStatuses: [],
@@ -99,10 +109,12 @@ const tabsByRole: Record<Role, { label: string; icon: IconName; screen: Screen }
   Cliente: [
     { label: "Operación", icon: "briefcase-outline", screen: "operations" },
     { label: "Solicitudes", icon: "document-text-outline", screen: "requests" },
+    { label: "Personal", icon: "people-outline", screen: "staff" },
     { label: "Estadísticas", icon: "bar-chart-outline", screen: "statistics" },
   ],
   Director: [
     { label: "Operación", icon: "briefcase-outline", screen: "operations" },
+    { label: "Personal", icon: "people-outline", screen: "staff" },
     { label: "Estadísticas", icon: "bar-chart-outline", screen: "statistics" },
   ],
   Administrador: [
@@ -116,6 +128,7 @@ const detailScreens: Screen[] = [
   "final",
   "new-request",
   "contractor",
+  "document-preview",
   "history-detail",
 ];
 
@@ -129,6 +142,24 @@ function todayIso() {
   const now = new Date();
   const offset = now.getTimezoneOffset() * 60_000;
   return new Date(now.getTime() - offset).toISOString().slice(0, 10);
+}
+
+function dateToIso(value: Date) {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function isoToDate(value: string) {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(year, month - 1, day);
+}
+
+function addDays(value: Date, days: number) {
+  const result = new Date(value);
+  result.setDate(result.getDate() + days);
+  return result;
 }
 
 function errorMessage(error: unknown) {
@@ -155,6 +186,7 @@ export default function SupportApp() {
   const [activeTab, setActiveTab] = useState<Screen>("operations");
   const [selectedOperationId, setSelectedOperationId] = useState<number | null>(null);
   const [selectedContractorId, setSelectedContractorId] = useState<number | null>(null);
+  const [selectedDocument, setSelectedDocument] = useState<ContractorDocument | null>(null);
   const [selectedHistory, setSelectedHistory] = useState<ContractorHistory | null>(null);
   const mountedRef = useRef(true);
   const hydrationIdRef = useRef(0);
@@ -260,6 +292,10 @@ export default function SupportApp() {
     setSelectedContractorId(id);
     navigate("contractor");
   };
+  const openDocument = (document: ContractorDocument) => {
+    setSelectedDocument(document);
+    navigate("document-preview");
+  };
 
   if (booting) return <CenteredState label="Cargando Support Colombia..." />;
   if (!session || !context) {
@@ -270,6 +306,8 @@ export default function SupportApp() {
   const selectedOperation = data.operations.find((item) => item.id === selectedOperationId) ?? null;
   const selectedContractor =
     data.contractors.find((item) => item.id === selectedContractorId) ?? null;
+  const selectedClientContractor =
+    data.clientContractors.find((item) => item.id === selectedContractorId) ?? null;
 
   return (
     <SafeAreaProvider>
@@ -279,7 +317,7 @@ export default function SupportApp() {
           context={context}
           screen={screen}
           canGoBack={!showTabs}
-          onBack={() => navigate(activeTab)}
+          onBack={() => navigate(screen === "document-preview" ? "contractor" : activeTab)}
           onLogout={() => supabase.auth.signOut()}
         />
         {error ? (
@@ -294,16 +332,13 @@ export default function SupportApp() {
                 onRefresh={refresh}
                 onOpen={openOperation}
                 onInitial={() => navigate("initial")}
-                onFinal={(id) => {
-                  setSelectedOperationId(id);
-                  navigate("final");
-                }}
               />
             )}
             {screen === "operation-detail" && selectedOperation && (
               <OperationDetail
                 context={context}
                 operation={selectedOperation}
+                onFinal={() => navigate("final")}
                 onChanged={async () => {
                   await refresh();
                   navigate("operations");
@@ -323,6 +358,7 @@ export default function SupportApp() {
             {screen === "final" && selectedOperation && (
               <FinalOperation
                 operation={selectedOperation}
+                contractors={data.contractors}
                 onSaved={async () => {
                   await refresh();
                   navigate("operations");
@@ -350,22 +386,44 @@ export default function SupportApp() {
               />
             )}
             {screen === "staff" && (
-              <Staff contractors={data.contractors} onOpen={openContractor} />
+              context.role === "Cliente" ? (
+                <ClientStaff contractors={data.clientContractors} onOpen={openContractor} />
+              ) : (
+                <Staff contractors={data.contractors} onOpen={openContractor} />
+              )
             )}
-            {screen === "contractor" && selectedContractor && (
-              <ContractorProfile
-                contractor={selectedContractor}
+            {screen === "contractor" && context.role === "Cliente" && selectedClientContractor && (
+              <ClientContractorProfile
+                contractor={selectedClientContractor}
+                onDocument={openDocument}
                 onHistory={(history) => {
                   setSelectedHistory(history);
                   navigate("history-detail");
                 }}
               />
             )}
+            {screen === "contractor" && context.role !== "Cliente" && selectedContractor && (
+              <ContractorProfile
+                contractor={selectedContractor}
+                onDocument={openDocument}
+                onHistory={(history) => {
+                  setSelectedHistory(history);
+                  navigate("history-detail");
+                }}
+              />
+            )}
+            {screen === "document-preview" && selectedDocument && (
+              <DocumentPreview document={selectedDocument} />
+            )}
             {screen === "history-detail" && selectedHistory && (
-              <HistoryDetail history={selectedHistory} />
+              context.role === "Cliente" ? (
+                <ClientHistoryDetail history={selectedHistory} />
+              ) : (
+                <HistoryDetail history={selectedHistory} />
+              )
             )}
             {screen === "statistics" && (
-              <Statistics role={context.role} data={data} />
+              <Statistics context={context} data={data} />
             )}
             {screen === "users" && (
               <Users currentUserId={context.id} data={data} onChanged={refresh} />
@@ -489,6 +547,7 @@ function Header({
     "new-request": "Nueva solicitud",
     staff: "Personal",
     contractor: "Perfil del contratista",
+    "document-preview": "Documento del contratista",
     "history-detail": "Detalle del turno",
     statistics: "Estadísticas",
     users: "Administración de usuarios",
@@ -523,7 +582,6 @@ function Operations({
   onRefresh,
   onOpen,
   onInitial,
-  onFinal,
 }: {
   context: UserContext;
   operations: Operation[];
@@ -531,14 +589,19 @@ function Operations({
   onRefresh: () => void;
   onOpen: (id: number) => void;
   onInitial: () => void;
-  onFinal: (id: number) => void;
 }) {
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const [calendarVisible, setCalendarVisible] = useState(false);
   const pending = operations.filter((item) => item.status === "PENDIENTE");
-  const editable = operations.find(
-    (item) => item.status === "EN_CURSO" || item.status === "CAMBIOS_SOLICITADOS",
+  const today = todayIso();
+  const threeDayStart = dateToIso(addDays(isoToDate(today), -2));
+  const visibleOperations = operations.filter((operation) =>
+    selectedDate
+      ? operation.date === selectedDate
+      : operation.date >= threeDayStart && operation.date <= today,
   );
   const totalToday = operations
-    .filter((item) => item.date === todayIso())
+    .filter((item) => item.date === today)
     .reduce((total, item) => total + item.people, 0);
   return (
     <Page loading={loading} onRefresh={onRefresh}>
@@ -555,9 +618,13 @@ function Operations({
       </View>
       {context.role !== "Cliente" && (
         <View style={styles.kpiRow}>
+          <Kpi
+            value={String(operations.filter((item) => item.status === "EN_CURSO").length)}
+            label="Operaciones En curso"
+            icon="time"
+          />
+          <Kpi value={String(pending.length)} label="Operaciones Pendientes" icon="alert-circle" />
           <Kpi value={String(totalToday)} label="Personal hoy" icon="people" />
-          <Kpi value={String(operations.filter((item) => item.status === "EN_CURSO").length)} label="En curso" icon="time" />
-          <Kpi value={String(pending.length)} label="Pendientes" icon="alert-circle" />
         </View>
       )}
       {context.role === "Director" && pending.length > 0 && (
@@ -571,21 +638,32 @@ function Operations({
         </Pressable>
       )}
       {context.role === "Coordinador" && (
-        <View style={styles.actionRow}>
-          <SecondaryButton label="Registro inicial" icon="add-circle-outline" onPress={onInitial} />
-          <PrimaryButton
-            label="Registro final"
-            icon="checkmark-circle-outline"
-            disabled={!editable}
-            onPress={() => editable && onFinal(editable.id)}
-          />
-        </View>
+        <SecondaryButton label="Registro inicial" icon="add-circle-outline" onPress={onInitial} />
       )}
-      <SectionTitle title="Historial de operaciones" action={`${operations.length} registros`} />
-      {operations.length === 0 ? (
-        <EmptyState icon="briefcase-outline" text="No hay operaciones para mostrar." />
+      <View style={styles.historyHeader}>
+        <View style={styles.flex}>
+          <Text style={styles.sectionTitle}>Historial de operaciones</Text>
+          <Text style={styles.caption}>{visibleOperations.length} registros</Text>
+        </View>
+        <Pressable style={styles.dateFilterButton} onPress={() => setCalendarVisible(true)}>
+          <Ionicons name="calendar-outline" size={17} color={C.navy} />
+          <Text style={styles.dateFilterText}>
+            {selectedDate ? formatDate(selectedDate) : "Últimos 3 días"}
+          </Text>
+          <Ionicons name="chevron-down" size={15} color={C.navy} />
+        </Pressable>
+      </View>
+      {visibleOperations.length === 0 ? (
+        <EmptyState
+          icon="calendar-outline"
+          text={
+            selectedDate
+              ? `No hay operaciones para el ${formatDate(selectedDate)}.`
+              : "No hay operaciones registradas en los últimos 3 días."
+          }
+        />
       ) : (
-        operations.map((operation) => (
+        visibleOperations.map((operation) => (
           <OperationCard
             key={operation.id}
             operation={operation}
@@ -594,7 +672,146 @@ function Operations({
           />
         ))
       )}
+      <CalendarModal
+        visible={calendarVisible}
+        selectedDate={selectedDate}
+        onClose={() => setCalendarVisible(false)}
+        onSelect={(date) => {
+          setSelectedDate(date);
+          setCalendarVisible(false);
+        }}
+        onReset={() => {
+          setSelectedDate(null);
+          setCalendarVisible(false);
+        }}
+      />
     </Page>
+  );
+}
+
+function CalendarModal({
+  visible,
+  selectedDate,
+  title = "Filtrar por fecha",
+  subtitle = "Selecciona el día que quieres visualizar.",
+  resetLabel = "Mostrar últimos 3 días",
+  onClose,
+  onSelect,
+  onReset,
+}: {
+  visible: boolean;
+  selectedDate: string | null;
+  title?: string;
+  subtitle?: string;
+  resetLabel?: string;
+  onClose: () => void;
+  onSelect: (date: string) => void;
+  onReset?: () => void;
+}) {
+  const initialDate = selectedDate ? isoToDate(selectedDate) : isoToDate(todayIso());
+  const [visibleMonth, setVisibleMonth] = useState(
+    new Date(initialDate.getFullYear(), initialDate.getMonth(), 1),
+  );
+
+  useEffect(() => {
+    if (visible) {
+      const date = selectedDate ? isoToDate(selectedDate) : isoToDate(todayIso());
+      setVisibleMonth(new Date(date.getFullYear(), date.getMonth(), 1));
+    }
+  }, [selectedDate, visible]);
+
+  const monthLabel = new Intl.DateTimeFormat("es-CO", {
+    month: "long",
+    year: "numeric",
+  }).format(visibleMonth);
+  const firstWeekday = visibleMonth.getDay();
+  const daysInMonth = new Date(
+    visibleMonth.getFullYear(),
+    visibleMonth.getMonth() + 1,
+    0,
+  ).getDate();
+  const cells = Array.from({ length: firstWeekday + daysInMonth }, (_, index) =>
+    index < firstWeekday ? null : index - firstWeekday + 1,
+  );
+
+  const moveMonth = (offset: number) => {
+    setVisibleMonth(
+      new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() + offset, 1),
+    );
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.calendarCard}>
+          <View style={styles.between}>
+            <View>
+              <Text style={styles.formTitle}>{title}</Text>
+              <Text style={styles.caption}>{subtitle}</Text>
+            </View>
+            <Pressable style={styles.iconButton} onPress={onClose}>
+              <Ionicons name="close" size={20} color={C.ink} />
+            </Pressable>
+          </View>
+          <View style={styles.calendarNavigation}>
+            <Pressable style={styles.calendarArrow} onPress={() => moveMonth(-1)}>
+              <Ionicons name="chevron-back" size={20} color={C.navy} />
+            </Pressable>
+            <Text style={styles.calendarMonth}>
+              {monthLabel.charAt(0).toUpperCase() + monthLabel.slice(1)}
+            </Text>
+            <Pressable style={styles.calendarArrow} onPress={() => moveMonth(1)}>
+              <Ionicons name="chevron-forward" size={20} color={C.navy} />
+            </Pressable>
+          </View>
+          <View style={styles.calendarGrid}>
+            {["D", "L", "M", "M", "J", "V", "S"].map((day, index) => (
+              <Text key={`${day}-${index}`} style={styles.calendarWeekday}>
+                {day}
+              </Text>
+            ))}
+            {cells.map((day, index) => {
+              if (!day) {
+                return <View key={`empty-${index}`} style={styles.calendarDay} />;
+              }
+              const isoDate = dateToIso(
+                new Date(visibleMonth.getFullYear(), visibleMonth.getMonth(), day),
+              );
+              const selected = isoDate === selectedDate;
+              const isToday = isoDate === todayIso();
+              return (
+                <Pressable
+                  key={isoDate}
+                  style={[
+                    styles.calendarDay,
+                    isToday && styles.calendarToday,
+                    selected && styles.calendarDaySelected,
+                  ]}
+                  onPress={() => onSelect(isoDate)}
+                >
+                  <Text
+                    style={[
+                      styles.calendarDayText,
+                      isToday && styles.calendarTodayText,
+                      selected && styles.calendarDayTextSelected,
+                    ]}
+                  >
+                    {day}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          {onReset && (
+            <SecondaryButton
+              label={resetLabel}
+              icon="refresh-outline"
+              onPress={onReset}
+            />
+          )}
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -629,10 +846,12 @@ function OperationCard({
 function OperationDetail({
   context,
   operation,
+  onFinal,
   onChanged,
 }: {
   context: UserContext;
   operation: Operation;
+  onFinal: () => void;
   onChanged: () => void;
 }) {
   const [assignments, setAssignments] = useState<Assignment[]>([]);
@@ -710,6 +929,14 @@ function OperationDetail({
       )}
       <SectionTitle title="Observaciones" />
       <Notice icon="chatbubble-ellipses-outline" text={operation.observations || "Sin observaciones."} />
+      {context.role === "Coordinador" &&
+        (operation.status === "EN_CURSO" || operation.status === "CAMBIOS_SOLICITADOS") && (
+          <PrimaryButton
+            label="Registro final"
+            icon="checkmark-circle-outline"
+            onPress={onFinal}
+          />
+        )}
       {context.role === "Director" && operation.status === "PENDIENTE" && (
         <View style={styles.actionRow}>
           <SecondaryButton label="Solicitar cambios" icon="refresh-outline" onPress={() => setReviewing(true)} destructive />
@@ -768,25 +995,18 @@ function InitialOperation({
   const [clientId, setClientId] = useState(firstClient?.id ?? 0);
   const availableAreas = data.areas.filter((area) => area.clientId === clientId);
   const [areaId, setAreaId] = useState(availableAreas[0]?.id ?? 0);
-  const [contractorIndex, setContractorIndex] = useState(0);
+  const [contractorId, setContractorId] = useState(data.contractors[0]?.id ?? 0);
+  const [openSelector, setOpenSelector] = useState<"client" | "area" | "contractor" | null>(null);
   const [added, setAdded] = useState<Contractor[]>([]);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     const nextArea = data.areas.find((area) => area.clientId === clientId);
-    if (nextArea) setAreaId(nextArea.id);
+    setAreaId(nextArea?.id ?? 0);
   }, [clientId, data.areas]);
 
-  const selectedContractor = data.contractors[contractorIndex];
+  const selectedContractor = data.contractors.find((item) => item.id === contractorId);
   const service = data.services.find((item) => item.areaId === areaId);
-  const cycleClient = () => {
-    const index = context.clients.findIndex((item) => item.id === clientId);
-    setClientId(context.clients[(index + 1) % context.clients.length]?.id ?? clientId);
-  };
-  const cycleArea = () => {
-    const index = availableAreas.findIndex((item) => item.id === areaId);
-    setAreaId(availableAreas[(index + 1) % availableAreas.length]?.id ?? areaId);
-  };
 
   const save = async () => {
     if (!clientId || !areaId || !service || added.length === 0) {
@@ -815,13 +1035,25 @@ function InitialOperation({
     <Page>
       <FormCard title="Información de la operación">
         <Choice label="Fecha" value={formatDate(todayIso())} icon="calendar-outline" disabled />
-        <Choice label="Cliente *" value={context.clients.find((item) => item.id === clientId)?.name ?? "Sin cliente"} icon="business-outline" onPress={cycleClient} />
-        <Choice label="Área *" value={availableAreas.find((item) => item.id === areaId)?.name ?? "Sin área"} icon="location-outline" onPress={cycleArea} />
+        <Choice
+          label="Cliente *"
+          value={context.clients.find((item) => item.id === clientId)?.name ?? "Selecciona un cliente"}
+          icon="business-outline"
+          onPress={() => setOpenSelector("client")}
+        />
+        <Choice
+          label="Área *"
+          value={availableAreas.find((item) => item.id === areaId)?.name ?? "Selecciona un área"}
+          icon="location-outline"
+          disabled={!clientId || availableAreas.length === 0}
+          onPress={() => setOpenSelector("area")}
+        />
         <Choice
           label="Contratista *"
-          value={selectedContractor?.fullName ?? "Sin contratistas"}
+          value={selectedContractor?.fullName ?? "Selecciona un contratista"}
           icon="person-outline"
-          onPress={() => setContractorIndex((value) => (value + 1) % Math.max(data.contractors.length, 1))}
+          disabled={data.contractors.length === 0}
+          onPress={() => setOpenSelector("contractor")}
         />
         <SecondaryButton
           label="Agregar contratista"
@@ -833,7 +1065,7 @@ function InitialOperation({
           }}
         />
       </FormCard>
-      <SectionTitle title={`Personal agregado (${added.length})`} action="Máximo 35% de pantalla" />
+      <SectionTitle title={`Personal agregado (${added.length})`} />
       <View style={styles.boundedList}>
         <ScrollView nestedScrollEnabled>
           {added.map((contractor) => (
@@ -853,30 +1085,83 @@ function InitialOperation({
         </ScrollView>
       </View>
       <PrimaryButton label={saving ? "Guardando..." : "Guardar registro inicial"} icon="save-outline" disabled={saving} onPress={save} />
+      <DropdownModal
+        visible={openSelector === "client"}
+        title="Seleccionar cliente"
+        options={context.clients}
+        selectedId={clientId}
+        onClose={() => setOpenSelector(null)}
+        onSelect={(id) => {
+          setClientId(id);
+          setOpenSelector(null);
+        }}
+      />
+      <DropdownModal
+        visible={openSelector === "area"}
+        title="Seleccionar área"
+        options={availableAreas}
+        selectedId={areaId}
+        onClose={() => setOpenSelector(null)}
+        onSelect={(id) => {
+          setAreaId(id);
+          setOpenSelector(null);
+        }}
+      />
+      <DropdownModal
+        visible={openSelector === "contractor"}
+        title="Seleccionar contratista"
+        options={data.contractors.map((contractor) => ({
+          id: contractor.id,
+          name: contractor.fullName,
+          detail: contractor.document,
+        }))}
+        selectedId={contractorId}
+        searchable
+        searchPlaceholder="Buscar contratista por nombre"
+        onClose={() => setOpenSelector(null)}
+        onSelect={(id) => {
+          setContractorId(id);
+          setOpenSelector(null);
+        }}
+      />
     </Page>
   );
 }
 
 function FinalOperation({
   operation,
+  contractors,
   onSaved,
 }: {
   operation: Operation;
+  contractors: Contractor[];
   onSaved: () => void;
 }) {
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [observations, setObservations] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [availableContractorIds, setAvailableContractorIds] = useState<number[]>([]);
+  const [contractorSelectorVisible, setContractorSelectorVisible] = useState(false);
+
+  const loadAssignments = useCallback(async () => {
+    const rows = await loadOperationAssignments(operation.id);
+    setAssignments(
+      rows.map((row) => ({
+        ...row,
+        attendanceStatus: row.attendanceStatus ?? "ASISTIÓ",
+      })),
+    );
+  }, [operation.id]);
 
   useEffect(() => {
-    loadOperationAssignments(operation.id)
-      .then((rows) =>
-        setAssignments(rows.map((row) => ({ ...row, attendanceStatus: row.attendanceStatus ?? "ASISTIÓ" }))),
-      )
+    Promise.all([
+      loadAssignments(),
+      loadAvailableContractorIds(operation.id).then(setAvailableContractorIds),
+    ])
       .catch((cause) => Alert.alert("No fue posible cargar", errorMessage(cause)))
       .finally(() => setLoading(false));
-  }, [operation.id]);
+  }, [loadAssignments, operation.id]);
 
   const updateAssignment = (id: number, patch: Partial<Assignment>) => {
     setAssignments((rows) =>
@@ -922,8 +1207,22 @@ function FinalOperation({
             <Initials name={assignment.contractorName} />
             <View style={styles.flex}>
               <Text style={styles.personName}>{assignment.contractorName}</Text>
-              <Text style={styles.caption}>{assignment.areaName}</Text>
+              <Text style={styles.caption}>
+                {assignment.areaName}
+                {assignment.assignmentId < 0 ? " · Añadido durante la jornada" : ""}
+              </Text>
             </View>
+            {assignment.assignmentId < 0 && (
+              <Pressable
+                onPress={() =>
+                  setAssignments((rows) =>
+                    rows.filter((row) => row.assignmentId !== assignment.assignmentId),
+                  )
+                }
+              >
+                <Ionicons name="trash-outline" size={20} color={C.red} />
+              </Pressable>
+            )}
           </View>
           <Pressable
             style={styles.between}
@@ -960,6 +1259,13 @@ function FinalOperation({
           )}
         </View>
       ))}
+      {!loading && (
+        <SecondaryButton
+          label="Añadir contratista"
+          icon="person-add-outline"
+          onPress={() => setContractorSelectorVisible(true)}
+        />
+      )}
       <FormCard title="Observaciones generales">
         <TextInput
           value={observations}
@@ -971,6 +1277,44 @@ function FinalOperation({
         />
       </FormCard>
       <PrimaryButton label={saving ? "Enviando..." : "Enviar para aprobación"} icon="send" disabled={saving || loading} onPress={save} />
+      <DropdownModal
+        visible={contractorSelectorVisible}
+        title="Añadir contratista"
+        options={contractors
+          .filter(
+            (contractor) =>
+              contractor.active &&
+              availableContractorIds.includes(contractor.id) &&
+              !assignments.some((assignment) => assignment.contractorId === contractor.id),
+          )
+          .map((contractor) => ({
+            id: contractor.id,
+            name: contractor.fullName,
+            detail: contractor.document,
+          }))}
+        selectedId={0}
+        searchable
+        searchPlaceholder="Buscar contratista por nombre"
+        onClose={() => setContractorSelectorVisible(false)}
+        onSelect={(contractorId) => {
+          setContractorSelectorVisible(false);
+          const contractor = contractors.find((item) => item.id === contractorId);
+          if (!contractor) return;
+          setAssignments((rows) => [
+            ...rows,
+            {
+              assignmentId: -contractor.id,
+              contractorId: contractor.id,
+              contractorName: contractor.fullName,
+              areaName: operation.area,
+              attendanceStatus: "ASISTIÓ",
+              workedQuantity: 1,
+              extraHours: 0,
+              observations: null,
+            },
+          ]);
+        }}
+      />
     </Page>
   );
 }
@@ -1107,6 +1451,54 @@ function NewRequest({
   );
 }
 
+function ClientStaff({
+  contractors,
+  onOpen,
+}: {
+  contractors: ClientContractor[];
+  onOpen: (id: number) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const visible = contractors.filter((contractor) =>
+    `${contractor.fullName} ${contractor.document}`.toLowerCase().includes(query.toLowerCase()),
+  );
+  return (
+    <Page>
+      <View>
+        <Text style={styles.eyebrow}>PERSONAL DE TU OPERACIÓN</Text>
+        <Text style={styles.greeting}>Contratistas</Text>
+        <Text style={styles.subtitle}>
+          {contractors.length} contratistas con historial en tu empresa
+        </Text>
+      </View>
+      <Input
+        icon="search-outline"
+        value={query}
+        onChangeText={setQuery}
+        placeholder="Nombre o cédula"
+      />
+      {visible.length === 0 ? (
+        <EmptyState icon="people-outline" text="No encontramos contratistas relacionados con tu empresa." />
+      ) : (
+        visible.map((contractor) => (
+          <Pressable key={contractor.id} style={styles.card} onPress={() => onOpen(contractor.id)}>
+            <View style={styles.cardTop}>
+              <Initials name={contractor.fullName} />
+              <View style={styles.flex}>
+                <Text style={styles.cardTitle}>{contractor.fullName}</Text>
+                <Text style={styles.caption}>CC {contractor.document}</Text>
+                <Text style={styles.cardMeta}>{contractor.lastArea}</Text>
+                <Text style={styles.caption}>{formatDate(contractor.lastDate)}</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color={C.muted} />
+            </View>
+          </Pressable>
+        ))
+      )}
+    </Page>
+  );
+}
+
 function Staff({ contractors, onOpen }: { contractors: Contractor[]; onOpen: (id: number) => void }) {
   const [query, setQuery] = useState("");
   const visible = contractors.filter((contractor) =>
@@ -1139,11 +1531,75 @@ function Staff({ contractors, onOpen }: { contractors: Contractor[]; onOpen: (id
   );
 }
 
+function ClientContractorProfile({
+  contractor,
+  onDocument,
+  onHistory,
+}: {
+  contractor: ClientContractor;
+  onDocument: (document: ContractorDocument) => void;
+  onHistory: (history: ContractorHistory) => void;
+}) {
+  const [history, setHistory] = useState<ContractorHistory[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    loadClientContractorHistory(contractor.id)
+      .then(setHistory)
+      .catch((cause) => Alert.alert("No fue posible cargar", errorMessage(cause)))
+      .finally(() => setLoading(false));
+  }, [contractor.id]);
+
+  return (
+    <Page>
+      <LinearGradient colors={[C.navy, C.navy2]} style={styles.profileHero}>
+        <View style={styles.profileInitials}>
+          <Text style={styles.profileInitialsText}>{contractor.initials}</Text>
+        </View>
+        <Text style={styles.profileName}>{contractor.fullName}</Text>
+        <Text style={styles.profileMeta}>CC {contractor.document}</Text>
+      </LinearGradient>
+      <InfoCard
+        title="Información personal"
+        rows={[
+          ["Nombres", contractor.name],
+          ["Apellidos", contractor.lastName],
+          ["Cédula", contractor.document],
+          ["RH", contractor.rh ?? "Sin registrar"],
+          ["Estado civil", contractor.civilState],
+        ]}
+      />
+      <ContractorDocumentsSection contractorId={contractor.id} onOpen={onDocument} />
+      <SectionTitle title="Historial de operaciones" action={`${history.length} registros`} />
+      {loading ? (
+        <ActivityIndicator color={C.navy} />
+      ) : history.length === 0 ? (
+        <EmptyState icon="calendar-outline" text="No hay historial para este contratista." />
+      ) : (
+        history.map((item) => (
+          <Pressable key={item.assignmentId} style={styles.card} onPress={() => onHistory(item)}>
+            <View style={styles.between}>
+              <View>
+                <Text style={styles.cardTitle}>{item.areaName}</Text>
+                <Text style={styles.cardMeta}>{formatDate(item.operationDate)}</Text>
+                <Text style={styles.caption}>{item.attendanceStatus ?? "Sin dato"}</Text>
+              </View>
+              <Text style={styles.extra}>{item.extraHours} h extras</Text>
+            </View>
+          </Pressable>
+        ))
+      )}
+    </Page>
+  );
+}
+
 function ContractorProfile({
   contractor,
+  onDocument,
   onHistory,
 }: {
   contractor: Contractor;
+  onDocument: (document: ContractorDocument) => void;
   onHistory: (history: ContractorHistory) => void;
 }) {
   const [history, setHistory] = useState<ContractorHistory[]>([]);
@@ -1183,6 +1639,7 @@ function ContractorProfile({
         ["Pantalón", contractor.pantSize ?? "-"],
         ["Zapatos", contractor.shoeSize ?? "-"],
       ]} />
+      <ContractorDocumentsSection contractorId={contractor.id} onOpen={onDocument} />
       <SectionTitle title="Historial de operaciones" action={`${history.length} registros`} />
       {loading ? <ActivityIndicator color={C.navy} /> : history.length === 0 ? (
         <EmptyState icon="calendar-outline" text="No hay historial para este contratista." />
@@ -1198,6 +1655,137 @@ function ContractorProfile({
         </Pressable>
       ))}
     </Page>
+  );
+}
+
+function ContractorDocumentsSection({
+  contractorId,
+  onOpen,
+}: {
+  contractorId: number;
+  onOpen: (document: ContractorDocument) => void;
+}) {
+  const [documents, setDocuments] = useState<ContractorDocument[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const loadDocuments = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      setDocuments(await loadContractorDocuments(contractorId));
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setLoading(false);
+    }
+  }, [contractorId]);
+
+  useEffect(() => {
+    void loadDocuments();
+  }, [loadDocuments]);
+
+  return (
+    <View style={styles.documentsSection}>
+      <SectionTitle title="Documentos" action={`${documents.length} archivos`} />
+      {loading ? (
+        <ActivityIndicator color={C.navy} />
+      ) : error ? (
+        <View style={styles.documentError}>
+          <Text style={styles.errorText}>{error}</Text>
+          <Pressable style={styles.retryLink} onPress={loadDocuments}>
+            <Ionicons name="refresh" size={16} color={C.navy} />
+            <Text style={styles.link}>Reintentar</Text>
+          </Pressable>
+        </View>
+      ) : documents.length === 0 ? (
+        <EmptyState icon="document-outline" text="No hay documentos disponibles." />
+      ) : (
+        documents.map((document) => (
+          <Pressable
+            key={document.id}
+            style={styles.documentRow}
+            onPress={() => onOpen(document)}
+          >
+            <View style={styles.pdfIcon}>
+              <Ionicons name="document-text" size={23} color={C.orange} />
+            </View>
+            <View style={styles.flex}>
+              <Text style={styles.cardTitle}>{document.typeName}</Text>
+              <Text style={styles.cardMeta} numberOfLines={1}>
+                {document.originalName}
+              </Text>
+              <Text style={styles.caption}>
+                Actualizado {formatDate(document.updatedAt)}
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={C.muted} />
+          </Pressable>
+        ))
+      )}
+    </View>
+  );
+}
+
+function DocumentPreview({ document }: { document: ContractorDocument }) {
+  const [url, setUrl] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const loadSignedUrl = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    setUrl("");
+    try {
+      setUrl(await createContractorDocumentSignedUrl(document));
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setLoading(false);
+    }
+  }, [document]);
+
+  useEffect(() => {
+    void loadSignedUrl();
+  }, [loadSignedUrl]);
+
+  return (
+    <View style={styles.documentPreview}>
+      <View style={styles.documentPreviewHeader}>
+        <View style={styles.pdfIcon}>
+          <Ionicons name="document-text" size={23} color={C.orange} />
+        </View>
+        <View style={styles.flex}>
+          <Text style={styles.cardTitle}>{document.typeName}</Text>
+          <Text style={styles.caption} numberOfLines={1}>
+            {document.originalName}
+          </Text>
+        </View>
+      </View>
+      {loading ? (
+        <View style={styles.documentPreviewState}>
+          <ActivityIndicator size="large" color={C.navy} />
+          <Text style={styles.subtitle}>Preparando vista previa segura...</Text>
+        </View>
+      ) : error ? (
+        <View style={styles.documentPreviewState}>
+          <Ionicons name="alert-circle-outline" size={42} color={C.red} />
+          <Text style={styles.errorTitle}>No pudimos abrir el documento</Text>
+          <Text style={styles.subtitle}>{error}</Text>
+          <View style={styles.previewRetryButton}>
+            <PrimaryButton label="Reintentar" icon="refresh" onPress={loadSignedUrl} />
+          </View>
+        </View>
+      ) : (
+        <PdfViewer
+          uri={url}
+          onError={(message) => {
+            setUrl("");
+            setError(message);
+          }}
+        />
+      )}
+    </View>
   );
 }
 
@@ -1219,51 +1807,191 @@ function HistoryDetail({ history }: { history: ContractorHistory }) {
   );
 }
 
-function Statistics({ role, data }: { role: Role; data: AppData }) {
-  const planned = data.operations.reduce((total, item) => total + item.people, 0);
-  const worked = data.operations.reduce((total, item) => total + item.worked, 0);
-  const extras = data.operations.reduce((total, item) => total + item.extraHours, 0);
+function ClientHistoryDetail({ history }: { history: ContractorHistory }) {
+  return (
+    <Page>
+      <View style={styles.heroCard}>
+        <Text style={styles.eyebrow}>TURNO REGISTRADO</Text>
+        <Text style={styles.detailTitle}>{history.areaName}</Text>
+        <Text style={styles.subtitle}>{formatDate(history.operationDate)}</Text>
+        <View style={styles.summaryRow}>
+          <MiniStat label="Asistencia" value={history.attendanceStatus ?? "Sin dato"} />
+          <MiniStat label="Extras" value={`${history.extraHours} h`} />
+        </View>
+      </View>
+    </Page>
+  );
+}
+
+function Statistics({ context, data }: { context: UserContext; data: AppData }) {
+  const today = todayIso();
+  const defaultStart = dateToIso(addDays(isoToDate(today), -29));
+  const fixedClientId = context.role === "Cliente" ? context.clients[0]?.id ?? 0 : 0;
+  const [startDate, setStartDate] = useState(defaultStart);
+  const [endDate, setEndDate] = useState(today);
+  const [clientId, setClientId] = useState(fixedClientId);
+  const [areaId, setAreaId] = useState(0);
+  const [openFilter, setOpenFilter] = useState<"start" | "end" | "client" | "area" | null>(null);
+
+  const availableAreas = data.areas.filter(
+    (area) => clientId === 0 || area.clientId === clientId,
+  );
+  const filteredOperations = data.operations.filter(
+    (operation) =>
+      operation.date >= startDate &&
+      operation.date <= endDate &&
+      (clientId === 0 || operation.clientId === clientId) &&
+      (areaId === 0 || operation.areaId === areaId),
+  );
+  const filteredRequests = data.requests.filter(
+    (request) =>
+      request.requiredDate >= startDate &&
+      request.requiredDate <= endDate &&
+      (clientId === 0 || request.clientId === clientId) &&
+      (areaId === 0 || request.areaId === areaId),
+  );
+  const planned = filteredOperations.reduce((total, item) => total + item.people, 0);
+  const worked = filteredOperations.reduce((total, item) => total + item.worked, 0);
+  const extras = filteredOperations.reduce((total, item) => total + item.extraHours, 0);
   const coverage = planned ? Math.round((worked / planned) * 100) : 0;
-  const openRequests = data.requests.filter((item) => item.status === "ABIERTA").length;
-  const bars = data.operations.slice(0, 5).reverse();
+  const openRequests = filteredRequests.filter((item) => item.status === "ABIERTA").length;
+  const bars = filteredOperations.slice(0, 5).reverse();
+
+  const selectStartDate = (date: string) => {
+    if (date > endDate) {
+      Alert.alert("Rango inválido", "La fecha inicial no puede ser posterior a la fecha final.");
+      return;
+    }
+    setStartDate(date);
+    setOpenFilter(null);
+  };
+
+  const selectEndDate = (date: string) => {
+    if (date < startDate) {
+      Alert.alert("Rango inválido", "La fecha final no puede ser anterior a la fecha inicial.");
+      return;
+    }
+    setEndDate(date);
+    setOpenFilter(null);
+  };
+
   return (
     <Page>
       <View>
         <Text style={styles.eyebrow}>RENDIMIENTO OPERATIVO</Text>
-        <Text style={styles.greeting}>{role === "Cliente" ? "Resultados de tu empresa" : "Panorama general"}</Text>
+        <Text style={styles.greeting}>{context.role === "Cliente" ? "Resultados de tu empresa" : "Panorama general"}</Text>
         <Text style={styles.subtitle}>Calculado desde operaciones, asignaciones y solicitudes visibles.</Text>
       </View>
-      <View style={styles.statsGrid}>
-        <Stat value={`${coverage}%`} label="Cobertura" icon="trending-up" />
-        <Stat value={String(worked)} label="Turnos trabajados" icon="people" />
-        <Stat value={`${extras} h`} label="Horas extra" icon="time" />
-        <Stat value={String(openRequests)} label="Solicitudes abiertas" icon="document-text" />
-      </View>
-      <View style={styles.chartCard}>
-        <Text style={styles.formTitle}>Planeado vs. trabajado</Text>
-        <Text style={styles.caption}>Últimas operaciones visibles</Text>
-        <View style={styles.barChart}>
-          {bars.map((item) => {
-            const plannedHeight = Math.max(20, Math.min(120, item.people * 18));
-            const workedHeight = item.people ? Math.round(plannedHeight * (item.worked / item.people)) : 0;
-            return (
-              <View key={item.id} style={styles.barGroup}>
-                <View style={[styles.barGhost, { height: plannedHeight }]}>
-                  <View style={[styles.barFill, { height: workedHeight }]} />
-                </View>
-                <Text style={styles.caption}>{item.area.slice(0, 4)}</Text>
-              </View>
-            );
-          })}
+      <FormCard title="Filtros">
+        <View style={styles.statsFilterRow}>
+          <View style={styles.flex}>
+            <Choice
+              label="Fecha inicial"
+              value={formatDate(startDate)}
+              icon="calendar-outline"
+              onPress={() => setOpenFilter("start")}
+            />
+          </View>
+          <View style={styles.flex}>
+            <Choice
+              label="Fecha final"
+              value={formatDate(endDate)}
+              icon="calendar-outline"
+              onPress={() => setOpenFilter("end")}
+            />
+          </View>
         </View>
-      </View>
-      <Notice
-        icon="bulb-outline"
-        text={
-          coverage >= 90
-            ? `La cobertura visible es ${coverage}%. La operación mantiene un nivel alto.`
-            : `La cobertura visible es ${coverage}%. Revisa solicitudes abiertas y ausencias.`
-        }
+        {context.role !== "Cliente" && (
+          <Choice
+            label="Cliente"
+            value={clientId === 0 ? "Todos los clientes" : data.clients.find((client) => client.id === clientId)?.name ?? "Todos los clientes"}
+            icon="business-outline"
+            onPress={() => setOpenFilter("client")}
+          />
+        )}
+        <Choice
+          label="Área"
+          value={areaId === 0 ? "Todas las áreas" : availableAreas.find((area) => area.id === areaId)?.name ?? "Todas las áreas"}
+          icon="location-outline"
+          onPress={() => setOpenFilter("area")}
+        />
+      </FormCard>
+      {filteredOperations.length === 0 ? (
+        <EmptyState icon="bar-chart-outline" text="No hay operaciones para los filtros seleccionados." />
+      ) : (
+        <>
+          <View style={styles.statsGrid}>
+            <Stat value={`${coverage}%`} label="Cobertura" icon="trending-up" />
+            <Stat value={String(worked)} label="Turnos trabajados" icon="people" />
+            <Stat value={`${extras} h`} label="Horas extra" icon="time" />
+            <Stat value={String(openRequests)} label="Solicitudes abiertas" icon="document-text" />
+          </View>
+          <View style={styles.chartCard}>
+            <Text style={styles.formTitle}>Planeado vs. trabajado</Text>
+            <Text style={styles.caption}>Últimas operaciones del periodo seleccionado</Text>
+            <View style={styles.barChart}>
+              {bars.map((item) => {
+                const plannedHeight = Math.max(20, Math.min(120, item.people * 18));
+                const workedHeight = item.people ? Math.round(plannedHeight * (item.worked / item.people)) : 0;
+                return (
+                  <View key={item.id} style={styles.barGroup}>
+                    <View style={[styles.barGhost, { height: plannedHeight }]}>
+                      <View style={[styles.barFill, { height: workedHeight }]} />
+                    </View>
+                    <Text style={styles.caption}>{item.area.slice(0, 4)}</Text>
+                  </View>
+                );
+              })}
+            </View>
+          </View>
+          <Notice
+            icon="bulb-outline"
+            text={
+              coverage >= 90
+                ? `La cobertura visible es ${coverage}%. La operación mantiene un nivel alto.`
+                : `La cobertura visible es ${coverage}%. Revisa solicitudes abiertas y ausencias.`
+            }
+          />
+        </>
+      )}
+      <CalendarModal
+        visible={openFilter === "start"}
+        selectedDate={startDate}
+        title="Fecha inicial"
+        subtitle="Selecciona el inicio del periodo."
+        onClose={() => setOpenFilter(null)}
+        onSelect={selectStartDate}
+      />
+      <CalendarModal
+        visible={openFilter === "end"}
+        selectedDate={endDate}
+        title="Fecha final"
+        subtitle="Selecciona el final del periodo."
+        onClose={() => setOpenFilter(null)}
+        onSelect={selectEndDate}
+      />
+      <DropdownModal
+        visible={openFilter === "client"}
+        title="Seleccionar cliente"
+        options={[{ id: 0, name: "Todos los clientes" }, ...data.clients]}
+        selectedId={clientId}
+        onClose={() => setOpenFilter(null)}
+        onSelect={(id) => {
+          setClientId(id);
+          setAreaId(0);
+          setOpenFilter(null);
+        }}
+      />
+      <DropdownModal
+        visible={openFilter === "area"}
+        title="Seleccionar área"
+        options={[{ id: 0, name: "Todas las áreas" }, ...availableAreas]}
+        selectedId={areaId}
+        onClose={() => setOpenFilter(null)}
+        onSelect={(id) => {
+          setAreaId(id);
+          setOpenFilter(null);
+        }}
       />
     </Page>
   );
@@ -1389,6 +2117,98 @@ function Input(props: React.ComponentProps<typeof TextInput> & { icon: IconName 
   );
 }
 
+function DropdownModal({
+  visible,
+  title,
+  options,
+  selectedId,
+  searchable = false,
+  searchPlaceholder = "Buscar",
+  onClose,
+  onSelect,
+}: {
+  visible: boolean;
+  title: string;
+  options: { id: number; name: string; detail?: string }[];
+  selectedId: number;
+  searchable?: boolean;
+  searchPlaceholder?: string;
+  onClose: () => void;
+  onSelect: (id: number) => void;
+}) {
+  const [query, setQuery] = useState("");
+
+  useEffect(() => {
+    if (!visible) setQuery("");
+  }, [visible]);
+
+  const normalizedQuery = query.trim().toLocaleLowerCase("es").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const visibleOptions = options.filter((option) => {
+    const normalizedName = option.name.toLocaleLowerCase("es").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    return normalizedName.includes(normalizedQuery);
+  });
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.dropdownCard}>
+          <View style={styles.between}>
+            <Text style={styles.formTitle}>{title}</Text>
+            <Pressable style={styles.iconButton} onPress={onClose}>
+              <Ionicons name="close" size={20} color={C.ink} />
+            </Pressable>
+          </View>
+          {searchable && (
+            <Input
+              icon="search-outline"
+              value={query}
+              onChangeText={setQuery}
+              placeholder={searchPlaceholder}
+              autoCapitalize="words"
+              autoCorrect={false}
+            />
+          )}
+          <ScrollView
+            style={styles.dropdownList}
+            contentContainerStyle={styles.dropdownListContent}
+            keyboardShouldPersistTaps="handled"
+          >
+            {visibleOptions.length === 0 ? (
+              <View style={styles.dropdownEmpty}>
+                <Ionicons name="search-outline" size={25} color={C.muted} />
+                <Text style={styles.subtitle}>No se encontraron resultados.</Text>
+              </View>
+            ) : (
+              visibleOptions.map((option) => {
+                const selected = option.id === selectedId;
+                return (
+                  <Pressable
+                    key={option.id}
+                    style={[styles.dropdownOption, selected && styles.dropdownOptionSelected]}
+                    onPress={() => onSelect(option.id)}
+                  >
+                    <View style={styles.flex}>
+                      <Text style={[styles.dropdownOptionText, selected && styles.dropdownOptionTextSelected]}>
+                        {option.name}
+                      </Text>
+                      {option.detail ? <Text style={styles.caption}>Documento: {option.detail}</Text> : null}
+                    </View>
+                    <Ionicons
+                      name={selected ? "checkmark-circle" : "chevron-forward"}
+                      size={20}
+                      color={selected ? C.navy : C.muted}
+                    />
+                  </Pressable>
+                );
+              })
+            )}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 function Choice({
   label,
   value,
@@ -1408,7 +2228,7 @@ function Choice({
       <Pressable style={[styles.inputWrap, disabled && styles.disabled]} onPress={onPress} disabled={disabled}>
         <Ionicons name={icon} size={19} color={disabled ? "#9AA2B2" : C.navy} />
         <Text style={styles.choiceText}>{value}</Text>
-        {!disabled && <Ionicons name="swap-vertical-outline" size={18} color={C.muted} />}
+        {!disabled && <Ionicons name="chevron-down" size={18} color={C.muted} />}
       </Pressable>
     </View>
   );
@@ -1462,7 +2282,7 @@ function StatusBadge({ status }: { status: OperationStatus }) {
     CERRADO: [C.green, C.greenBg, "checkmark-circle-outline"],
     EN_CURSO: [C.yellow, C.yellowBg, "time-outline"],
     PENDIENTE: [C.red, C.redBg, "alert-circle-outline"],
-    CAMBIOS_SOLICITADOS: [C.red, C.redBg, "refresh-outline"],
+    CAMBIOS_SOLICITADOS: [C.orange, C.orangeBg, "refresh-outline"],
   }[status] as [string, string, IconName];
   return (
     <View style={[styles.badge, { backgroundColor: config[1] }]}>
@@ -1651,6 +2471,9 @@ const styles = StyleSheet.create({
   miniStat: { flex: 1, alignItems: "center" },
   miniValue: { color: C.ink, fontSize: 16, fontWeight: "900", textAlign: "center" },
   sectionTitle: { color: C.ink, fontSize: 16, fontWeight: "800" },
+  historyHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },
+  dateFilterButton: { minHeight: 42, maxWidth: "58%", paddingHorizontal: 11, borderRadius: 13, borderWidth: 1, borderColor: C.line, backgroundColor: C.white, flexDirection: "row", alignItems: "center", gap: 6 },
+  dateFilterText: { color: C.navy, fontSize: 10, fontWeight: "800", flexShrink: 1 },
   notice: { flexDirection: "row", alignItems: "flex-start", gap: 10, padding: 13, borderRadius: 15, backgroundColor: C.blueBg, borderWidth: 1, borderColor: "#CED9F6" },
   noticeError: { backgroundColor: C.redBg, borderColor: "#F5CDCD" },
   noticeText: { flex: 1, color: C.navy, fontSize: 11, lineHeight: 17 },
@@ -1673,6 +2496,15 @@ const styles = StyleSheet.create({
   infoRow: { flexDirection: "row", justifyContent: "space-between", gap: 12, paddingTop: 9, borderTopWidth: 1, borderTopColor: "#F0F2F6" },
   infoValue: { color: C.ink, fontSize: 11, fontWeight: "700", maxWidth: "58%", textAlign: "right" },
   extra: { color: C.navy, fontSize: 11, fontWeight: "900" },
+  documentsSection: { gap: 10 },
+  documentRow: { minHeight: 76, backgroundColor: C.white, borderRadius: 17, padding: 13, flexDirection: "row", alignItems: "center", gap: 11, borderWidth: 1, borderColor: C.line },
+  pdfIcon: { width: 44, height: 44, borderRadius: 14, backgroundColor: C.orangeBg, alignItems: "center", justifyContent: "center" },
+  documentError: { gap: 8, padding: 14, borderRadius: 15, backgroundColor: C.redBg, borderWidth: 1, borderColor: "#F5CDCD" },
+  retryLink: { flexDirection: "row", alignItems: "center", gap: 6, alignSelf: "flex-start" },
+  documentPreview: { flex: 1, backgroundColor: C.bg },
+  documentPreviewHeader: { minHeight: 74, paddingHorizontal: 16, paddingVertical: 12, flexDirection: "row", alignItems: "center", gap: 11, backgroundColor: C.white, borderBottomWidth: 1, borderBottomColor: C.line },
+  documentPreviewState: { flex: 1, alignItems: "center", justifyContent: "center", gap: 14, padding: 28 },
+  previewRetryButton: { width: "100%", maxWidth: 280, flexDirection: "row" },
   adminActions: { gap: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: C.line },
   adminRoleButton: { flexDirection: "row", alignItems: "center", gap: 7 },
   adminRoleText: { color: C.navy, fontSize: 11, fontWeight: "800" },
@@ -1681,6 +2513,7 @@ const styles = StyleSheet.create({
   clientChipActive: { borderColor: C.navy, backgroundColor: C.blueBg },
   clientChipText: { color: C.muted, fontSize: 9, fontWeight: "700" },
   clientChipTextActive: { color: C.navy },
+  statsFilterRow: { flexDirection: "row", gap: 10 },
   statsGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
   statCard: { width: "48.4%", backgroundColor: C.white, borderRadius: 17, padding: 14, borderWidth: 1, borderColor: C.line },
   statIcon: { width: 34, height: 34, borderRadius: 11, backgroundColor: C.blueBg, alignItems: "center", justifyContent: "center", marginBottom: 10 },
@@ -1693,6 +2526,26 @@ const styles = StyleSheet.create({
   empty: { minHeight: 150, borderRadius: 18, borderWidth: 1, borderStyle: "dashed", borderColor: C.line, alignItems: "center", justifyContent: "center", gap: 10, padding: 20 },
   modalBackdrop: { flex: 1, backgroundColor: "rgba(23,33,58,0.45)", alignItems: "center", justifyContent: "center", padding: 20 },
   modalCard: { width: "100%", maxWidth: 440, borderRadius: 22, padding: 18, backgroundColor: C.white, gap: 14 },
+  dropdownCard: { width: "100%", maxWidth: 440, maxHeight: "78%", borderRadius: 22, padding: 18, backgroundColor: C.white, gap: 14 },
+  dropdownList: { maxHeight: 390 },
+  dropdownListContent: { gap: 8 },
+  dropdownOption: { minHeight: 58, paddingHorizontal: 13, paddingVertical: 10, borderRadius: 14, borderWidth: 1, borderColor: C.line, backgroundColor: "#FBFCFE", flexDirection: "row", alignItems: "center", gap: 10 },
+  dropdownOptionSelected: { borderColor: C.navy, backgroundColor: C.blueBg },
+  dropdownOptionText: { color: C.ink, fontSize: 13, fontWeight: "700" },
+  dropdownOptionTextSelected: { color: C.navy, fontWeight: "900" },
+  dropdownEmpty: { minHeight: 130, alignItems: "center", justifyContent: "center", gap: 9 },
+  calendarCard: { width: "100%", maxWidth: 420, borderRadius: 22, padding: 18, backgroundColor: C.white, gap: 16 },
+  calendarNavigation: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  calendarArrow: { width: 40, height: 40, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: C.blueBg },
+  calendarMonth: { color: C.ink, fontSize: 15, fontWeight: "800" },
+  calendarGrid: { flexDirection: "row", flexWrap: "wrap" },
+  calendarWeekday: { width: "14.2857%", paddingVertical: 8, color: C.muted, fontSize: 10, fontWeight: "800", textAlign: "center" },
+  calendarDay: { width: "14.2857%", aspectRatio: 1, alignItems: "center", justifyContent: "center", borderRadius: 12 },
+  calendarToday: { borderWidth: 1, borderColor: C.navy },
+  calendarDaySelected: { backgroundColor: C.navy },
+  calendarDayText: { color: C.ink, fontSize: 12, fontWeight: "700" },
+  calendarTodayText: { color: C.navy, fontWeight: "900" },
+  calendarDayTextSelected: { color: C.white },
   bottomNav: { minHeight: 68, backgroundColor: C.white, borderTopWidth: 1, borderTopColor: C.line, flexDirection: "row", paddingHorizontal: 8, paddingTop: 7 },
   tab: { flex: 1, alignItems: "center", gap: 3 },
   tabIcon: { width: 36, height: 30, borderRadius: 11, alignItems: "center", justifyContent: "center" },

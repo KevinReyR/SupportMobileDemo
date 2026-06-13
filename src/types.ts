@@ -96,6 +96,34 @@ export interface ContractorHistory {
   observations: string | null;
 }
 
+export interface ContractorDocument {
+  id: string;
+  typeCode: string;
+  typeName: string;
+  fileId: string;
+  provider: string;
+  bucket: string;
+  path: string;
+  originalName: string;
+  mimeType: string;
+  sizeBytes: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ClientContractor {
+  id: number;
+  name: string;
+  lastName: string;
+  fullName: string;
+  initials: string;
+  document: string;
+  rh: string | null;
+  civilState: string;
+  lastArea: string;
+  lastDate: string | null;
+}
+
 export interface AdminUser {
   id: string;
   name: string;
@@ -111,6 +139,7 @@ export interface AppData {
   operations: Operation[];
   requests: PersonnelRequest[];
   contractors: Contractor[];
+  clientContractors: ClientContractor[];
   areas: (NamedRecord & { clientId: number })[];
   services: { id: number; areaId: number }[];
   attendanceStatuses: NamedRecord[];

@@ -2,6 +2,7 @@
   "expo": {
     "name": "Support Colombia",
     "slug": "support-colombia-mobile",
+    "scheme": "support-colombia",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/support-icon.png",
@@ -23,7 +24,8 @@
     },
     "plugins": [
       "expo-font",
-      "expo-router"
+      "expo-router",
+      "expo-dev-client"
     ]
   }
 }
