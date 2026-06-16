@@ -15,6 +15,7 @@ import {
   View,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import * as DocumentPicker from "expo-document-picker";
 import { LinearGradient } from "expo-linear-gradient";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import type { Session } from "@supabase/supabase-js";
@@ -23,6 +24,7 @@ import PdfViewer from "./components/pdf-viewer";
 import { supabase } from "./lib/supabase";
 import {
   cancelPersonnelRequest,
+  createContractorDraft,
   createContractorDocumentSignedUrl,
   createOperation,
   createPersonnelRequest,
@@ -38,7 +40,9 @@ import {
   setUserActive,
   setUserRole,
   toggleUserClient,
+  uploadContractorArlDocument,
 } from "./services/data";
+import type { ContractorPdfFile } from "./services/data";
 import type {
   AppData,
   Assignment,
@@ -61,6 +65,7 @@ type Screen =
   | "requests"
   | "new-request"
   | "staff"
+  | "create-contractor"
   | "contractor"
   | "document-preview"
   | "history-detail"
@@ -89,6 +94,7 @@ const C = {
 
 const EMPTY_DATA: AppData = {
   clients: [],
+  documentTypes: [],
   operations: [],
   requests: [],
   contractors: [],
@@ -128,6 +134,7 @@ const detailScreens: Screen[] = [
   "final",
   "new-request",
   "contractor",
+  "create-contractor",
   "document-preview",
   "history-detail",
 ];
@@ -163,7 +170,13 @@ function addDays(value: Date, days: number) {
 }
 
 function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : "Ocurrió un error inesperado.";
+  const message = error instanceof Error ? error.message : "Ocurrió un error inesperado.";
+  const postgresMessage = message.match(/P0001:\s*([^\n]+)/);
+  if (postgresMessage?.[1]) return postgresMessage[1].trim();
+  return message
+    .replace(/^Failed to run sql query:\s*/i, "")
+    .replace(/^ERROR:\s*/i, "")
+    .trim();
 }
 
 function withTimeout<T>(promise: Promise<T>, milliseconds: number, message: string) {
@@ -389,8 +402,23 @@ export default function SupportApp() {
               context.role === "Cliente" ? (
                 <ClientStaff contractors={data.clientContractors} onOpen={openContractor} />
               ) : (
-                <Staff contractors={data.contractors} onOpen={openContractor} />
+                <Staff
+                  context={context}
+                  contractors={data.contractors}
+                  onOpen={openContractor}
+                  onCreate={() => navigate("create-contractor")}
+                />
               )
+            )}
+            {screen === "create-contractor" && (
+              <CreateContractor
+                documentTypes={data.documentTypes}
+                onSaved={async (contractorId) => {
+                  setSelectedContractorId(contractorId);
+                  await refresh();
+                  navigate("contractor");
+                }}
+              />
             )}
             {screen === "contractor" && context.role === "Cliente" && selectedClientContractor && (
               <ClientContractorProfile
@@ -404,8 +432,10 @@ export default function SupportApp() {
             )}
             {screen === "contractor" && context.role !== "Cliente" && selectedContractor && (
               <ContractorProfile
+                context={context}
                 contractor={selectedContractor}
                 onDocument={openDocument}
+                onChanged={refresh}
                 onHistory={(history) => {
                   setSelectedHistory(history);
                   navigate("history-detail");
@@ -518,7 +548,7 @@ function Login({ initialError, busy }: { initialError: string; busy: boolean }) 
               onPress={signIn}
             />
           </View>
-          <Text style={styles.loginFooter}>Acceso seguro · Support Colombia 2026</Text>
+          <Text style={styles.loginFooter}>Acceso seguro ⋅ Support Colombia 2026</Text>
         </ScrollView>
       </LinearGradient>
     </SafeAreaProvider>
@@ -546,6 +576,7 @@ function Header({
     requests: "Solicitudes",
     "new-request": "Nueva solicitud",
     staff: "Personal",
+    "create-contractor": "Crear contratista",
     contractor: "Perfil del contratista",
     "document-preview": "Documento del contratista",
     "history-detail": "Detalle del turno",
@@ -833,7 +864,7 @@ function OperationCard({
         </View>
         <View style={styles.flex}>
           <Text style={styles.cardTitle}>{operation.client}</Text>
-          <Text style={styles.cardMeta}>{operation.area} · {operation.people} personas</Text>
+          <Text style={styles.cardMeta}>{operation.area} ⋅ {operation.people} personas</Text>
           <Text style={styles.caption}>{formatDate(operation.date)}</Text>
         </View>
         {!hideStatus && <StatusBadge status={operation.status} />}
@@ -891,7 +922,7 @@ function OperationDetail({
           <View>
             <Text style={styles.eyebrow}>OPERACIÓN #{operation.id}</Text>
             <Text style={styles.detailTitle}>{operation.client}</Text>
-            <Text style={styles.subtitle}>{operation.area} · {formatDate(operation.date)}</Text>
+            <Text style={styles.subtitle}>{operation.area} ⋅ {formatDate(operation.date)}</Text>
           </View>
           {context.role !== "Cliente" && <StatusBadge status={operation.status} />}
         </View>
@@ -916,7 +947,7 @@ function OperationDetail({
             <View style={styles.flex}>
               <Text style={styles.personName}>{assignment.contractorName}</Text>
               <Text style={styles.caption}>
-                {assignment.attendanceStatus ?? "Planeado"} · {assignment.extraHours} horas extra
+                {assignment.attendanceStatus ?? "Planeado"} ⋅ {assignment.extraHours} horas extra
               </Text>
             </View>
             <Ionicons
@@ -992,10 +1023,11 @@ function InitialOperation({
   onSaved: () => void;
 }) {
   const firstClient = context.clients[0];
+  const activeContractors = data.contractors.filter((contractor) => contractor.active);
   const [clientId, setClientId] = useState(firstClient?.id ?? 0);
   const availableAreas = data.areas.filter((area) => area.clientId === clientId);
   const [areaId, setAreaId] = useState(availableAreas[0]?.id ?? 0);
-  const [contractorId, setContractorId] = useState(data.contractors[0]?.id ?? 0);
+  const [contractorId, setContractorId] = useState(activeContractors[0]?.id ?? 0);
   const [openSelector, setOpenSelector] = useState<"client" | "area" | "contractor" | null>(null);
   const [added, setAdded] = useState<Contractor[]>([]);
   const [saving, setSaving] = useState(false);
@@ -1005,12 +1037,18 @@ function InitialOperation({
     setAreaId(nextArea?.id ?? 0);
   }, [clientId, data.areas]);
 
+  useEffect(() => {
+    if (!activeContractors.some((contractor) => contractor.id === contractorId)) {
+      setContractorId(activeContractors[0]?.id ?? 0);
+    }
+  }, [activeContractors, contractorId]);
+
   const selectedContractor = data.contractors.find((item) => item.id === contractorId);
   const service = data.services.find((item) => item.areaId === areaId);
 
   const save = async () => {
     if (!clientId || !areaId || !service || added.length === 0) {
-      Alert.alert("Completa el registro", "Selecciona cliente, área y al menos un contratista.");
+      Alert.alert("Completa el registro", "Selecciona cliente, Área y al menos un contratista.");
       return;
     }
     setSaving(true);
@@ -1052,7 +1090,7 @@ function InitialOperation({
           label="Contratista *"
           value={selectedContractor?.fullName ?? "Selecciona un contratista"}
           icon="person-outline"
-          disabled={data.contractors.length === 0}
+          disabled={activeContractors.length === 0}
           onPress={() => setOpenSelector("contractor")}
         />
         <SecondaryButton
@@ -1074,7 +1112,7 @@ function InitialOperation({
               <View style={styles.flex}>
                 <Text style={styles.personName}>{contractor.fullName}</Text>
                 <Text style={styles.caption}>
-                  {context.clients.find((item) => item.id === clientId)?.name} · {availableAreas.find((item) => item.id === areaId)?.name}
+                  {context.clients.find((item) => item.id === clientId)?.name} ⋅ {availableAreas.find((item) => item.id === areaId)?.name}
                 </Text>
               </View>
               <Pressable onPress={() => setAdded(added.filter((item) => item.id !== contractor.id))}>
@@ -1098,7 +1136,7 @@ function InitialOperation({
       />
       <DropdownModal
         visible={openSelector === "area"}
-        title="Seleccionar área"
+        title="Seleccionar Área"
         options={availableAreas}
         selectedId={areaId}
         onClose={() => setOpenSelector(null)}
@@ -1110,7 +1148,7 @@ function InitialOperation({
       <DropdownModal
         visible={openSelector === "contractor"}
         title="Seleccionar contratista"
-        options={data.contractors.map((contractor) => ({
+        options={activeContractors.map((contractor) => ({
           id: contractor.id,
           name: contractor.fullName,
           detail: contractor.document,
@@ -1209,7 +1247,7 @@ function FinalOperation({
               <Text style={styles.personName}>{assignment.contractorName}</Text>
               <Text style={styles.caption}>
                 {assignment.areaName}
-                {assignment.assignmentId < 0 ? " · Añadido durante la jornada" : ""}
+                {assignment.assignmentId < 0 ? " ⋅ Añadido durante la jornada" : ""}
               </Text>
             </View>
             {assignment.assignmentId < 0 && (
@@ -1361,11 +1399,11 @@ function Requests({
           </View>
           <Text style={styles.description}>{request.description}</Text>
           <View style={styles.between}>
-            <Text style={styles.caption}>{request.quantity} personas · {formatDate(request.requiredDate)}</Text>
+            <Text style={styles.caption}>{request.quantity} personas ⋅ {formatDate(request.requiredDate)}</Text>
             {context.role === "Cliente" && request.status === "ABIERTA" && (
               <Pressable
                 onPress={() =>
-                  Alert.alert("Cancelar solicitud", "Esta acción sólo aplica a solicitudes abiertas.", [
+                  Alert.alert("Cancelar solicitud", "Esta acción solo aplica a solicitudes abiertas.", [
                     { text: "Volver", style: "cancel" },
                     {
                       text: "Cancelar solicitud",
@@ -1499,18 +1537,191 @@ function ClientStaff({
   );
 }
 
-function Staff({ contractors, onOpen }: { contractors: Contractor[]; onOpen: (id: number) => void }) {
+function CreateContractor({
+  documentTypes,
+  onSaved,
+}: {
+  documentTypes: AppData["documentTypes"];
+  onSaved: (contractorId: number) => void;
+}) {
+  const [documentTypeId, setDocumentTypeId] = useState(documentTypes[0]?.id ?? 0);
+  const [documentNumber, setDocumentNumber] = useState("");
+  const [name, setName] = useState("");
+  const [lastName, setLastName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [email, setEmail] = useState("");
+  const [cedulaPdf, setCedulaPdf] = useState<ContractorPdfFile | null>(null);
+  const [selectorOpen, setSelectorOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!documentTypeId && documentTypes[0]) setDocumentTypeId(documentTypes[0].id);
+  }, [documentTypeId, documentTypes]);
+
+  const pickCedula = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: "application/pdf",
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (result.canceled) return;
+      const asset = result.assets[0];
+      if (!asset) return;
+      if ((asset.size ?? 0) > 1_048_576) {
+        Alert.alert("PDF demasiado grande", "La cédula debe pesar máximo 1 MB.");
+        return;
+      }
+      const isPdf = asset.mimeType === "application/pdf" || asset.name.toLowerCase().endsWith(".pdf");
+      if (!isPdf) {
+        Alert.alert("Formato no válido", "Adjunta únicamente documentos PDF.");
+        return;
+      }
+      setCedulaPdf({
+        uri: asset.uri,
+        name: asset.name,
+        mimeType: asset.mimeType,
+        size: asset.size,
+      });
+    } catch (cause) {
+      Alert.alert("No fue posible adjuntar", errorMessage(cause));
+    }
+  };
+
+  const save = async () => {
+    const normalizedEmail = email.trim().toLowerCase();
+    const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail);
+    if (!documentTypeId || !documentNumber.trim() || !name.trim() || !lastName.trim() || !phone.trim() || !normalizedEmail) {
+      Alert.alert("Completa el contratista", "Todos los campos son obligatorios en esta fase.");
+      return;
+    }
+    if (!emailValid) {
+      Alert.alert("Correo no válido", "Verifica el formato del correo electrónico.");
+      return;
+    }
+    if (!cedulaPdf) {
+      Alert.alert("Adjunta la cédula", "La cédula en PDF es obligatoria para crear el contratista.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const contractorId = await createContractorDraft({
+        documentTypeId,
+        documentNumber,
+        name,
+        lastName,
+        phone,
+        email: normalizedEmail,
+        cedulaPdf,
+      });
+      Alert.alert("Contratista creado", "El contrato quedó PENDIENTE hasta que el Director adjunte el Certificado ARL.");
+      await onSaved(contractorId);
+    } catch (cause) {
+      Alert.alert("No fue posible crear", errorMessage(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Page>
+      <Notice
+        icon="information-circle-outline"
+        text="En esta fase solo se registran datos básicos y la cédula. El contrato quedará PENDIENTE."
+      />
+      <FormCard title="Datos básicos">
+        <Choice
+          label="Tipo de documento *"
+          value={documentTypes.find((item) => item.id === documentTypeId)?.name ?? "Selecciona tipo"}
+          icon="card-outline"
+          disabled={documentTypes.length === 0}
+          onPress={() => setSelectorOpen(true)}
+        />
+        <Label text="Documento *" />
+        <Input icon="document-text-outline" value={documentNumber} onChangeText={setDocumentNumber} keyboardType="number-pad" />
+        <Label text="Nombres *" />
+        <Input icon="person-outline" value={name} onChangeText={setName} autoCapitalize="words" />
+        <Label text="Apellidos *" />
+        <Input icon="person-outline" value={lastName} onChangeText={setLastName} autoCapitalize="words" />
+        <Label text="Teléfono *" />
+        <Input icon="call-outline" value={phone} onChangeText={setPhone} keyboardType="phone-pad" />
+        <Label text="Correo *" />
+        <Input icon="mail-outline" value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" />
+      </FormCard>
+      <FormCard title="Documento obligatorio">
+        <Pressable style={styles.uploadCard} onPress={pickCedula}>
+          <View style={styles.pdfIcon}>
+            <Ionicons name="document-attach-outline" size={23} color={C.orange} />
+          </View>
+          <View style={styles.flex}>
+            <Text style={styles.cardTitle}>Cédula en PDF</Text>
+            <Text style={styles.cardMeta}>
+              {cedulaPdf ? cedulaPdf.name : "Adjuntar archivo PDF máximo 1 MB"}
+            </Text>
+          </View>
+          <Ionicons name="cloud-upload-outline" size={20} color={C.navy} />
+        </Pressable>
+      </FormCard>
+      <PrimaryButton label={saving ? "Creando..." : "Guardar contratista"} icon="save-outline" disabled={saving} onPress={save} />
+      <DropdownModal
+        visible={selectorOpen}
+        title="Tipo de documento"
+        options={documentTypes}
+        selectedId={documentTypeId}
+        onClose={() => setSelectorOpen(false)}
+        onSelect={(id) => {
+          setDocumentTypeId(id);
+          setSelectorOpen(false);
+        }}
+      />
+    </Page>
+  );
+}
+
+function Staff({
+  context,
+  contractors,
+  onOpen,
+  onCreate,
+}: {
+  context: UserContext;
+  contractors: Contractor[];
+  onOpen: (id: number) => void;
+  onCreate: () => void;
+}) {
   const [query, setQuery] = useState("");
+  const [pendingOnly, setPendingOnly] = useState(false);
+  const pendingCount = contractors.filter((contractor) => contractor.contractStatus === "PENDIENTE").length;
   const visible = contractors.filter((contractor) =>
-    `${contractor.fullName} ${contractor.document}`.toLowerCase().includes(query.toLowerCase()),
+    `${contractor.fullName} ${contractor.document}`.toLowerCase().includes(query.toLowerCase()) &&
+    (!pendingOnly || contractor.contractStatus === "PENDIENTE"),
   );
   return (
     <Page>
-      <View>
-        <Text style={styles.eyebrow}>BASE DE TALENTO</Text>
-        <Text style={styles.greeting}>Personal disponible</Text>
-        <Text style={styles.subtitle}>{contractors.length} contratistas registrados</Text>
+      <View style={styles.between}>
+        <View style={styles.flex}>
+          <Text style={styles.eyebrow}>BASE DE TALENTO</Text>
+          <Text style={styles.greeting}>Personal disponible</Text>
+          <Text style={styles.subtitle}>{contractors.length} contratistas registrados</Text>
+        </View>
+        <Pressable style={styles.fab} onPress={onCreate}>
+          <Ionicons name="add" color={C.white} size={26} />
+        </Pressable>
       </View>
+      {context.role === "Director" && pendingCount > 0 && (
+        <Pressable style={styles.pendingContractorsCard} onPress={() => setPendingOnly((value) => !value)}>
+          <Ionicons name="alert-circle-outline" size={22} color={C.orange} />
+          <View style={styles.flex}>
+            <Text style={styles.pendingContractorsTitle}>
+              Hay {pendingCount} contratistas nuevos pendientes
+            </Text>
+            <Text style={styles.caption}>
+              {pendingOnly ? "Mostrando pendientes. Toca para ver todos." : "Toca para revisarlos y adjuntar ARL."}
+            </Text>
+          </View>
+          <Ionicons name={pendingOnly ? "close-circle-outline" : "chevron-forward"} size={19} color={C.orange} />
+        </Pressable>
+      )}
       <Input icon="search-outline" value={query} onChangeText={setQuery} placeholder="Nombre o documento" />
       {visible.length === 0 ? <EmptyState icon="people-outline" text="No encontramos contratistas." /> : visible.map((contractor) => (
         <Pressable key={contractor.id} style={styles.card} onPress={() => onOpen(contractor.id)}>
@@ -1519,10 +1730,10 @@ function Staff({ contractors, onOpen }: { contractors: Contractor[]; onOpen: (id
             <View style={styles.flex}>
               <Text style={styles.cardTitle}>{contractor.fullName}</Text>
               <Text style={styles.caption}>CC {contractor.document}</Text>
-              <Text style={styles.cardMeta}>{contractor.lastClient} · {contractor.lastArea}</Text>
+              <Text style={styles.cardMeta}>{contractor.lastClient} ⋅ {contractor.lastArea}</Text>
               <Text style={styles.caption}>{formatDate(contractor.lastDate)}</Text>
             </View>
-            <StatusPill good={contractor.active} text={contractor.active ? "ACTIVO" : "INACTIVO"} />
+            <ContractStatusPill status={contractor.contractStatus} />
             <Ionicons name="chevron-forward" size={18} color={C.muted} />
           </View>
         </Pressable>
@@ -1569,6 +1780,10 @@ function ClientContractorProfile({
           ["Estado civil", contractor.civilState],
         ]}
       />
+      <InfoCard title="Seguridad Social" rows={[
+        ["EPS", contractor.eps ?? "Sin registrar"],
+        ["ARL", contractor.arl ?? "Sin registrar"],
+      ]} />
       <ContractorDocumentsSection contractorId={contractor.id} onOpen={onDocument} />
       <SectionTitle title="Historial de operaciones" action={`${history.length} registros`} />
       {loading ? (
@@ -1594,12 +1809,16 @@ function ClientContractorProfile({
 }
 
 function ContractorProfile({
+  context,
   contractor,
   onDocument,
+  onChanged,
   onHistory,
 }: {
+  context: UserContext;
   contractor: Contractor;
   onDocument: (document: ContractorDocument) => void;
+  onChanged: () => void;
   onHistory: (history: ContractorHistory) => void;
 }) {
   const [history, setHistory] = useState<ContractorHistory[]>([]);
@@ -1616,12 +1835,16 @@ function ContractorProfile({
         <View style={styles.profileInitials}><Text style={styles.profileInitialsText}>{contractor.initials}</Text></View>
         <Text style={styles.profileName}>{contractor.fullName}</Text>
         <Text style={styles.profileMeta}>CC {contractor.document}</Text>
-        <StatusPill good={contractor.active} text={contractor.active ? "ACTIVO" : "INACTIVO"} />
+        <ContractStatusPill status={contractor.contractStatus} />
       </LinearGradient>
       <InfoCard title="Información personal" rows={[
         ["Nombres y apellidos", contractor.fullName],
         ["RH", contractor.rh ?? "Sin registrar"],
         ["Estado civil", contractor.civilState],
+      ]} />
+      <InfoCard title="Seguridad Social" rows={[
+        ["EPS", contractor.eps ?? "Sin registrar"],
+        ["ARL", contractor.arl ?? "Sin registrar"],
       ]} />
       <InfoCard title="Información laboral" rows={[
         ["Fecha de contratación", formatDate(contractor.hireDate)],
@@ -1639,6 +1862,9 @@ function ContractorProfile({
         ["Pantalón", contractor.pantSize ?? "-"],
         ["Zapatos", contractor.shoeSize ?? "-"],
       ]} />
+      {context.role === "Director" && contractor.contractStatus === "PENDIENTE" && (
+        <ContractorActivationCard contractorId={contractor.id} onChanged={onChanged} />
+      )}
       <ContractorDocumentsSection contractorId={contractor.id} onOpen={onDocument} />
       <SectionTitle title="Historial de operaciones" action={`${history.length} registros`} />
       {loading ? <ActivityIndicator color={C.navy} /> : history.length === 0 ? (
@@ -1648,7 +1874,7 @@ function ContractorProfile({
           <View style={styles.between}>
             <View>
               <Text style={styles.cardTitle}>{item.clientName}</Text>
-              <Text style={styles.cardMeta}>{item.areaName} · {formatDate(item.operationDate)}</Text>
+              <Text style={styles.cardMeta}>{item.areaName} ⋅ {formatDate(item.operationDate)}</Text>
             </View>
             <Text style={styles.extra}>{item.extraHours} h extras</Text>
           </View>
@@ -1727,6 +1953,89 @@ function ContractorDocumentsSection({
   );
 }
 
+function ContractorActivationCard({
+  contractorId,
+  onChanged,
+}: {
+  contractorId: number;
+  onChanged: () => void;
+}) {
+  const [arlPdf, setArlPdf] = useState<ContractorPdfFile | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const pickArl = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: "application/pdf",
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (result.canceled) return;
+      const asset = result.assets[0];
+      if (!asset) return;
+      if ((asset.size ?? 0) > 1_048_576) {
+        Alert.alert("PDF demasiado grande", "El Certificado ARL debe pesar máximo 1 MB.");
+        return;
+      }
+      const isPdf = asset.mimeType === "application/pdf" || asset.name.toLowerCase().endsWith(".pdf");
+      if (!isPdf) {
+        Alert.alert("Formato no válido", "Adjunta únicamente documentos PDF.");
+        return;
+      }
+      setArlPdf({
+        uri: asset.uri,
+        name: asset.name,
+        mimeType: asset.mimeType,
+        size: asset.size,
+      });
+    } catch (cause) {
+      Alert.alert("No fue posible adjuntar", errorMessage(cause));
+    }
+  };
+
+  const save = async () => {
+    if (!arlPdf) {
+      Alert.alert("Adjunta el ARL", "El Certificado ARL en PDF es obligatorio para activar el contrato.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await uploadContractorArlDocument(contractorId, arlPdf);
+      Alert.alert("Contrato activado", "El contratista ya quedó disponible para operaciones.");
+      await onChanged();
+    } catch (cause) {
+      Alert.alert("No fue posible activar", errorMessage(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <View style={styles.activationCard}>
+      <View style={styles.row}>
+        <Ionicons name="shield-checkmark-outline" size={22} color={C.orange} />
+        <View style={styles.flex}>
+          <Text style={styles.cardTitle}>Activación pendiente</Text>
+          <Text style={styles.caption}>Adjunta el Certificado ARL en PDF para pasar el contrato a ACTIVO.</Text>
+        </View>
+      </View>
+      <Pressable style={styles.uploadCard} onPress={pickArl}>
+        <View style={styles.pdfIcon}>
+          <Ionicons name="document-attach-outline" size={23} color={C.orange} />
+        </View>
+        <View style={styles.flex}>
+          <Text style={styles.cardTitle}>Certificado ARL</Text>
+          <Text style={styles.cardMeta}>
+            {arlPdf ? arlPdf.name : "Adjuntar archivo PDF máximo 1 MB"}
+          </Text>
+        </View>
+        <Ionicons name="cloud-upload-outline" size={20} color={C.navy} />
+      </Pressable>
+      <PrimaryButton label={saving ? "Activando..." : "Guardar ARL y activar"} icon="checkmark-circle-outline" disabled={saving} onPress={save} />
+    </View>
+  );
+}
+
 function DocumentPreview({ document }: { document: ContractorDocument }) {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(true);
@@ -1795,7 +2104,7 @@ function HistoryDetail({ history }: { history: ContractorHistory }) {
       <View style={styles.heroCard}>
         <Text style={styles.eyebrow}>TURNO REGISTRADO</Text>
         <Text style={styles.detailTitle}>{history.clientName}</Text>
-        <Text style={styles.subtitle}>{history.areaName} · {formatDate(history.operationDate)}</Text>
+        <Text style={styles.subtitle}>{history.areaName} ⋅ {formatDate(history.operationDate)}</Text>
         <View style={styles.summaryRow}>
           <MiniStat label="Asistencia" value={history.attendanceStatus ?? "Sin dato"} />
           <MiniStat label="Extras" value={`${history.extraHours} h`} />
@@ -1984,8 +2293,8 @@ function Statistics({ context, data }: { context: UserContext; data: AppData }) 
       />
       <DropdownModal
         visible={openFilter === "area"}
-        title="Seleccionar área"
-        options={[{ id: 0, name: "Todas las áreas" }, ...availableAreas]}
+        title="Seleccionar Área"
+        options={[{ id: 0, name: "Todas las Áreas" }, ...availableAreas]}
         selectedId={areaId}
         onClose={() => setOpenFilter(null)}
         onSelect={(id) => {
@@ -2020,7 +2329,7 @@ function Users({
             <View style={styles.flex}>
               <Text style={styles.cardTitle}>{user.name}</Text>
               <Text style={styles.caption}>{user.email}</Text>
-              <Text style={styles.cardMeta}>{user.role}{user.clients.length ? ` · ${user.clients.join(", ")}` : ""}</Text>
+              <Text style={styles.cardMeta}>{user.role}{user.clients.length ? ` ⋅ ${user.clients.join(", ")}` : ""}</Text>
             </View>
             <Switch
               value={user.active}
@@ -2298,6 +2607,12 @@ function RequestBadge({ status }: { status: PersonnelRequest["status"] }) {
   return <StatusPill good={good} text={status} neutral={!good && !bad} />;
 }
 
+function ContractStatusPill({ status }: { status: Contractor["contractStatus"] }) {
+  if (status === "ACTIVO") return <StatusPill good text="ACTIVO" />;
+  if (status === "PENDIENTE") return <StatusPill good={false} neutral text="PENDIENTE" />;
+  return <StatusPill good={false} text="INACTIVO" />;
+}
+
 function StatusPill({ good, text, neutral = false }: { good: boolean; text: string; neutral?: boolean }) {
   const color = neutral ? C.yellow : good ? C.green : C.red;
   const background = neutral ? C.yellowBg : good ? C.greenBg : C.redBg;
@@ -2466,6 +2781,8 @@ const styles = StyleSheet.create({
   pillText: { fontSize: 8, fontWeight: "900" },
   alertCard: { borderRadius: 17, padding: 14, flexDirection: "row", alignItems: "center", gap: 11, backgroundColor: C.redBg, borderWidth: 1, borderColor: "#F5CDCD" },
   alertTitle: { color: C.red, fontSize: 13, fontWeight: "800" },
+  pendingContractorsCard: { borderRadius: 17, padding: 14, flexDirection: "row", alignItems: "center", gap: 11, backgroundColor: C.orangeBg, borderWidth: 1, borderColor: "#FFD4C4" },
+  pendingContractorsTitle: { color: C.orange, fontSize: 13, fontWeight: "800" },
   heroCard: { backgroundColor: C.white, borderRadius: 20, padding: 18, gap: 18, borderWidth: 1, borderColor: C.line },
   summaryRow: { flexDirection: "row", paddingTop: 14, borderTopWidth: 1, borderTopColor: C.line },
   miniStat: { flex: 1, alignItems: "center" },
@@ -2484,6 +2801,8 @@ const styles = StyleSheet.create({
   initialsText: { color: C.navy, fontSize: 12, fontWeight: "900" },
   formCard: { backgroundColor: C.white, borderRadius: 20, padding: 17, gap: 12, borderWidth: 1, borderColor: C.line },
   formTitle: { color: C.ink, fontSize: 16, fontWeight: "800" },
+  uploadCard: { minHeight: 74, borderRadius: 16, padding: 13, flexDirection: "row", alignItems: "center", gap: 11, backgroundColor: "#FBFCFE", borderWidth: 1, borderColor: C.line },
+  activationCard: { backgroundColor: C.white, borderRadius: 20, padding: 17, gap: 12, borderWidth: 1, borderColor: "#FFD4C4" },
   boundedList: { maxHeight: 250 },
   counter: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 16, backgroundColor: C.bg, borderRadius: 13, padding: 10 },
   counterValue: { color: C.ink, fontSize: 13, fontWeight: "800" },

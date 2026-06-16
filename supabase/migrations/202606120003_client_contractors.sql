@@ -1,3 +1,5 @@
+drop function if exists public.get_client_contractors();
+
 create or replace function public.get_client_contractors()
 returns table (
   contractor_id bigint,

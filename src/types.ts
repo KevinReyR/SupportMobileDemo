@@ -12,6 +12,8 @@ export interface NamedRecord {
   name: string;
 }
 
+export type ContractStatus = "ACTIVO" | "PENDIENTE" | "INACTIVO";
+
 export interface UserContext {
   id: string;
   name: string;
@@ -71,6 +73,8 @@ export interface Contractor {
   phone: string | null;
   email: string | null;
   rh: string | null;
+  eps: string | null;
+  arl: string | null;
   transport: string;
   civilState: string;
   city: string;
@@ -81,6 +85,7 @@ export interface Contractor {
   hireDate: string | null;
   terminationDate: string | null;
   active: boolean;
+  contractStatus: ContractStatus;
   lastClient: string;
   lastArea: string;
   lastDate: string | null;
@@ -119,6 +124,8 @@ export interface ClientContractor {
   initials: string;
   document: string;
   rh: string | null;
+  eps: string | null;
+  arl: string | null;
   civilState: string;
   lastArea: string;
   lastDate: string | null;
@@ -136,6 +143,7 @@ export interface AdminUser {
 
 export interface AppData {
   clients: NamedRecord[];
+  documentTypes: NamedRecord[];
   operations: Operation[];
   requests: PersonnelRequest[];
   contractors: Contractor[];

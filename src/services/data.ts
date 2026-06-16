@@ -4,6 +4,7 @@ import type {
   AppData,
   Assignment,
   ClientContractor,
+  ContractStatus,
   Contractor,
   ContractorDocument,
   ContractorHistory,
@@ -33,24 +34,61 @@ function firstRelation<T>(value: T | T[] | null | undefined): T | null {
 
 function cleanText(value: string | null | undefined) {
   if (!value) return "";
-  const replacements: Record<string, string> = {
-    "Ã": "Á",
-    "Ã‰": "É",
-    "Ã": "Í",
-    "Ã“": "Ó",
-    "Ãš": "Ú",
-    "Ã¡": "á",
-    "Ã©": "é",
-    "Ã­": "í",
-    "Ã³": "ó",
-    "Ãº": "ú",
-    "Ã±": "ñ",
-    "Ã¼": "ü",
-  };
-  return Object.entries(replacements).reduce(
-    (text, [broken, correct]) => text.split(broken).join(correct),
-    value,
-  );
+  return value
+    .split("\u00C3\u00A1").join("?")
+    .split("\u00C3\u00A9").join("?")
+    .split("\u00C3\u00AD").join("?")
+    .split("\u00C3\u00B3").join("?")
+    .split("\u00C3\u00BA").join("?")
+    .split("\u00C3\u00B1").join("?")
+    .split("\u00C3\u00BC").join("?")
+    .split("\u00C3\u0081").join("?")
+    .split("\u00C3\u0089").join("?")
+    .split("\u00C3\u008D").join("?")
+    .split("\u00C3\u0093").join("?")
+    .split("\u00C3\u009A").join("?")
+    .split("\u00C2\u00B7").join("?");
+}
+
+const CONTRACTOR_DOCUMENT_BUCKET = "contractor-documents";
+const MAX_CONTRACTOR_DOCUMENT_BYTES = 1_048_576;
+
+function normalizeContractStatus(value: string | null | undefined): ContractStatus {
+  const normalized = cleanText(value).toUpperCase();
+  if (normalized === "PENDIENTE" || normalized === "INACTIVO") return normalized;
+  return "ACTIVO";
+}
+
+function uniqueToken() {
+  const random = globalThis.crypto?.randomUUID?.();
+  return random ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function validatePdfFile(file: ContractorPdfFile) {
+  const name = file.name || "documento.pdf";
+  const mimeType = file.mimeType || "application/pdf";
+  const isPdf = mimeType === "application/pdf" || name.toLowerCase().endsWith(".pdf");
+  if (!isPdf) throw new Error("El documento debe estar en formato PDF.");
+  if (typeof file.size === "number" && file.size > MAX_CONTRACTOR_DOCUMENT_BYTES) {
+    throw new Error("El PDF no puede superar 1 MB.");
+  }
+}
+
+export interface ContractorPdfFile {
+  uri: string;
+  name: string;
+  mimeType?: string | null;
+  size?: number | null;
+}
+
+export interface CreateContractorInput {
+  documentTypeId: number;
+  documentNumber: string;
+  name: string;
+  lastName: string;
+  phone: string;
+  email: string;
+  cedulaPdf: ContractorPdfFile;
 }
 
 export async function loadUserContext(userId: string): Promise<UserContext> {
@@ -95,6 +133,7 @@ export async function loadUserContext(userId: string): Promise<UserContext> {
 export async function loadAppData(context: UserContext): Promise<AppData> {
   const common = await Promise.all([
     supabase.from("clients").select("id,name").eq("is_active", true).order("id"),
+    supabase.from("document_type").select("id,name").order("id"),
     supabase
       .from("operation")
       .select(
@@ -113,7 +152,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
 
   common.forEach((result) => fail(result.error));
 
-  const operations: Operation[] = (common[1].data ?? []).map((row: any) => {
+  const operations: Operation[] = (common[2].data ?? []).map((row: any) => {
     const assignments = row.operation_assignment ?? [];
     return {
       id: row.id,
@@ -137,7 +176,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
     };
   });
 
-  const requests: PersonnelRequest[] = (common[2].data ?? []).map((row: any) => ({
+  const requests: PersonnelRequest[] = (common[3].data ?? []).map((row: any) => ({
     id: row.id,
     clientId: row.client_id,
       client: cleanText(firstRelation<any>(row.clients)?.name),
@@ -152,20 +191,26 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
   let contractors: Contractor[] = [];
   let clientContractors: ClientContractor[] = [];
   if (context.roleCode !== "CLIENT") {
-    const [contractorResult, assignmentResult] = await Promise.all([
+    const [contractorResult, assignmentResult, contractResult] = await Promise.all([
       supabase
         .from("contractor")
         .select(
-          "id,name,last_name,document_number,phone_number,email,rh,disponibility,shirt_size,pant_size,shoe_size,hire_date,termination_date,transport_type(name),civil_state_type(name)",
+          "id,name,last_name,document_number,phone_number,email,rh,eps,arl,disponibility,shirt_size,pant_size,shoe_size,hire_date,termination_date,transport_type(name),civil_state_type(name)",
         )
         .order("name"),
       supabase
         .from("operation_assignment")
         .select("contractor_id,operation(operation_date,clients(name),area(name))")
         .is("deleted_at", null),
+      supabase
+        .from("contractor_contract")
+        .select("id,contractor_id,start_date,end_date,status_id,contract_status(name)")
+        .order("start_date", { ascending: false })
+        .order("id", { ascending: false }),
     ]);
     fail(contractorResult.error);
     fail(assignmentResult.error);
+    fail(contractResult.error);
 
     const lastAssignments = new Map<number, any>();
     for (const row of assignmentResult.data ?? []) {
@@ -174,6 +219,17 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       const current = lastAssignments.get((row as any).contractor_id);
       if (!current || operation.operation_date > current.operation_date) {
         lastAssignments.set((row as any).contractor_id, operation);
+      }
+    }
+
+    const latestContracts = new Map<number, ContractStatus>();
+    for (const row of contractResult.data ?? []) {
+      const contractorId = Number((row as any).contractor_id);
+      if (!latestContracts.has(contractorId)) {
+        latestContracts.set(
+          contractorId,
+          normalizeContractStatus(firstRelation<any>((row as any).contract_status)?.name),
+        );
       }
     }
 
@@ -192,6 +248,8 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
         phone: row.phone_number,
         email: row.email,
         rh: row.rh,
+        eps: cleanText(row.eps) || null,
+        arl: cleanText(row.arl) || null,
         transport: cleanText(firstRelation<any>(row.transport_type)?.name) || "Sin registrar",
         civilState: cleanText(firstRelation<any>(row.civil_state_type)?.name) || "Sin registrar",
         city: "Medellín",
@@ -201,7 +259,8 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
         shoeSize: row.shoe_size,
         hireDate: row.hire_date,
         terminationDate: row.termination_date,
-        active: !row.termination_date,
+        active: (latestContracts.get(row.id) ?? "INACTIVO") === "ACTIVO",
+        contractStatus: latestContracts.get(row.id) ?? "INACTIVO",
         lastClient: cleanText(firstRelation<any>(latest?.clients)?.name) || "Sin operación",
         lastArea: cleanText(firstRelation<any>(latest?.area)?.name) || "Sin área",
         lastDate: latest?.operation_date ?? null,
@@ -221,6 +280,8 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
         initials: `${name[0] ?? ""}${lastName[0] ?? ""}`.toUpperCase(),
         document: cleanText(row.document_number),
         rh: cleanText(row.rh) || null,
+        eps: cleanText(row.eps) || null,
+        arl: cleanText(row.arl) || null,
         civilState: cleanText(row.civil_state) || "Sin registrar",
         lastArea: cleanText(row.last_area) || "Sin área",
         lastDate: row.last_operation_date,
@@ -265,20 +326,24 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       id: client.id,
       name: cleanText(client.name),
     })),
+    documentTypes: (common[1].data ?? []).map((documentType: any) => ({
+      id: documentType.id,
+      name: cleanText(documentType.name),
+    })),
     operations,
     requests,
     contractors,
     clientContractors,
-    areas: (common[3].data ?? []).map((area: any) => ({
+    areas: (common[4].data ?? []).map((area: any) => ({
       id: area.id,
       name: cleanText(area.name),
       clientId: area.client_id,
     })),
-    services: (common[4].data ?? []).map((service: any) => ({
+    services: (common[5].data ?? []).map((service: any) => ({
       id: service.id,
       areaId: service.area_id,
     })),
-    attendanceStatuses: (common[5].data ?? []).map((status: any) => ({
+    attendanceStatuses: (common[6].data ?? []).map((status: any) => ({
       id: status.id,
       name: status.name,
     })),
@@ -372,6 +437,65 @@ export async function createContractorDocumentSignedUrl(
     throw new Error("No fue posible generar el acceso temporal al documento.");
   }
   return result.data.signedUrl;
+}
+
+async function uploadAndRegisterContractorPdf(
+  contractorId: number,
+  typeCode: "CEDULA" | "CERTIFICADO_ARL",
+  file: ContractorPdfFile,
+) {
+  validatePdfFile(file);
+  const response = await fetch(file.uri);
+  const content = await response.arrayBuffer();
+  if (content.byteLength > MAX_CONTRACTOR_DOCUMENT_BYTES) {
+    throw new Error("El PDF no puede superar 1 MB.");
+  }
+
+  const safeName = (file.name || `${typeCode.toLowerCase()}.pdf`)
+    .replace(/[^\w.\-]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  const path = `contractor/${contractorId}/${typeCode}/${uniqueToken()}.pdf`;
+  const upload = await supabase.storage
+    .from(CONTRACTOR_DOCUMENT_BUCKET)
+    .upload(path, content, {
+      contentType: "application/pdf",
+      upsert: false,
+    });
+  fail(upload.error);
+
+  const registration = await supabase.rpc("register_contractor_document", {
+    p_contractor_id: contractorId,
+    p_document_type_code: typeCode,
+    p_bucket: CONTRACTOR_DOCUMENT_BUCKET,
+    p_path: path,
+    p_original_name: safeName || `${typeCode.toLowerCase()}.pdf`,
+    p_mime_type: "application/pdf",
+    p_size_bytes: content.byteLength,
+  });
+  fail(registration.error);
+}
+
+export async function createContractorDraft(input: CreateContractorInput): Promise<number> {
+  validatePdfFile(input.cedulaPdf);
+  const result = await supabase.rpc("create_contractor_draft", {
+    p_document_type_id: input.documentTypeId,
+    p_document_number: input.documentNumber.trim(),
+    p_name: input.name.trim(),
+    p_last_name: input.lastName.trim(),
+    p_phone_number: input.phone.trim(),
+    p_email: input.email.trim().toLowerCase(),
+  });
+  fail(result.error);
+  const contractorId = Number(result.data);
+  await uploadAndRegisterContractorPdf(contractorId, "CEDULA", input.cedulaPdf);
+  return contractorId;
+}
+
+export async function uploadContractorArlDocument(
+  contractorId: number,
+  file: ContractorPdfFile,
+) {
+  await uploadAndRegisterContractorPdf(contractorId, "CERTIFICADO_ARL", file);
 }
 
 export async function createOperation(input: {
