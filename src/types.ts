@@ -72,6 +72,7 @@ export interface Contractor {
   fullName: string;
   initials: string;
   document: string;
+  birthDate: string;
   phone: string | null;
   email: string | null;
   rh: string | null;
@@ -126,6 +127,7 @@ export interface ClientContractor {
   fullName: string;
   initials: string;
   document: string;
+  birthDate: string;
   rh: string | null;
   eps: string | null;
   arl: string | null;

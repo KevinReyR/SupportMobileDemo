@@ -86,6 +86,7 @@ export interface CreateContractorInput {
   documentNumber: string;
   name: string;
   lastName: string;
+  birthDate: string;
   phone: string;
   email: string;
   cedulaPdf: ContractorPdfFile;
@@ -198,7 +199,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       supabase
         .from("contractor")
         .select(
-          "id,name,last_name,document_number,phone_number,email,rh,eps,arl,disponibility,shirt_size,pant_size,shoe_size,hire_date,termination_date,transport_type(name),civil_state_type(name)",
+          "id,name,last_name,document_number,birth_date,phone_number,email,rh,eps,arl,disponibility,shirt_size,pant_size,shoe_size,hire_date,termination_date,transport_type(name),civil_state_type(name)",
         )
         .order("name"),
       supabase
@@ -248,6 +249,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
         fullName,
         initials: `${firstName[0] ?? ""}${lastName[0] ?? ""}`.toUpperCase(),
         document: row.document_number,
+        birthDate: row.birth_date,
         phone: row.phone_number,
         email: row.email,
         rh: row.rh,
@@ -282,6 +284,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
         fullName: `${name} ${lastName}`.trim(),
         initials: `${name[0] ?? ""}${lastName[0] ?? ""}`.toUpperCase(),
         document: cleanText(row.document_number),
+        birthDate: row.birth_date,
         rh: cleanText(row.rh) || null,
         eps: cleanText(row.eps) || null,
         arl: cleanText(row.arl) || null,
@@ -494,6 +497,7 @@ export async function createContractorDraft(input: CreateContractorInput): Promi
     p_last_name: input.lastName.trim(),
     p_phone_number: input.phone.trim(),
     p_email: input.email.trim().toLowerCase(),
+    p_birth_date: input.birthDate,
   });
   fail(result.error);
   const contractorId = Number(result.data);

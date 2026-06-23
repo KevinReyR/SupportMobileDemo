@@ -731,6 +731,7 @@ function Operations({
 function CalendarModal({
   visible,
   selectedDate,
+  defaultDate,
   title = "Filtrar por fecha",
   subtitle = "Selecciona el día que quieres visualizar.",
   resetLabel = "Mostrar últimos 3 días",
@@ -740,6 +741,7 @@ function CalendarModal({
 }: {
   visible: boolean;
   selectedDate: string | null;
+  defaultDate?: string;
   title?: string;
   subtitle?: string;
   resetLabel?: string;
@@ -747,18 +749,24 @@ function CalendarModal({
   onSelect: (date: string) => void;
   onReset?: () => void;
 }) {
-  const initialDate = selectedDate ? isoToDate(selectedDate) : isoToDate(todayIso());
+  const initialDate = isoToDate(selectedDate ?? defaultDate ?? todayIso());
   const [visibleMonth, setVisibleMonth] = useState(
     new Date(initialDate.getFullYear(), initialDate.getMonth(), 1),
   );
+  const [selectingYear, setSelectingYear] = useState(false);
 
   useEffect(() => {
     if (visible) {
-      const date = selectedDate ? isoToDate(selectedDate) : isoToDate(todayIso());
+      const date = isoToDate(selectedDate ?? defaultDate ?? todayIso());
       setVisibleMonth(new Date(date.getFullYear(), date.getMonth(), 1));
+      setSelectingYear(false);
     }
-  }, [selectedDate, visible]);
+  }, [defaultDate, selectedDate, visible]);
 
+  const selectedYear = selectedDate ? isoToDate(selectedDate).getFullYear() : null;
+  const currentYear = isoToDate(todayIso()).getFullYear();
+  const yearBlockStart = Math.floor(visibleMonth.getFullYear() / 12) * 12;
+  const yearOptions = Array.from({ length: 12 }, (_, index) => yearBlockStart + index);
   const monthLabel = new Intl.DateTimeFormat("es-CO", {
     month: "long",
     year: "numeric",
@@ -778,6 +786,20 @@ function CalendarModal({
       new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() + offset, 1),
     );
   };
+  const moveYear = (offset: number) => {
+    setVisibleMonth(
+      new Date(visibleMonth.getFullYear() + offset, visibleMonth.getMonth(), 1),
+    );
+  };
+  const moveYearBlock = (offset: number) => {
+    setVisibleMonth(
+      new Date(visibleMonth.getFullYear() + offset * 12, visibleMonth.getMonth(), 1),
+    );
+  };
+  const selectYear = (year: number) => {
+    setVisibleMonth(new Date(year, visibleMonth.getMonth(), 1));
+    setSelectingYear(false);
+  };
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
@@ -792,55 +814,115 @@ function CalendarModal({
               <Ionicons name="close" size={20} color={C.ink} />
             </Pressable>
           </View>
-          <View style={styles.calendarNavigation}>
-            <Pressable style={styles.calendarArrow} onPress={() => moveMonth(-1)}>
-              <Ionicons name="chevron-back" size={20} color={C.navy} />
-            </Pressable>
-            <Text style={styles.calendarMonth}>
-              {monthLabel.charAt(0).toUpperCase() + monthLabel.slice(1)}
-            </Text>
-            <Pressable style={styles.calendarArrow} onPress={() => moveMonth(1)}>
-              <Ionicons name="chevron-forward" size={20} color={C.navy} />
-            </Pressable>
-          </View>
-          <View style={styles.calendarGrid}>
-            {["D", "L", "M", "M", "J", "V", "S"].map((day, index) => (
-              <Text key={`${day}-${index}`} style={styles.calendarWeekday}>
-                {day}
-              </Text>
-            ))}
-            {cells.map((day, index) => {
-              if (!day) {
-                return <View key={`empty-${index}`} style={styles.calendarDay} />;
-              }
-              const isoDate = dateToIso(
-                new Date(visibleMonth.getFullYear(), visibleMonth.getMonth(), day),
-              );
-              const selected = isoDate === selectedDate;
-              const isToday = isoDate === todayIso();
-              return (
-                <Pressable
-                  key={isoDate}
-                  style={[
-                    styles.calendarDay,
-                    isToday && styles.calendarToday,
-                    selected && styles.calendarDaySelected,
-                  ]}
-                  onPress={() => onSelect(isoDate)}
-                >
-                  <Text
-                    style={[
-                      styles.calendarDayText,
-                      isToday && styles.calendarTodayText,
-                      selected && styles.calendarDayTextSelected,
-                    ]}
-                  >
+          {selectingYear ? (
+            <>
+              <View style={styles.calendarNavigation}>
+                <Pressable style={styles.calendarArrow} onPress={() => moveYearBlock(-1)}>
+                  <Ionicons name="chevron-back" size={20} color={C.navy} />
+                </Pressable>
+                <View style={styles.calendarMonthButton}>
+                  <Text style={styles.calendarMonth}>Selecciona el año</Text>
+                  <Text style={styles.caption}>{yearBlockStart} - {yearBlockStart + 11}</Text>
+                </View>
+                <Pressable style={styles.calendarArrow} onPress={() => moveYearBlock(1)}>
+                  <Ionicons name="chevron-forward" size={20} color={C.navy} />
+                </Pressable>
+              </View>
+              <View style={styles.yearGrid}>
+                {yearOptions.map((year) => {
+                  const selected = year === selectedYear;
+                  const isCurrent = year === currentYear;
+                  return (
+                    <Pressable
+                      key={year}
+                      style={[
+                        styles.yearOption,
+                        isCurrent && styles.calendarToday,
+                        selected && styles.calendarDaySelected,
+                      ]}
+                      onPress={() => selectYear(year)}
+                    >
+                      <Text
+                        style={[
+                          styles.yearOptionText,
+                          isCurrent && styles.calendarTodayText,
+                          selected && styles.calendarDayTextSelected,
+                        ]}
+                      >
+                        {year}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+              <SecondaryButton
+                label="Volver al calendario"
+                icon="calendar-outline"
+                onPress={() => setSelectingYear(false)}
+              />
+            </>
+          ) : (
+            <>
+              <View style={styles.calendarNavigation}>
+                <Pressable style={styles.calendarArrowSmall} onPress={() => moveYear(-1)}>
+                  <Ionicons name="play-back" size={17} color={C.navy} />
+                </Pressable>
+                <Pressable style={styles.calendarArrow} onPress={() => moveMonth(-1)}>
+                  <Ionicons name="chevron-back" size={20} color={C.navy} />
+                </Pressable>
+                <Pressable style={styles.calendarMonthButton} onPress={() => setSelectingYear(true)}>
+                  <Text style={styles.calendarMonth}>
+                    {monthLabel.charAt(0).toUpperCase() + monthLabel.slice(1)}
+                  </Text>
+                  <Text style={styles.caption}>Cambiar año</Text>
+                </Pressable>
+                <Pressable style={styles.calendarArrow} onPress={() => moveMonth(1)}>
+                  <Ionicons name="chevron-forward" size={20} color={C.navy} />
+                </Pressable>
+                <Pressable style={styles.calendarArrowSmall} onPress={() => moveYear(1)}>
+                  <Ionicons name="play-forward" size={17} color={C.navy} />
+                </Pressable>
+              </View>
+              <View style={styles.calendarGrid}>
+                {["D", "L", "M", "M", "J", "V", "S"].map((day, index) => (
+                  <Text key={`${day}-${index}`} style={styles.calendarWeekday}>
                     {day}
                   </Text>
-                </Pressable>
-              );
-            })}
-          </View>
+                ))}
+                {cells.map((day, index) => {
+                  if (!day) {
+                    return <View key={`empty-${index}`} style={styles.calendarDay} />;
+                  }
+                  const isoDate = dateToIso(
+                    new Date(visibleMonth.getFullYear(), visibleMonth.getMonth(), day),
+                  );
+                  const selected = isoDate === selectedDate;
+                  const isToday = isoDate === todayIso();
+                  return (
+                    <Pressable
+                      key={isoDate}
+                      style={[
+                        styles.calendarDay,
+                        isToday && styles.calendarToday,
+                        selected && styles.calendarDaySelected,
+                      ]}
+                      onPress={() => onSelect(isoDate)}
+                    >
+                      <Text
+                        style={[
+                          styles.calendarDayText,
+                          isToday && styles.calendarTodayText,
+                          selected && styles.calendarDayTextSelected,
+                        ]}
+                      >
+                        {day}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </>
+          )}
           {onReset && (
             <SecondaryButton
               label={resetLabel}
@@ -1581,10 +1663,12 @@ function CreateContractor({
   const [documentNumber, setDocumentNumber] = useState("");
   const [name, setName] = useState("");
   const [lastName, setLastName] = useState("");
+  const [birthDate, setBirthDate] = useState("");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
   const [cedulaPdf, setCedulaPdf] = useState<ContractorPdfFile | null>(null);
   const [selectorOpen, setSelectorOpen] = useState(false);
+  const [birthDateCalendarOpen, setBirthDateCalendarOpen] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -1624,7 +1708,7 @@ function CreateContractor({
   const save = async () => {
     const normalizedEmail = email.trim().toLowerCase();
     const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail);
-    if (!documentTypeId || !documentNumber.trim() || !name.trim() || !lastName.trim() || !phone.trim() || !normalizedEmail) {
+    if (!documentTypeId || !documentNumber.trim() || !name.trim() || !lastName.trim() || !birthDate || !phone.trim() || !normalizedEmail) {
       Alert.alert("Completa el contratista", "Todos los campos son obligatorios en esta fase.");
       return;
     }
@@ -1643,6 +1727,7 @@ function CreateContractor({
         documentNumber,
         name,
         lastName,
+        birthDate,
         phone,
         email: normalizedEmail,
         cedulaPdf,
@@ -1676,6 +1761,12 @@ function CreateContractor({
         <Input icon="person-outline" value={name} onChangeText={setName} autoCapitalize="words" />
         <Label text="Apellidos *" />
         <Input icon="person-outline" value={lastName} onChangeText={setLastName} autoCapitalize="words" />
+        <Choice
+          label="Fecha de nacimiento *"
+          value={birthDate || "Selecciona fecha"}
+          icon="calendar-outline"
+          onPress={() => setBirthDateCalendarOpen(true)}
+        />
         <Label text="Teléfono *" />
         <Input icon="call-outline" value={phone} onChangeText={setPhone} keyboardType="phone-pad" />
         <Label text="Correo *" />
@@ -1705,6 +1796,18 @@ function CreateContractor({
         onSelect={(id) => {
           setDocumentTypeId(id);
           setSelectorOpen(false);
+        }}
+      />
+      <CalendarModal
+        visible={birthDateCalendarOpen}
+        selectedDate={birthDate || null}
+        defaultDate="1990-01-01"
+        title="Fecha de nacimiento"
+        subtitle="Selecciona la fecha de nacimiento del contratista."
+        onClose={() => setBirthDateCalendarOpen(false)}
+        onSelect={(date) => {
+          setBirthDate(date);
+          setBirthDateCalendarOpen(false);
         }}
       />
     </Page>
@@ -1809,6 +1912,7 @@ function ClientContractorProfile({
           ["Nombres", contractor.name],
           ["Apellidos", contractor.lastName],
           ["Cédula", contractor.document],
+          ["Fecha de nacimiento", contractor.birthDate ?? "Sin registrar"],
           ["RH", contractor.rh ?? "Sin registrar"],
           ["Estado civil", contractor.civilState],
         ]}
@@ -1872,6 +1976,7 @@ function ContractorProfile({
       </LinearGradient>
       <InfoCard title="Información personal" rows={[
         ["Nombres y apellidos", contractor.fullName],
+        ["Fecha de nacimiento", contractor.birthDate ?? "Sin registrar"],
         ["RH", contractor.rh ?? "Sin registrar"],
         ["Estado civil", contractor.civilState],
       ]} />
@@ -2889,6 +2994,8 @@ const styles = StyleSheet.create({
   calendarCard: { width: "100%", maxWidth: 420, borderRadius: 22, padding: 18, backgroundColor: C.white, gap: 16 },
   calendarNavigation: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   calendarArrow: { width: 40, height: 40, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: C.blueBg },
+  calendarArrowSmall: { width: 32, height: 40, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: "#F8FAFF" },
+  calendarMonthButton: { flex: 1, minHeight: 44, alignItems: "center", justifyContent: "center", paddingHorizontal: 8 },
   calendarMonth: { color: C.ink, fontSize: 15, fontWeight: "800" },
   calendarGrid: { flexDirection: "row", flexWrap: "wrap" },
   calendarWeekday: { width: "14.2857%", paddingVertical: 8, color: C.muted, fontSize: 10, fontWeight: "800", textAlign: "center" },
@@ -2898,6 +3005,9 @@ const styles = StyleSheet.create({
   calendarDayText: { color: C.ink, fontSize: 12, fontWeight: "700" },
   calendarTodayText: { color: C.navy, fontWeight: "900" },
   calendarDayTextSelected: { color: C.white },
+  yearGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  yearOption: { width: "31.8%", minHeight: 46, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: "#F8FAFF" },
+  yearOptionText: { color: C.ink, fontSize: 13, fontWeight: "800" },
   bottomNav: { minHeight: 68, backgroundColor: C.white, borderTopWidth: 1, borderTopColor: C.line, flexDirection: "row", paddingHorizontal: 8, paddingTop: 7 },
   tab: { flex: 1, alignItems: "center", gap: 3 },
   tabIcon: { width: 36, height: 30, borderRadius: 11, alignItems: "center", justifyContent: "center" },
