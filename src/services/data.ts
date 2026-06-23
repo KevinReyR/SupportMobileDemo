@@ -52,6 +52,11 @@ function cleanText(value: string | null | undefined) {
 
 const CONTRACTOR_DOCUMENT_BUCKET = "contractor-documents";
 const MAX_CONTRACTOR_DOCUMENT_BYTES = 1_048_576;
+export type ContractorActivationDocumentType =
+  | "CERTIFICADO_ARL"
+  | "ANTECEDENTES_POLICIA"
+  | "ANTECEDENTES_PROCURADURIA";
+type ContractorUploadDocumentType = "CEDULA" | ContractorActivationDocumentType;
 
 function normalizeContractStatus(value: string | null | undefined): ContractStatus {
   const normalized = cleanText(value).toUpperCase();
@@ -454,7 +459,7 @@ export async function createContractorDocumentSignedUrl(
 
 async function uploadAndRegisterContractorPdf(
   contractorId: number,
-  typeCode: "CEDULA" | "CERTIFICADO_ARL",
+  typeCode: ContractorUploadDocumentType,
   file: ContractorPdfFile,
 ) {
   validatePdfFile(file);
@@ -505,11 +510,12 @@ export async function createContractorDraft(input: CreateContractorInput): Promi
   return contractorId;
 }
 
-export async function uploadContractorArlDocument(
+export async function uploadContractorActivationDocument(
   contractorId: number,
+  typeCode: ContractorActivationDocumentType,
   file: ContractorPdfFile,
 ) {
-  await uploadAndRegisterContractorPdf(contractorId, "CERTIFICADO_ARL", file);
+  await uploadAndRegisterContractorPdf(contractorId, typeCode, file);
 }
 
 export async function createOperation(input: {

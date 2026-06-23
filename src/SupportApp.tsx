@@ -40,9 +40,9 @@ import {
   setUserActive,
   setUserRole,
   toggleUserClient,
-  uploadContractorArlDocument,
+  uploadContractorActivationDocument,
 } from "./services/data";
-import type { ContractorPdfFile } from "./services/data";
+import type { ContractorActivationDocumentType, ContractorPdfFile } from "./services/data";
 import type {
   AppData,
   Assignment,
@@ -2001,7 +2001,7 @@ function ContractorProfile({
         ["Zapatos", contractor.shoeSize ?? "-"],
       ]} />
       {context.role === "Director" && contractor.contractStatus === "PENDIENTE" && (
-        <ContractorActivationCard contractorId={contractor.id} onChanged={onChanged} />
+        <ContractorActivationDocumentsCard contractorId={contractor.id} onChanged={onChanged} />
       )}
       <ContractorDocumentsSection contractorId={contractor.id} onOpen={onDocument} />
       <SectionTitle title="Historial de operaciones" action={`${history.length} registros`} />
@@ -2138,7 +2138,7 @@ function ContractorActivationCard({
     }
     setSaving(true);
     try {
-      await uploadContractorArlDocument(contractorId, arlPdf);
+      await uploadContractorActivationDocument(contractorId, "CERTIFICADO_ARL", arlPdf);
       Alert.alert("Contrato activado", "El contratista ya quedó disponible para operaciones.");
       await onChanged();
     } catch (cause) {
@@ -2170,6 +2170,164 @@ function ContractorActivationCard({
         <Ionicons name="cloud-upload-outline" size={20} color={C.navy} />
       </Pressable>
       <PrimaryButton label={saving ? "Activando..." : "Guardar ARL y activar"} icon="checkmark-circle-outline" disabled={saving} onPress={save} />
+    </View>
+  );
+}
+
+const activationDocumentOptions: { typeCode: ContractorActivationDocumentType; title: string }[] = [
+  { typeCode: "CERTIFICADO_ARL", title: "Certificado ARL" },
+  { typeCode: "ANTECEDENTES_POLICIA", title: "Antecedentes Policía" },
+  { typeCode: "ANTECEDENTES_PROCURADURIA", title: "Antecedentes Procuraduría" },
+];
+
+function ContractorActivationDocumentsCard({
+  contractorId,
+  onChanged,
+}: {
+  contractorId: number;
+  onChanged: () => void;
+}) {
+  const [selectedFiles, setSelectedFiles] = useState<Partial<Record<ContractorActivationDocumentType, ContractorPdfFile>>>({});
+  const [existingCodes, setExistingCodes] = useState<ContractorActivationDocumentType[]>([]);
+  const [loadingDocuments, setLoadingDocuments] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  const refreshDocuments = useCallback(async () => {
+    setLoadingDocuments(true);
+    try {
+      const documents = await loadContractorDocuments(contractorId);
+      setExistingCodes(
+        activationDocumentOptions
+          .map((item) => item.typeCode)
+          .filter((code) => documents.some((document) => document.typeCode === code)),
+      );
+    } catch (cause) {
+      Alert.alert("No fue posible cargar documentos", errorMessage(cause));
+    } finally {
+      setLoadingDocuments(false);
+    }
+  }, [contractorId]);
+
+  useEffect(() => {
+    refreshDocuments();
+  }, [refreshDocuments]);
+
+  const pickDocument = async (typeCode: ContractorActivationDocumentType, title: string) => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: "application/pdf",
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (result.canceled) return;
+      const asset = result.assets[0];
+      if (!asset) return;
+      if ((asset.size ?? 0) > 1_048_576) {
+        Alert.alert("PDF demasiado grande", `${title} debe pesar máximo 1 MB.`);
+        return;
+      }
+      const isPdf = asset.mimeType === "application/pdf" || asset.name.toLowerCase().endsWith(".pdf");
+      if (!isPdf) {
+        Alert.alert("Formato no válido", "Adjunta únicamente documentos PDF.");
+        return;
+      }
+      setSelectedFiles((current) => ({
+        ...current,
+        [typeCode]: {
+          uri: asset.uri,
+          name: asset.name,
+          mimeType: asset.mimeType,
+          size: asset.size,
+        },
+      }));
+    } catch (cause) {
+      Alert.alert("No fue posible adjuntar", errorMessage(cause));
+    }
+  };
+
+  const save = async () => {
+    const pendingUploads = activationDocumentOptions.filter((item) => selectedFiles[item.typeCode]);
+    if (pendingUploads.length === 0) {
+      Alert.alert("Adjunta documentos", "Selecciona al menos un documento en PDF para guardar.");
+      return;
+    }
+    setSaving(true);
+    try {
+      for (const item of pendingUploads) {
+        const file = selectedFiles[item.typeCode];
+        if (file) {
+          await uploadContractorActivationDocument(contractorId, item.typeCode, file);
+        }
+      }
+      setSelectedFiles({});
+      const documents = await loadContractorDocuments(contractorId);
+      const completed = activationDocumentOptions.every((item) =>
+        documents.some((document) => document.typeCode === item.typeCode),
+      );
+      setExistingCodes(
+        activationDocumentOptions
+          .map((item) => item.typeCode)
+          .filter((code) => documents.some((document) => document.typeCode === code)),
+      );
+      Alert.alert(
+        completed ? "Contrato activado" : "Documentos guardados",
+        completed
+          ? "El contratista ya quedó disponible para operaciones."
+          : "Aún faltan documentos para activar el contrato.",
+      );
+      await onChanged();
+    } catch (cause) {
+      Alert.alert("No fue posible guardar", errorMessage(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <View style={styles.activationCard}>
+      <View style={styles.row}>
+        <Ionicons name="shield-checkmark-outline" size={22} color={C.orange} />
+        <View style={styles.flex}>
+          <Text style={styles.cardTitle}>Activación pendiente</Text>
+          <Text style={styles.caption}>El contratista se activará solo cuando estén los tres documentos.</Text>
+        </View>
+      </View>
+      {loadingDocuments ? (
+        <ActivityIndicator color={C.navy} />
+      ) : (
+        activationDocumentOptions.map((item) => {
+          const selectedFile = selectedFiles[item.typeCode];
+          const saved = existingCodes.includes(item.typeCode);
+          return (
+            <Pressable
+              key={item.typeCode}
+              style={styles.uploadCard}
+              onPress={() => pickDocument(item.typeCode, item.title)}
+            >
+              <View style={styles.pdfIcon}>
+                <Ionicons
+                  name={saved ? "checkmark-circle-outline" : "document-attach-outline"}
+                  size={23}
+                  color={saved ? C.green : C.orange}
+                />
+              </View>
+              <View style={styles.flex}>
+                <Text style={styles.cardTitle}>{item.title}</Text>
+                <Text style={styles.cardMeta}>
+                  {selectedFile ? selectedFile.name : saved ? "Guardado. Puedes adjuntar otro PDF." : "Adjuntar archivo PDF máximo 1 MB"}
+                </Text>
+              </View>
+              <Ionicons name="cloud-upload-outline" size={20} color={C.navy} />
+            </Pressable>
+          );
+        })
+      )}
+      <PrimaryButton
+        label={saving ? "Guardando..." : "Guardar documentos"}
+        icon="checkmark-circle-outline"
+        disabled={saving || loadingDocuments}
+        onPress={save}
+      />
     </View>
   );
 }
