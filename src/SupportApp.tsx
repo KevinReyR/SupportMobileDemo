@@ -100,6 +100,7 @@ const EMPTY_DATA: AppData = {
   contractors: [],
   clientContractors: [],
   areas: [],
+  shifts: [],
   services: [],
   attendanceStatuses: [],
   users: [],
@@ -146,9 +147,12 @@ function formatDate(value: string | null | undefined) {
 }
 
 function todayIso() {
-  const now = new Date();
-  const offset = now.getTimezoneOffset() * 60_000;
-  return new Date(now.getTime() - offset).toISOString().slice(0, 10);
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Bogota",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
 }
 
 function dateToIso(value: Date) {
@@ -167,6 +171,10 @@ function addDays(value: Date, days: number) {
   const result = new Date(value);
   result.setDate(result.getDate() + days);
   return result;
+}
+
+function addDaysIso(value: string, days: number) {
+  return dateToIso(addDays(isoToDate(value), days));
 }
 
 function errorMessage(error: unknown) {
@@ -864,7 +872,7 @@ function OperationCard({
         </View>
         <View style={styles.flex}>
           <Text style={styles.cardTitle}>{operation.client}</Text>
-          <Text style={styles.cardMeta}>{operation.area} ⋅ {operation.people} personas</Text>
+          <Text style={styles.cardMeta}>{operation.area} ⋅ {operation.shift} ⋅ {operation.people} personas</Text>
           <Text style={styles.caption}>{formatDate(operation.date)}</Text>
         </View>
         {!hideStatus && <StatusBadge status={operation.status} />}
@@ -922,7 +930,7 @@ function OperationDetail({
           <View>
             <Text style={styles.eyebrow}>OPERACIÓN #{operation.id}</Text>
             <Text style={styles.detailTitle}>{operation.client}</Text>
-            <Text style={styles.subtitle}>{operation.area} ⋅ {formatDate(operation.date)}</Text>
+            <Text style={styles.subtitle}>{operation.area} ⋅ {operation.shift} ⋅ {formatDate(operation.date)}</Text>
           </View>
           {context.role !== "Cliente" && <StatusBadge status={operation.status} />}
         </View>
@@ -1027,8 +1035,10 @@ function InitialOperation({
   const [clientId, setClientId] = useState(firstClient?.id ?? 0);
   const availableAreas = data.areas.filter((area) => area.clientId === clientId);
   const [areaId, setAreaId] = useState(availableAreas[0]?.id ?? 0);
+  const availableShifts = data.shifts.filter((shift) => shift.areaId === areaId);
+  const [shiftId, setShiftId] = useState(availableShifts[0]?.id ?? 0);
   const [contractorId, setContractorId] = useState(activeContractors[0]?.id ?? 0);
-  const [openSelector, setOpenSelector] = useState<"client" | "area" | "contractor" | null>(null);
+  const [openSelector, setOpenSelector] = useState<"client" | "area" | "shift" | "contractor" | null>(null);
   const [added, setAdded] = useState<Contractor[]>([]);
   const [saving, setSaving] = useState(false);
 
@@ -1038,17 +1048,21 @@ function InitialOperation({
   }, [clientId, data.areas]);
 
   useEffect(() => {
+    const nextShift = data.shifts.find((shift) => shift.areaId === areaId);
+    setShiftId(nextShift?.id ?? 0);
+  }, [areaId, data.shifts]);
+
+  useEffect(() => {
     if (!activeContractors.some((contractor) => contractor.id === contractorId)) {
       setContractorId(activeContractors[0]?.id ?? 0);
     }
   }, [activeContractors, contractorId]);
 
   const selectedContractor = data.contractors.find((item) => item.id === contractorId);
-  const service = data.services.find((item) => item.areaId === areaId);
 
   const save = async () => {
-    if (!clientId || !areaId || !service || added.length === 0) {
-      Alert.alert("Completa el registro", "Selecciona cliente, Área y al menos un contratista.");
+    if (!clientId || !areaId || !shiftId || added.length === 0) {
+      Alert.alert("Completa el registro", "Selecciona cliente, área, turno y al menos un contratista.");
       return;
     }
     setSaving(true);
@@ -1057,8 +1071,8 @@ function InitialOperation({
         date: todayIso(),
         clientId,
         areaId,
+        shiftId,
         contractorIds: added.map((item) => item.id),
-        clientServiceId: service.id,
       });
       Alert.alert("Registro guardado", "La operación quedó EN CURSO.");
       await onSaved();
@@ -1087,6 +1101,13 @@ function InitialOperation({
           onPress={() => setOpenSelector("area")}
         />
         <Choice
+          label="Turno *"
+          value={availableShifts.find((item) => item.id === shiftId)?.name ?? "Selecciona un turno"}
+          icon="time-outline"
+          disabled={!areaId || availableShifts.length === 0}
+          onPress={() => setOpenSelector("shift")}
+        />
+        <Choice
           label="Contratista *"
           value={selectedContractor?.fullName ?? "Selecciona un contratista"}
           icon="person-outline"
@@ -1112,7 +1133,7 @@ function InitialOperation({
               <View style={styles.flex}>
                 <Text style={styles.personName}>{contractor.fullName}</Text>
                 <Text style={styles.caption}>
-                  {context.clients.find((item) => item.id === clientId)?.name} ⋅ {availableAreas.find((item) => item.id === areaId)?.name}
+                  {context.clients.find((item) => item.id === clientId)?.name} ⋅ {availableAreas.find((item) => item.id === areaId)?.name} ⋅ {availableShifts.find((item) => item.id === shiftId)?.name}
                 </Text>
               </View>
               <Pressable onPress={() => setAdded(added.filter((item) => item.id !== contractor.id))}>
@@ -1142,6 +1163,17 @@ function InitialOperation({
         onClose={() => setOpenSelector(null)}
         onSelect={(id) => {
           setAreaId(id);
+          setOpenSelector(null);
+        }}
+      />
+      <DropdownModal
+        visible={openSelector === "shift"}
+        title="Seleccionar turno"
+        options={availableShifts}
+        selectedId={shiftId}
+        onClose={() => setOpenSelector(null)}
+        onSelect={(id) => {
+          setShiftId(id);
           setOpenSelector(null);
         }}
       />
@@ -1237,6 +1269,7 @@ function FinalOperation({
         <Choice label="Fecha" value={formatDate(operation.date)} icon="calendar-outline" disabled />
         <Choice label="Cliente" value={operation.client} icon="business-outline" disabled />
         <Choice label="Área" value={operation.area} icon="location-outline" disabled />
+        <Choice label="Turno" value={operation.shift} icon="time-outline" disabled />
       </FormCard>
       <SectionTitle title="Asistencia y novedades" action={`${assignments.length} personas`} />
       {loading ? <ActivityIndicator color={C.navy} /> : assignments.map((assignment) => (
@@ -1446,7 +1479,7 @@ function NewRequest({
   const [description, setDescription] = useState("Auxiliares con disponibilidad inmediata para apoyo operativo.");
   const [saving, setSaving] = useState(false);
   const area = areas[areaIndex];
-  const requiredDate = new Date(Date.now() + 2 * 86_400_000).toISOString().slice(0, 10);
+  const requiredDate = addDaysIso(todayIso(), 2);
 
   const save = async () => {
     if (!client || !area || Number(quantity) <= 0 || !description.trim()) {
@@ -1796,7 +1829,7 @@ function ClientContractorProfile({
             <View style={styles.between}>
               <View>
                 <Text style={styles.cardTitle}>{item.areaName}</Text>
-                <Text style={styles.cardMeta}>{formatDate(item.operationDate)}</Text>
+                <Text style={styles.cardMeta}>{item.shiftName} ⋅ {formatDate(item.operationDate)}</Text>
                 <Text style={styles.caption}>{item.attendanceStatus ?? "Sin dato"}</Text>
               </View>
               <Text style={styles.extra}>{item.extraHours} h extras</Text>
@@ -1874,7 +1907,7 @@ function ContractorProfile({
           <View style={styles.between}>
             <View>
               <Text style={styles.cardTitle}>{item.clientName}</Text>
-              <Text style={styles.cardMeta}>{item.areaName} ⋅ {formatDate(item.operationDate)}</Text>
+              <Text style={styles.cardMeta}>{item.areaName} ⋅ {item.shiftName} ⋅ {formatDate(item.operationDate)}</Text>
             </View>
             <Text style={styles.extra}>{item.extraHours} h extras</Text>
           </View>
@@ -2104,7 +2137,7 @@ function HistoryDetail({ history }: { history: ContractorHistory }) {
       <View style={styles.heroCard}>
         <Text style={styles.eyebrow}>TURNO REGISTRADO</Text>
         <Text style={styles.detailTitle}>{history.clientName}</Text>
-        <Text style={styles.subtitle}>{history.areaName} ⋅ {formatDate(history.operationDate)}</Text>
+        <Text style={styles.subtitle}>{history.areaName} ⋅ {history.shiftName} ⋅ {formatDate(history.operationDate)}</Text>
         <View style={styles.summaryRow}>
           <MiniStat label="Asistencia" value={history.attendanceStatus ?? "Sin dato"} />
           <MiniStat label="Extras" value={`${history.extraHours} h`} />
@@ -2122,7 +2155,7 @@ function ClientHistoryDetail({ history }: { history: ContractorHistory }) {
       <View style={styles.heroCard}>
         <Text style={styles.eyebrow}>TURNO REGISTRADO</Text>
         <Text style={styles.detailTitle}>{history.areaName}</Text>
-        <Text style={styles.subtitle}>{formatDate(history.operationDate)}</Text>
+        <Text style={styles.subtitle}>{history.shiftName} ⋅ {formatDate(history.operationDate)}</Text>
         <View style={styles.summaryRow}>
           <MiniStat label="Asistencia" value={history.attendanceStatus ?? "Sin dato"} />
           <MiniStat label="Extras" value={`${history.extraHours} h`} />

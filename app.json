@@ -9,7 +9,10 @@
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "co.supportcolombia.mobile"
+      "bundleIdentifier": "co.supportcolombia.mobile",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "co.supportcolombia.mobile",
@@ -26,6 +29,12 @@
       "expo-font",
       "expo-router",
       "expo-dev-client"
-    ]
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "9a4d8403-c447-4115-bd81-2a9d49d469e9"
+      }
+    }
   }
 }

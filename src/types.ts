@@ -32,6 +32,8 @@ export interface Operation {
   client: string;
   areaId: number;
   area: string;
+  shiftId: number;
+  shift: string;
   people: number;
   worked: number;
   extraHours: number;
@@ -96,6 +98,7 @@ export interface ContractorHistory {
   operationDate: string;
   clientName: string;
   areaName: string;
+  shiftName: string;
   attendanceStatus: string | null;
   extraHours: number;
   observations: string | null;
@@ -149,6 +152,7 @@ export interface AppData {
   contractors: Contractor[];
   clientContractors: ClientContractor[];
   areas: (NamedRecord & { clientId: number })[];
+  shifts: (NamedRecord & { areaId: number })[];
   services: { id: number; areaId: number }[];
   attendanceStatuses: NamedRecord[];
   users: AdminUser[];

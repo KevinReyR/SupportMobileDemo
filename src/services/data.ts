@@ -137,7 +137,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
     supabase
       .from("operation")
       .select(
-        "id,operation_date,client_id,area_id,status,observations,review_observations,clients(name),area(name),operation_assignment(id,planned_quantity,worked_quantity,extra_hours)",
+        "id,operation_date,client_id,area_id,shift_id,status,observations,review_observations,clients(name),area(name),shift(name),operation_assignment(id,planned_quantity,worked_quantity,extra_hours)",
       )
       .order("operation_date", { ascending: false })
       .order("id", { ascending: false }),
@@ -146,6 +146,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       .select("id,client_id,area_id,required_quantity,description,required_date,status,clients(name),area(name)")
       .order("required_date", { ascending: false }),
     supabase.from("area").select("id,name,client_id").eq("is_active", true).order("id"),
+    supabase.from("shift").select("id,name,area_id").eq("is_active", true).order("area_id").order("id"),
     supabase.from("client_services").select("id,area_id").order("id"),
     supabase.from("attendance_status").select("id,name").order("id"),
   ]);
@@ -161,6 +162,8 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       client: cleanText(firstRelation<any>(row.clients)?.name),
       areaId: row.area_id,
       area: cleanText(firstRelation<any>(row.area)?.name),
+      shiftId: row.shift_id,
+      shift: cleanText(firstRelation<any>(row.shift)?.name) || "Sin turno",
       people: assignments.length,
       worked: assignments.reduce(
         (total: number, assignment: any) => total + Number(assignment.worked_quantity ?? 0),
@@ -339,11 +342,16 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       name: cleanText(area.name),
       clientId: area.client_id,
     })),
-    services: (common[5].data ?? []).map((service: any) => ({
+    shifts: (common[5].data ?? []).map((shift: any) => ({
+      id: shift.id,
+      name: cleanText(shift.name),
+      areaId: shift.area_id,
+    })),
+    services: (common[6].data ?? []).map((service: any) => ({
       id: service.id,
       areaId: service.area_id,
     })),
-    attendanceStatuses: (common[6].data ?? []).map((status: any) => ({
+    attendanceStatuses: (common[7].data ?? []).map((status: any) => ({
       id: status.id,
       name: status.name,
     })),
@@ -378,6 +386,7 @@ export async function loadContractorHistory(contractorId: number): Promise<Contr
     operationDate: row.operation_date,
     clientName: cleanText(row.client_name),
     areaName: cleanText(row.area_name),
+    shiftName: cleanText(row.shift_name) || "Sin turno",
     attendanceStatus: cleanText(row.attendance_status) || null,
     extraHours: Number(row.extra_hours ?? 0),
     observations: cleanText(row.observations) || null,
@@ -394,6 +403,7 @@ export async function loadClientContractorHistory(contractorId: number): Promise
     operationDate: row.operation_date,
     clientName: cleanText(row.client_name),
     areaName: cleanText(row.area_name),
+    shiftName: cleanText(row.shift_name) || "Sin turno",
     attendanceStatus: cleanText(row.attendance_status) || null,
     extraHours: Number(row.extra_hours ?? 0),
     observations: null,
@@ -502,16 +512,16 @@ export async function createOperation(input: {
   date: string;
   clientId: number;
   areaId: number;
+  shiftId: number;
   contractorIds: number[];
-  clientServiceId: number;
 }) {
   const result = await supabase.rpc("create_operation_with_assignments", {
     p_operation_date: input.date,
     p_client_id: input.clientId,
     p_area_id: input.areaId,
+    p_shift_id: input.shiftId,
     p_assignments: input.contractorIds.map((contractorId) => ({
       contractor_id: contractorId,
-      client_service_id: input.clientServiceId,
       planned_quantity: 1,
     })),
   });
