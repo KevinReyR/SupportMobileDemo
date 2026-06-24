@@ -11,7 +11,8 @@
       "supportsTablet": true,
       "bundleIdentifier": "co.supportcolombia.mobile",
       "infoPlist": {
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSCameraUsageDescription": "Support Colombia necesita acceso a la cámara para tomar foto de la cédula del contratista."
       }
     },
     "android": {
@@ -28,7 +29,13 @@
     "plugins": [
       "expo-font",
       "expo-router",
-      "expo-dev-client"
+      "expo-dev-client",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Support Colombia necesita acceso a la cámara para tomar foto de la cédula del contratista."
+        }
+      ]
     ],
     "extra": {
       "router": {},

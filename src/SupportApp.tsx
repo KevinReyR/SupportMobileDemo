@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   Image,
+  InteractionManager,
   Modal,
   Pressable,
   RefreshControl,
@@ -15,8 +16,12 @@ import {
   View,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { CameraView, useCameraPermissions } from "expo-camera";
 import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system/legacy";
+import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
 import { LinearGradient } from "expo-linear-gradient";
+import { PDFDocument } from "pdf-lib";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import type { Session } from "@supabase/supabase-js";
 
@@ -92,6 +97,77 @@ const C = {
   redBg: "#FDECEC",
   blueBg: "#EAF0FF",
 };
+
+const MAX_CEDULA_PDF_BYTES = 1_048_576;
+const A4_WIDTH = 595.28;
+const A4_HEIGHT = 841.89;
+const PDF_PAGE_MARGIN = 36;
+
+type CedulaSide = "front" | "back";
+
+async function imageToBase64(uri: string) {
+  return FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+}
+
+function base64ByteLength(value: string) {
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return Math.ceil((value.length * 3) / 4) - padding;
+}
+
+async function buildCedulaPdfFromPhotos(frontUri: string, backUri: string): Promise<ContractorPdfFile> {
+  const attempts = [
+    { width: 1400, compress: 0.72 },
+    { width: 1150, compress: 0.58 },
+    { width: 950, compress: 0.45 },
+    { width: 800, compress: 0.36 },
+  ];
+
+  for (const attempt of attempts) {
+    const [frontImage, backImage] = await Promise.all([
+      manipulateAsync(frontUri, [{ resize: { width: attempt.width } }], {
+        compress: attempt.compress,
+        format: SaveFormat.JPEG,
+      }),
+      manipulateAsync(backUri, [{ resize: { width: attempt.width } }], {
+        compress: attempt.compress,
+        format: SaveFormat.JPEG,
+      }),
+    ]);
+
+    const pdf = await PDFDocument.create();
+    for (const imageResult of [frontImage, backImage]) {
+      const jpgBase64 = await imageToBase64(imageResult.uri);
+      const jpg = await pdf.embedJpg(jpgBase64);
+      const page = pdf.addPage([A4_WIDTH, A4_HEIGHT]);
+      const availableWidth = A4_WIDTH - PDF_PAGE_MARGIN * 2;
+      const availableHeight = A4_HEIGHT - PDF_PAGE_MARGIN * 2;
+      const scale = Math.min(availableWidth / jpg.width, availableHeight / jpg.height);
+      const width = jpg.width * scale;
+      const height = jpg.height * scale;
+      page.drawImage(jpg, {
+        x: (A4_WIDTH - width) / 2,
+        y: (A4_HEIGHT - height) / 2,
+        width,
+        height,
+      });
+    }
+
+    const pdfBase64 = await pdf.saveAsBase64({ dataUri: false });
+    const size = base64ByteLength(pdfBase64);
+    if (size <= MAX_CEDULA_PDF_BYTES) {
+      const uri = `${FileSystem.cacheDirectory ?? ""}cedula-fotos-${Date.now()}.pdf`;
+      await FileSystem.writeAsStringAsync(uri, pdfBase64, { encoding: FileSystem.EncodingType.Base64 });
+      return {
+        uri,
+        name: "cedula-fotos.pdf",
+        mimeType: "application/pdf",
+        size,
+      };
+    }
+  }
+
+  throw new Error("No fue posible generar un PDF menor a 1 MB. Repite las fotos con mejor encuadre o iluminación.");
+}
 
 const EMPTY_DATA: AppData = {
   clients: [],
@@ -1672,13 +1748,19 @@ function CreateContractor({
   const [cedulaPdf, setCedulaPdf] = useState<ContractorPdfFile | null>(null);
   const [selectorOpen, setSelectorOpen] = useState(false);
   const [birthDateCalendarOpen, setBirthDateCalendarOpen] = useState(false);
+  const [cedulaSourceOpen, setCedulaSourceOpen] = useState(false);
+  const [cedulaCaptureOpen, setCedulaCaptureOpen] = useState(false);
+  const [pendingCedulaPick, setPendingCedulaPick] = useState(false);
   const [saving, setSaving] = useState(false);
+  const pickingCedulaRef = useRef(false);
 
   useEffect(() => {
     if (!documentTypeId && documentTypes[0]) setDocumentTypeId(documentTypes[0].id);
   }, [documentTypeId, documentTypes]);
 
-  const pickCedula = async () => {
+  const pickCedula = useCallback(async () => {
+    if (pickingCedulaRef.current) return;
+    pickingCedulaRef.current = true;
     try {
       const result = await DocumentPicker.getDocumentAsync({
         type: "application/pdf",
@@ -1705,8 +1787,25 @@ function CreateContractor({
       });
     } catch (cause) {
       Alert.alert("No fue posible adjuntar", errorMessage(cause));
+    } finally {
+      pickingCedulaRef.current = false;
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    if (!pendingCedulaPick || cedulaSourceOpen) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const task = InteractionManager.runAfterInteractions(() => {
+      timer = setTimeout(() => {
+        setPendingCedulaPick(false);
+        void pickCedula();
+      }, 700);
+    });
+    return () => {
+      task.cancel();
+      if (timer) clearTimeout(timer);
+    };
+  }, [cedulaSourceOpen, pendingCedulaPick, pickCedula]);
 
   const save = async () => {
     const normalizedEmail = email.trim().toLowerCase();
@@ -1776,14 +1875,18 @@ function CreateContractor({
         <Input icon="mail-outline" value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" />
       </FormCard>
       <FormCard title="Documento obligatorio">
-        <Pressable style={styles.uploadCard} onPress={pickCedula}>
+        <Pressable style={styles.uploadCard} onPress={() => setCedulaSourceOpen(true)}>
           <View style={styles.pdfIcon}>
             <Ionicons name="document-attach-outline" size={23} color={C.orange} />
           </View>
           <View style={styles.flex}>
             <Text style={styles.cardTitle}>Cédula en PDF</Text>
             <Text style={styles.cardMeta}>
-              {cedulaPdf ? cedulaPdf.name : "Adjuntar archivo PDF máximo 1 MB"}
+              {cedulaPdf
+                ? cedulaPdf.name === "cedula-fotos.pdf"
+                  ? "PDF generado desde fotos"
+                  : cedulaPdf.name
+                : "Cargar PDF o tomar foto"}
             </Text>
           </View>
           <Ionicons name="cloud-upload-outline" size={20} color={C.navy} />
@@ -1813,7 +1916,239 @@ function CreateContractor({
           setBirthDateCalendarOpen(false);
         }}
       />
+      <CedulaSourceModal
+        visible={cedulaSourceOpen}
+        onClose={() => setCedulaSourceOpen(false)}
+        onPickPdf={() => {
+          setPendingCedulaPick(true);
+          setCedulaSourceOpen(false);
+        }}
+        onTakePhotos={() => {
+          setCedulaSourceOpen(false);
+          setCedulaCaptureOpen(true);
+        }}
+      />
+      <CedulaCaptureFlow
+        visible={cedulaCaptureOpen}
+        onClose={() => setCedulaCaptureOpen(false)}
+        onPdfReady={(file) => {
+          setCedulaPdf(file);
+          setCedulaCaptureOpen(false);
+        }}
+      />
     </Page>
+  );
+}
+
+function CedulaSourceModal({
+  visible,
+  onClose,
+  onPickPdf,
+  onTakePhotos,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  onPickPdf: () => void;
+  onTakePhotos: () => void;
+}) {
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.modalCard}>
+          <View style={styles.between}>
+            <View style={styles.flex}>
+              <Text style={styles.formTitle}>Adjuntar cédula</Text>
+              <Text style={styles.caption}>Elige cómo quieres crear el PDF obligatorio.</Text>
+            </View>
+            <Pressable style={styles.iconButton} onPress={onClose}>
+              <Ionicons name="close" size={20} color={C.ink} />
+            </Pressable>
+          </View>
+          <Pressable style={styles.sourceOption} onPress={onPickPdf}>
+            <View style={styles.pdfIcon}>
+              <Ionicons name="document-attach-outline" size={23} color={C.orange} />
+            </View>
+            <View style={styles.flex}>
+              <Text style={styles.cardTitle}>Cargar PDF</Text>
+              <Text style={styles.cardMeta}>Selecciona un archivo PDF máximo 1 MB.</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={C.muted} />
+          </Pressable>
+          <Pressable style={styles.sourceOption} onPress={onTakePhotos}>
+            <View style={styles.pdfIcon}>
+              <Ionicons name="camera-outline" size={23} color={C.orange} />
+            </View>
+            <View style={styles.flex}>
+              <Text style={styles.cardTitle}>Tomar foto</Text>
+              <Text style={styles.cardMeta}>Captura frente y reverso para generar un PDF A4.</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={C.muted} />
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function CedulaCaptureFlow({
+  visible,
+  onClose,
+  onPdfReady,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  onPdfReady: (file: ContractorPdfFile) => void;
+}) {
+  const cameraRef = useRef<CameraView | null>(null);
+  const [permission, requestPermission] = useCameraPermissions();
+  const [frontUri, setFrontUri] = useState("");
+  const [backUri, setBackUri] = useState("");
+  const [activeSide, setActiveSide] = useState<CedulaSide>("front");
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [generating, setGenerating] = useState(false);
+
+  useEffect(() => {
+    if (visible) {
+      setFrontUri("");
+      setBackUri("");
+      setActiveSide("front");
+      setCameraOpen(true);
+      setGenerating(false);
+    }
+  }, [visible]);
+
+  const ensurePermission = async () => {
+    if (permission?.granted) return true;
+    const result = await requestPermission();
+    if (!result.granted) {
+      Alert.alert("Permiso de cámara", "Necesitamos acceso a la cámara para tomar la foto de la cédula.");
+      return false;
+    }
+    return true;
+  };
+
+  const openCamera = async (side: CedulaSide) => {
+    if (!(await ensurePermission())) return;
+    setActiveSide(side);
+    setCameraOpen(true);
+  };
+
+  const takePhoto = async () => {
+    try {
+      const photo = await cameraRef.current?.takePictureAsync({
+        quality: 0.82,
+        skipProcessing: false,
+      });
+      if (!photo?.uri) return;
+      if (activeSide === "front") {
+        setFrontUri(photo.uri);
+        setActiveSide("back");
+        setCameraOpen(true);
+      } else {
+        setBackUri(photo.uri);
+        setCameraOpen(false);
+      }
+    } catch (cause) {
+      Alert.alert("No fue posible tomar la foto", errorMessage(cause));
+    }
+  };
+
+  const generatePdf = async () => {
+    if (!frontUri || !backUri) {
+      Alert.alert("Faltan fotos", "Toma la foto del frente y del reverso antes de generar el PDF.");
+      return;
+    }
+    setGenerating(true);
+    try {
+      const file = await buildCedulaPdfFromPhotos(frontUri, backUri);
+      onPdfReady(file);
+    } catch (cause) {
+      Alert.alert("No fue posible generar el PDF", errorMessage(cause));
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const activeLabel = activeSide === "front" ? "frente" : "reverso";
+
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={styles.cameraShell}>
+        <View style={styles.cameraHeader}>
+          <View style={styles.flex}>
+            <Text style={styles.formTitle}>Foto de cédula</Text>
+            <Text style={styles.caption}>Toma frente y reverso. Solo se guardará el PDF final.</Text>
+          </View>
+          <Pressable style={styles.iconButton} onPress={onClose}>
+            <Ionicons name="close" size={20} color={C.ink} />
+          </Pressable>
+        </View>
+        {cameraOpen ? (
+          <View style={styles.cameraStage}>
+            {permission?.granted ? (
+              <CameraView ref={cameraRef} style={styles.cameraView} facing="back" mode="picture" />
+            ) : (
+              <View style={styles.cameraPermission}>
+                <Ionicons name="camera-outline" size={42} color={C.navy} />
+                <Text style={styles.cardTitle}>Permiso de cámara requerido</Text>
+                <Text style={styles.caption}>Autoriza la cámara para capturar la cédula.</Text>
+                <PrimaryButton label="Permitir cámara" icon="camera-outline" onPress={ensurePermission} />
+              </View>
+            )}
+            {permission?.granted ? (
+              <View style={styles.cameraControls}>
+                <Text style={styles.cameraInstruction}>Captura el {activeLabel} del documento</Text>
+                <PrimaryButton label="Tomar foto" icon="camera" onPress={takePhoto} />
+                <SecondaryButton label="Ver previsualización" icon="images-outline" onPress={() => setCameraOpen(false)} />
+              </View>
+            ) : null}
+          </View>
+        ) : (
+          <ScrollView contentContainerStyle={styles.capturePreviewContent}>
+            <Notice icon="document-text-outline" text="Previsualiza ambas imágenes antes de generar el PDF." />
+            <CedulaPreviewSlot
+              title="Frente del documento"
+              uri={frontUri}
+              onTake={() => openCamera("front")}
+            />
+            <CedulaPreviewSlot
+              title="Reverso del documento"
+              uri={backUri}
+              onTake={() => openCamera("back")}
+            />
+            <PrimaryButton
+              label={generating ? "Generando PDF..." : "Generar PDF de cédula"}
+              icon="document-outline"
+              disabled={generating || !frontUri || !backUri}
+              onPress={generatePdf}
+            />
+            <SecondaryButton label="Cancelar" icon="close-outline" onPress={onClose} />
+          </ScrollView>
+        )}
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+function CedulaPreviewSlot({ title, uri, onTake }: { title: string; uri: string; onTake: () => void }) {
+  return (
+    <View style={styles.previewCard}>
+      <View style={styles.between}>
+        <View style={styles.flex}>
+          <Text style={styles.cardTitle}>{title}</Text>
+          <Text style={styles.caption}>{uri ? "Foto lista para generar PDF." : "Foto pendiente."}</Text>
+        </View>
+        <SecondaryButton label={uri ? "Repetir" : "Tomar"} icon="camera-outline" onPress={onTake} />
+      </View>
+      {uri ? (
+        <Image source={{ uri }} style={styles.cedulaPreviewImage} resizeMode="contain" />
+      ) : (
+        <View style={styles.emptyPreview}>
+          <Ionicons name="image-outline" size={36} color={C.muted} />
+          <Text style={styles.caption}>Aún no hay imagen</Text>
+        </View>
+      )}
+    </View>
   );
 }
 
@@ -3273,6 +3608,18 @@ const styles = StyleSheet.create({
   formCard: { backgroundColor: C.white, borderRadius: 20, padding: 17, gap: 12, borderWidth: 1, borderColor: C.line },
   formTitle: { color: C.ink, fontSize: 16, fontWeight: "800" },
   uploadCard: { minHeight: 74, borderRadius: 16, padding: 13, flexDirection: "row", alignItems: "center", gap: 11, backgroundColor: "#FBFCFE", borderWidth: 1, borderColor: C.line },
+  sourceOption: { minHeight: 76, borderRadius: 16, padding: 13, flexDirection: "row", alignItems: "center", gap: 11, backgroundColor: "#FBFCFE", borderWidth: 1, borderColor: C.line },
+  cameraShell: { flex: 1, backgroundColor: C.bg },
+  cameraHeader: { minHeight: 76, paddingHorizontal: 18, paddingVertical: 12, flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: C.white, borderBottomWidth: 1, borderBottomColor: C.line },
+  cameraStage: { flex: 1, backgroundColor: "#080B12" },
+  cameraView: { flex: 1 },
+  cameraPermission: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12, padding: 24, backgroundColor: C.bg },
+  cameraControls: { padding: 18, gap: 10, backgroundColor: C.white },
+  cameraInstruction: { color: C.ink, fontSize: 15, fontWeight: "800", textAlign: "center" },
+  capturePreviewContent: { padding: 18, gap: 14 },
+  previewCard: { backgroundColor: C.white, borderRadius: 18, padding: 14, gap: 12, borderWidth: 1, borderColor: C.line },
+  cedulaPreviewImage: { width: "100%", height: 220, borderRadius: 14, backgroundColor: "#F8FAFF" },
+  emptyPreview: { height: 160, borderRadius: 14, borderWidth: 1, borderStyle: "dashed", borderColor: C.line, alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: "#FBFCFE" },
   activationCard: { backgroundColor: C.white, borderRadius: 20, padding: 17, gap: 12, borderWidth: 1, borderColor: "#FFD4C4" },
   boundedList: { maxHeight: 250 },
   counter: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 16, backgroundColor: C.bg, borderRadius: 13, padding: 10 },
