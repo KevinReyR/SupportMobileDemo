@@ -39,6 +39,7 @@ import {
   reviewOperation,
   setUserActive,
   setUserRole,
+  terminateContractor,
   toggleUserClient,
   uploadContractorActivationDocument,
 } from "./services/data";
@@ -103,6 +104,7 @@ const EMPTY_DATA: AppData = {
   shifts: [],
   services: [],
   attendanceStatuses: [],
+  terminationReasons: [],
   users: [],
 };
 
@@ -442,6 +444,7 @@ export default function SupportApp() {
               <ContractorProfile
                 context={context}
                 contractor={selectedContractor}
+                terminationReasons={data.terminationReasons}
                 onDocument={openDocument}
                 onChanged={refresh}
                 onHistory={(history) => {
@@ -1948,18 +1951,21 @@ function ClientContractorProfile({
 function ContractorProfile({
   context,
   contractor,
+  terminationReasons,
   onDocument,
   onChanged,
   onHistory,
 }: {
   context: UserContext;
   contractor: Contractor;
+  terminationReasons: AppData["terminationReasons"];
   onDocument: (document: ContractorDocument) => void;
   onChanged: () => void;
   onHistory: (history: ContractorHistory) => void;
 }) {
   const [history, setHistory] = useState<ContractorHistory[]>([]);
   const [loading, setLoading] = useState(true);
+  const [terminationVisible, setTerminationVisible] = useState(false);
   useEffect(() => {
     loadContractorHistory(contractor.id)
       .then(setHistory)
@@ -2003,6 +2009,24 @@ function ContractorProfile({
       {context.role === "Director" && contractor.contractStatus === "PENDIENTE" && (
         <ContractorActivationDocumentsCard contractorId={contractor.id} onChanged={onChanged} />
       )}
+      {(context.role === "Director" || context.role === "Coordinador") && contractor.contractStatus !== "INACTIVO" && (
+        <SecondaryButton
+          label="Desvincular contratista"
+          icon="person-remove-outline"
+          destructive
+          onPress={() => setTerminationVisible(true)}
+        />
+      )}
+      <TerminateContractorModal
+        visible={terminationVisible}
+        contractor={contractor}
+        reasons={terminationReasons}
+        onClose={() => setTerminationVisible(false)}
+        onTerminated={async () => {
+          setTerminationVisible(false);
+          await onChanged();
+        }}
+      />
       <ContractorDocumentsSection contractorId={contractor.id} onOpen={onDocument} />
       <SectionTitle title="Historial de operaciones" action={`${history.length} registros`} />
       {loading ? <ActivityIndicator color={C.navy} /> : history.length === 0 ? (
@@ -2171,6 +2195,157 @@ function ContractorActivationCard({
       </Pressable>
       <PrimaryButton label={saving ? "Activando..." : "Guardar ARL y activar"} icon="checkmark-circle-outline" disabled={saving} onPress={save} />
     </View>
+  );
+}
+
+function TerminateContractorModal({
+  visible,
+  contractor,
+  reasons,
+  onClose,
+  onTerminated,
+}: {
+  visible: boolean;
+  contractor: Contractor;
+  reasons: AppData["terminationReasons"];
+  onClose: () => void;
+  onTerminated: () => Promise<void>;
+}) {
+  const [terminationDate, setTerminationDate] = useState(todayIso());
+  const [reasonId, setReasonId] = useState(0);
+  const [observations, setObservations] = useState("");
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  const [reasonOpen, setReasonOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const showBaseModal = visible && !calendarOpen && !reasonOpen;
+
+  useEffect(() => {
+    if (visible) {
+      setTerminationDate(todayIso());
+      setReasonId(0);
+      setObservations("");
+    }
+  }, [visible]);
+
+  const selectedReason = reasons.find((reason) => reason.id === reasonId);
+
+  const confirmTermination = async () => {
+    if (!terminationDate || !reasonId || !observations.trim()) {
+      Alert.alert("Completa la desvinculación", "La fecha, la causa y la observación son obligatorias.");
+      return;
+    }
+
+    Alert.alert(
+      "Confirmar desvinculación",
+      `¿Deseas desvincular a ${contractor.fullName} y cancelar su contrato actual?`,
+      [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: "Desvincular",
+          style: "destructive",
+          onPress: async () => {
+            setSaving(true);
+            try {
+              await terminateContractor({
+                contractorId: contractor.id,
+                terminationDate,
+                reasonId,
+                observations,
+              });
+              Alert.alert("Contratista desvinculado", "El contrato quedó en estado INACTIVO.");
+              await onTerminated();
+            } catch (cause) {
+              Alert.alert("No fue posible desvincular", errorMessage(cause));
+            } finally {
+              setSaving(false);
+            }
+          },
+        },
+      ],
+    );
+  };
+
+  return (
+    <>
+      <Modal visible={showBaseModal} transparent animationType="fade" onRequestClose={onClose}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.terminationCard}>
+            <ScrollView
+              contentContainerStyle={styles.terminationContent}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+            >
+              <View style={styles.between}>
+                <View style={styles.flex}>
+                  <Text style={styles.formTitle}>Desvincular contratista</Text>
+                  <Text style={styles.terminationName}>{contractor.fullName}</Text>
+                </View>
+                <Pressable style={styles.iconButton} onPress={onClose}>
+                  <Ionicons name="close" size={20} color={C.ink} />
+                </Pressable>
+              </View>
+              <Choice
+                label="Fecha de desvinculación *"
+                value={terminationDate}
+                icon="calendar-outline"
+                onPress={() => setCalendarOpen(true)}
+              />
+              <Choice
+                label="Causa de desvinculación *"
+                value={selectedReason?.name ?? "Selecciona una causa"}
+                icon="list-outline"
+                disabled={reasons.length === 0}
+                onPress={() => setReasonOpen(true)}
+              />
+              <Label text="Observación *" />
+              <TextInput
+                value={observations}
+                onChangeText={setObservations}
+                multiline
+                placeholder="Describe la causa de la desvinculación"
+                placeholderTextColor="#929BAD"
+                style={[styles.textArea, styles.terminationTextArea]}
+              />
+              <View style={styles.terminationActions}>
+                <View style={styles.flex}>
+                  <SecondaryButton label="Cancelar" icon="close-outline" onPress={onClose} />
+                </View>
+                <View style={styles.flex}>
+                  <PrimaryButton
+                    label={saving ? "Desvinculando..." : "Confirmar"}
+                    icon="person-remove-outline"
+                    disabled={saving}
+                    onPress={confirmTermination}
+                  />
+                </View>
+              </View>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+      <CalendarModal
+        visible={calendarOpen}
+        selectedDate={terminationDate}
+        title="Fecha de desvinculación"
+        subtitle="Selecciona la fecha de finalización del contrato."
+        onClose={() => setCalendarOpen(false)}
+        onSelect={(date) => {
+          setTerminationDate(date);
+          setCalendarOpen(false);
+        }}
+      />
+      <DropdownModal
+        visible={reasonOpen}
+        title="Causa de desvinculación"
+        options={reasons}
+        selectedId={reasonId}
+        onClose={() => setReasonOpen(false)}
+        onSelect={(id) => {
+          setReasonId(id);
+          setReasonOpen(false);
+        }}
+      />
+    </>
   );
 }
 
@@ -3142,6 +3317,11 @@ const styles = StyleSheet.create({
   modalBackdrop: { flex: 1, backgroundColor: "rgba(23,33,58,0.45)", alignItems: "center", justifyContent: "center", padding: 20 },
   modalCard: { width: "100%", maxWidth: 440, borderRadius: 22, padding: 18, backgroundColor: C.white, gap: 14 },
   dropdownCard: { width: "100%", maxWidth: 440, maxHeight: "78%", borderRadius: 22, padding: 18, backgroundColor: C.white, gap: 14 },
+  terminationCard: { width: "100%", maxWidth: 440, maxHeight: "88%", borderRadius: 22, backgroundColor: C.white, overflow: "hidden" },
+  terminationContent: { padding: 18, gap: 14 },
+  terminationName: { color: C.ink, fontSize: 15, lineHeight: 21, fontWeight: "800", marginTop: 4 },
+  terminationTextArea: { minHeight: 82 },
+  terminationActions: { flexDirection: "row", gap: 10, paddingTop: 2 },
   dropdownList: { maxHeight: 390 },
   dropdownListContent: { gap: 8 },
   dropdownOption: { minHeight: 58, paddingHorizontal: 13, paddingVertical: 10, borderRadius: 14, borderWidth: 1, borderColor: C.line, backgroundColor: "#FBFCFE", flexDirection: "row", alignItems: "center", gap: 10 },

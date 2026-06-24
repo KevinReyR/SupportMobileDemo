@@ -157,5 +157,6 @@ export interface AppData {
   shifts: (NamedRecord & { areaId: number })[];
   services: { id: number; areaId: number }[];
   attendanceStatuses: NamedRecord[];
+  terminationReasons: NamedRecord[];
   users: AdminUser[];
 }

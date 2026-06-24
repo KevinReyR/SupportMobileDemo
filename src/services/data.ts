@@ -155,6 +155,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
     supabase.from("shift").select("id,name,area_id").eq("is_active", true).order("area_id").order("id"),
     supabase.from("client_services").select("id,area_id").order("id"),
     supabase.from("attendance_status").select("id,name").order("id"),
+    supabase.from("contractor_termination_reasons").select("id,name").eq("is_active", true).order("id"),
   ]);
 
   common.forEach((result) => fail(result.error));
@@ -362,6 +363,10 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
     attendanceStatuses: (common[7].data ?? []).map((status: any) => ({
       id: status.id,
       name: status.name,
+    })),
+    terminationReasons: (common[8].data ?? []).map((reason: any) => ({
+      id: reason.id,
+      name: cleanText(reason.name),
     })),
     users,
   };
@@ -606,6 +611,21 @@ export async function cancelPersonnelRequest(requestId: number) {
     .update({ status: "CANCELADA" })
     .eq("id", requestId)
     .eq("status", "ABIERTA");
+  fail(result.error);
+}
+
+export async function terminateContractor(input: {
+  contractorId: number;
+  terminationDate: string;
+  reasonId: number;
+  observations: string;
+}) {
+  const result = await supabase.rpc("terminate_contractor", {
+    p_contractor_id: input.contractorId,
+    p_termination_date: input.terminationDate,
+    p_reason_id: input.reasonId,
+    p_observations: input.observations.trim(),
+  });
   fail(result.error);
 }
 
