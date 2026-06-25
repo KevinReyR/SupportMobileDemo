@@ -57,6 +57,7 @@ export type ContractorActivationDocumentType =
   | "ANTECEDENTES_POLICIA"
   | "ANTECEDENTES_PROCURADURIA";
 type ContractorUploadDocumentType = "CEDULA" | ContractorActivationDocumentType;
+export type ContractorDocumentTypeOption = { id: number; name: string; code: string };
 
 function normalizeContractStatus(value: string | null | undefined): ContractStatus {
   const normalized = cleanText(value).toUpperCase();
@@ -156,6 +157,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
     supabase.from("client_services").select("id,area_id").order("id"),
     supabase.from("attendance_status").select("id,name").order("id"),
     supabase.from("contractor_termination_reasons").select("id,name").eq("is_active", true).order("id"),
+    supabase.from("contractor_document_types").select("id,name,code").eq("is_active", true).order("name"),
   ]);
 
   common.forEach((result) => fail(result.error));
@@ -368,6 +370,11 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       id: reason.id,
       name: cleanText(reason.name),
     })),
+    contractorDocumentTypes: (common[9].data ?? []).map((documentType: any) => ({
+      id: documentType.id,
+      name: cleanText(documentType.name),
+      code: documentType.code,
+    })),
     users,
   };
 }
@@ -464,7 +471,7 @@ export async function createContractorDocumentSignedUrl(
 
 async function uploadAndRegisterContractorPdf(
   contractorId: number,
-  typeCode: ContractorUploadDocumentType,
+  typeCode: ContractorUploadDocumentType | string,
   file: ContractorPdfFile,
 ) {
   validatePdfFile(file);
@@ -518,6 +525,14 @@ export async function createContractorDraft(input: CreateContractorInput): Promi
 export async function uploadContractorActivationDocument(
   contractorId: number,
   typeCode: ContractorActivationDocumentType,
+  file: ContractorPdfFile,
+) {
+  await uploadAndRegisterContractorPdf(contractorId, typeCode, file);
+}
+
+export async function uploadContractorDocument(
+  contractorId: number,
+  typeCode: string,
   file: ContractorPdfFile,
 ) {
   await uploadAndRegisterContractorPdf(contractorId, typeCode, file);

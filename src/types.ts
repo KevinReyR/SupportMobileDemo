@@ -158,5 +158,6 @@ export interface AppData {
   services: { id: number; areaId: number }[];
   attendanceStatuses: NamedRecord[];
   terminationReasons: NamedRecord[];
+  contractorDocumentTypes: NamedRecord[];
   users: AdminUser[];
 }

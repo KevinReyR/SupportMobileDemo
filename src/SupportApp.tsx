@@ -47,8 +47,9 @@ import {
   terminateContractor,
   toggleUserClient,
   uploadContractorActivationDocument,
+  uploadContractorDocument,
 } from "./services/data";
-import type { ContractorActivationDocumentType, ContractorPdfFile } from "./services/data";
+import type { ContractorActivationDocumentType, ContractorDocumentTypeOption, ContractorPdfFile } from "./services/data";
 import type {
   AppData,
   Assignment,
@@ -181,6 +182,7 @@ const EMPTY_DATA: AppData = {
   services: [],
   attendanceStatuses: [],
   terminationReasons: [],
+  contractorDocumentTypes: [],
   users: [],
 };
 
@@ -521,6 +523,7 @@ export default function SupportApp() {
                 context={context}
                 contractor={selectedContractor}
                 terminationReasons={data.terminationReasons}
+                documentTypes={data.contractorDocumentTypes as ContractorDocumentTypeOption[]}
                 onDocument={openDocument}
                 onChanged={refresh}
                 onHistory={(history) => {
@@ -2287,6 +2290,7 @@ function ContractorProfile({
   context,
   contractor,
   terminationReasons,
+  documentTypes,
   onDocument,
   onChanged,
   onHistory,
@@ -2294,6 +2298,7 @@ function ContractorProfile({
   context: UserContext;
   contractor: Contractor;
   terminationReasons: AppData["terminationReasons"];
+  documentTypes: ContractorDocumentTypeOption[];
   onDocument: (document: ContractorDocument) => void;
   onChanged: () => void;
   onHistory: (history: ContractorHistory) => void;
@@ -2362,7 +2367,15 @@ function ContractorProfile({
           await onChanged();
         }}
       />
-      <ContractorDocumentsSection contractorId={contractor.id} onOpen={onDocument} />
+      <ContractorDocumentsSection
+        contractorId={contractor.id}
+        onOpen={onDocument}
+        uploadEnabled={
+          (context.role === "Director" || context.role === "Coordinador") &&
+          contractor.contractStatus !== "PENDIENTE"
+        }
+        documentTypes={documentTypes}
+      />
       <SectionTitle title="Historial de operaciones" action={`${history.length} registros`} />
       {loading ? <ActivityIndicator color={C.navy} /> : history.length === 0 ? (
         <EmptyState icon="calendar-outline" text="No hay historial para este contratista." />
@@ -2384,13 +2397,18 @@ function ContractorProfile({
 function ContractorDocumentsSection({
   contractorId,
   onOpen,
+  uploadEnabled = false,
+  documentTypes = [],
 }: {
   contractorId: number;
   onOpen: (document: ContractorDocument) => void;
+  uploadEnabled?: boolean;
+  documentTypes?: ContractorDocumentTypeOption[];
 }) {
   const [documents, setDocuments] = useState<ContractorDocument[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [uploadVisible, setUploadVisible] = useState(false);
 
   const loadDocuments = useCallback(async () => {
     setLoading(true);
@@ -2410,7 +2428,15 @@ function ContractorDocumentsSection({
 
   return (
     <View style={styles.documentsSection}>
-      <SectionTitle title="Documentos" action={`${documents.length} archivos`} />
+      <View style={styles.historyHeader}>
+        <SectionTitle title="Documentos" action={`${documents.length} archivos`} />
+        {uploadEnabled && (
+          <Pressable style={styles.smallActionButton} onPress={() => setUploadVisible(true)}>
+            <Ionicons name="cloud-upload-outline" size={16} color={C.navy} />
+            <Text style={styles.smallActionText}>Subir documento</Text>
+          </Pressable>
+        )}
+      </View>
       {loading ? (
         <ActivityIndicator color={C.navy} />
       ) : error ? (
@@ -2446,6 +2472,16 @@ function ContractorDocumentsSection({
           </Pressable>
         ))
       )}
+      <ContractorDocumentUploadModal
+        visible={uploadVisible}
+        contractorId={contractorId}
+        documentTypes={documentTypes}
+        onClose={() => setUploadVisible(false)}
+        onUploaded={async () => {
+          setUploadVisible(false);
+          await loadDocuments();
+        }}
+      />
     </View>
   );
 }
@@ -2530,6 +2566,143 @@ function ContractorActivationCard({
       </Pressable>
       <PrimaryButton label={saving ? "Activando..." : "Guardar ARL y activar"} icon="checkmark-circle-outline" disabled={saving} onPress={save} />
     </View>
+  );
+}
+
+function ContractorDocumentUploadModal({
+  visible,
+  contractorId,
+  documentTypes,
+  onClose,
+  onUploaded,
+}: {
+  visible: boolean;
+  contractorId: number;
+  documentTypes: ContractorDocumentTypeOption[];
+  onClose: () => void;
+  onUploaded: () => void | Promise<void>;
+}) {
+  const [documentTypeCode, setDocumentTypeCode] = useState("");
+  const [selectorOpen, setSelectorOpen] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<ContractorPdfFile | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (visible) {
+      setDocumentTypeCode(documentTypes[0]?.code ?? "");
+      setSelectedFile(null);
+      setSaving(false);
+    }
+  }, [documentTypes, visible]);
+
+  const selectedType = documentTypes.find((type) => type.code === documentTypeCode) ?? null;
+
+  const pickDocument = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: "application/pdf",
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (result.canceled) return;
+      const asset = result.assets[0];
+      if (!asset) return;
+      if ((asset.size ?? 0) > 1_048_576) {
+        Alert.alert("PDF demasiado grande", "El documento debe pesar máximo 1 MB.");
+        return;
+      }
+      const isPdf = asset.mimeType === "application/pdf" || asset.name.toLowerCase().endsWith(".pdf");
+      if (!isPdf) {
+        Alert.alert("Formato no válido", "Adjunta únicamente documentos PDF.");
+        return;
+      }
+      setSelectedFile({
+        uri: asset.uri,
+        name: asset.name,
+        mimeType: asset.mimeType,
+        size: asset.size,
+      });
+    } catch (cause) {
+      Alert.alert("No fue posible adjuntar", errorMessage(cause));
+    }
+  };
+
+  const save = async () => {
+    if (!selectedType) {
+      Alert.alert("Selecciona el tipo", "Debes seleccionar el tipo de documento.");
+      return;
+    }
+    if (!selectedFile) {
+      Alert.alert("Adjunta el PDF", "Debes adjuntar un documento PDF para guardar.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await uploadContractorDocument(contractorId, selectedType.code, selectedFile);
+      Alert.alert("Documento guardado", "Se guardó el nuevo documento y se mostrará como el último de su tipo.");
+      await onUploaded();
+    } catch (cause) {
+      Alert.alert("No fue posible guardar", errorMessage(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <>
+      <Modal visible={visible && !selectorOpen} transparent animationType="fade" onRequestClose={onClose}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <View style={styles.between}>
+              <View style={styles.flex}>
+                <Text style={styles.formTitle}>Subir documento</Text>
+                <Text style={styles.caption}>El histórico se conserva; se mostrará el último documento por tipo.</Text>
+              </View>
+              <Pressable style={styles.iconButton} onPress={onClose}>
+                <Ionicons name="close" size={20} color={C.ink} />
+              </Pressable>
+            </View>
+            <Choice
+              label="Tipo de documento *"
+              value={selectedType?.name ?? "Selecciona tipo"}
+              icon="document-text-outline"
+              disabled={documentTypes.length === 0}
+              onPress={() => setSelectorOpen(true)}
+            />
+            <Pressable style={styles.uploadCard} onPress={pickDocument}>
+              <View style={styles.pdfIcon}>
+                <Ionicons name="document-attach-outline" size={23} color={C.orange} />
+              </View>
+              <View style={styles.flex}>
+                <Text style={styles.cardTitle}>Documento en PDF</Text>
+                <Text style={styles.cardMeta}>{selectedFile ? selectedFile.name : "Adjuntar archivo PDF máximo 1 MB"}</Text>
+              </View>
+              <Ionicons name="cloud-upload-outline" size={20} color={C.navy} />
+            </Pressable>
+            <View style={styles.actionRow}>
+              <SecondaryButton label="Cancelar" icon="close-outline" onPress={onClose} />
+              <PrimaryButton
+                label={saving ? "Guardando..." : "Guardar"}
+                icon="save-outline"
+                disabled={saving}
+                onPress={save}
+              />
+            </View>
+          </View>
+        </View>
+      </Modal>
+      <DropdownModal
+        visible={selectorOpen}
+        title="Tipo de documento"
+        options={documentTypes}
+        selectedId={selectedType?.id ?? 0}
+        onClose={() => setSelectorOpen(false)}
+        onSelect={(id) => {
+          setDocumentTypeCode(documentTypes.find((type) => type.id === id)?.code ?? "");
+          setSelectorOpen(false);
+        }}
+      />
+    </>
   );
 }
 
@@ -3595,6 +3768,8 @@ const styles = StyleSheet.create({
   miniValue: { color: C.ink, fontSize: 16, fontWeight: "900", textAlign: "center" },
   sectionTitle: { color: C.ink, fontSize: 16, fontWeight: "800" },
   historyHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },
+  smallActionButton: { minHeight: 38, paddingHorizontal: 10, borderRadius: 12, borderWidth: 1, borderColor: C.line, backgroundColor: C.white, flexDirection: "row", alignItems: "center", gap: 6 },
+  smallActionText: { color: C.navy, fontSize: 10, fontWeight: "800" },
   dateFilterButton: { minHeight: 42, maxWidth: "58%", paddingHorizontal: 11, borderRadius: 13, borderWidth: 1, borderColor: C.line, backgroundColor: C.white, flexDirection: "row", alignItems: "center", gap: 6 },
   dateFilterText: { color: C.navy, fontSize: 10, fontWeight: "800", flexShrink: 1 },
   notice: { flexDirection: "row", alignItems: "flex-start", gap: 10, padding: 13, borderRadius: 15, backgroundColor: C.blueBg, borderWidth: 1, borderColor: "#CED9F6" },
