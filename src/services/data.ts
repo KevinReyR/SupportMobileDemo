@@ -13,6 +13,9 @@ import type {
   Role,
   RoleCode,
   UserContext,
+  WorkwearMovement,
+  WorkwearMovementType,
+  WorkwearSummary,
 } from "../types";
 
 const rolePriority: RoleCode[] = ["ADMIN", "DIRECTOR", "COORDINATOR", "CLIENT"];
@@ -156,6 +159,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
     supabase.from("shift").select("id,name,area_id").eq("is_active", true).order("area_id").order("id"),
     supabase.from("client_services").select("id,area_id").order("id"),
     supabase.from("attendance_status").select("id,name").order("id"),
+    supabase.from("workwear_type").select("id,name").order("name"),
     supabase.from("contractor_termination_reasons").select("id,name").eq("is_active", true).order("id"),
     supabase.from("contractor_document_types").select("id,name,code").eq("is_active", true).order("name"),
   ]);
@@ -366,11 +370,15 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       id: status.id,
       name: status.name,
     })),
-    terminationReasons: (common[8].data ?? []).map((reason: any) => ({
+    workwearTypes: (common[8].data ?? []).map((type: any) => ({
+      id: type.id,
+      name: cleanText(type.name),
+    })),
+    terminationReasons: (common[9].data ?? []).map((reason: any) => ({
       id: reason.id,
       name: cleanText(reason.name),
     })),
-    contractorDocumentTypes: (common[9].data ?? []).map((documentType: any) => ({
+    contractorDocumentTypes: (common[10].data ?? []).map((documentType: any) => ({
       id: documentType.id,
       name: cleanText(documentType.name),
       code: documentType.code,
@@ -536,6 +544,61 @@ export async function uploadContractorDocument(
   file: ContractorPdfFile,
 ) {
   await uploadAndRegisterContractorPdf(contractorId, typeCode, file);
+}
+
+export async function loadContractorWorkwearSummary(contractorId: number): Promise<WorkwearSummary[]> {
+  const result = await supabase.rpc("get_contractor_workwear_summary", {
+    p_contractor_id: contractorId,
+  });
+  fail(result.error);
+  return (result.data ?? []).map((row: any) => ({
+    workwearTypeId: Number(row.workwear_type_id),
+    workwearTypeName: cleanText(row.workwear_type_name),
+    deliveredQuantity: Number(row.delivered_quantity ?? 0),
+    returnedQuantity: Number(row.returned_quantity ?? 0),
+    writtenOffQuantity: Number(row.written_off_quantity ?? 0),
+    pendingQuantity: Number(row.pending_quantity ?? 0),
+  }));
+}
+
+export async function loadContractorWorkwearMovements(contractorId: number): Promise<WorkwearMovement[]> {
+  const result = await supabase.rpc("get_contractor_workwear_movements", {
+    p_contractor_id: contractorId,
+  });
+  fail(result.error);
+  return (result.data ?? []).map((row: any) => ({
+    id: Number(row.movement_id),
+    workwearTypeId: Number(row.workwear_type_id),
+    workwearTypeName: cleanText(row.workwear_type_name),
+    movementType: row.movement_type as WorkwearMovementType,
+    movementDate: row.movement_date,
+    quantity: Number(row.quantity ?? 0),
+    observations: cleanText(row.observations),
+    relatedDeliveryId: row.related_delivery_id === null ? null : Number(row.related_delivery_id),
+    createdBy: row.created_by,
+    createdByName: cleanText(row.created_by_name) || "Sin responsable",
+    createdAt: row.created_at,
+  }));
+}
+
+export async function registerContractorWorkwearMovement(input: {
+  contractorId: number;
+  workwearTypeId: number;
+  movementType: WorkwearMovementType;
+  movementDate: string;
+  quantity: number;
+  observations: string;
+}) {
+  const result = await supabase.rpc("register_contractor_workwear_movement", {
+    p_contractor_id: input.contractorId,
+    p_workwear_type_id: input.workwearTypeId,
+    p_movement_type: input.movementType,
+    p_movement_date: input.movementDate,
+    p_quantity: input.quantity,
+    p_observations: input.observations.trim(),
+  });
+  fail(result.error);
+  return Number(result.data);
 }
 
 export async function createOperation(input: {

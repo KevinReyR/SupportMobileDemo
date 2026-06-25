@@ -4,7 +4,10 @@ import {
   Alert,
   Image,
   InteractionManager,
+  Keyboard,
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -13,6 +16,7 @@ import {
   Switch,
   Text,
   TextInput,
+  TouchableWithoutFeedback,
   View,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
@@ -38,9 +42,12 @@ import {
   loadClientContractorHistory,
   loadContractorDocuments,
   loadContractorHistory,
+  loadContractorWorkwearMovements,
+  loadContractorWorkwearSummary,
   loadAvailableContractorIds,
   loadOperationAssignments,
   loadUserContext,
+  registerContractorWorkwearMovement,
   reviewOperation,
   setUserActive,
   setUserRole,
@@ -62,6 +69,9 @@ import type {
   PersonnelRequest,
   Role,
   UserContext,
+  WorkwearMovement,
+  WorkwearMovementType,
+  WorkwearSummary,
 } from "./types";
 
 type Screen =
@@ -181,6 +191,7 @@ const EMPTY_DATA: AppData = {
   shifts: [],
   services: [],
   attendanceStatuses: [],
+  workwearTypes: [],
   terminationReasons: [],
   contractorDocumentTypes: [],
   users: [],
@@ -524,6 +535,7 @@ export default function SupportApp() {
                 contractor={selectedContractor}
                 terminationReasons={data.terminationReasons}
                 documentTypes={data.contractorDocumentTypes as ContractorDocumentTypeOption[]}
+                workwearTypes={data.workwearTypes}
                 onDocument={openDocument}
                 onChanged={refresh}
                 onHistory={(history) => {
@@ -2291,6 +2303,7 @@ function ContractorProfile({
   contractor,
   terminationReasons,
   documentTypes,
+  workwearTypes,
   onDocument,
   onChanged,
   onHistory,
@@ -2299,6 +2312,7 @@ function ContractorProfile({
   contractor: Contractor;
   terminationReasons: AppData["terminationReasons"];
   documentTypes: ContractorDocumentTypeOption[];
+  workwearTypes: AppData["workwearTypes"];
   onDocument: (document: ContractorDocument) => void;
   onChanged: () => void;
   onHistory: (history: ContractorHistory) => void;
@@ -2341,11 +2355,7 @@ function ContractorProfile({
         ["Ciudad", contractor.city],
         ["Transporte", contractor.transport],
       ]} />
-      <InfoCard title="Dotación" rows={[
-        ["Camisa", contractor.shirtSize ?? "-"],
-        ["Pantalón", contractor.pantSize ?? "-"],
-        ["Zapatos", contractor.shoeSize ?? "-"],
-      ]} />
+      <ContractorWorkwearSection contractorId={contractor.id} workwearTypes={workwearTypes} />
       {context.role === "Director" && contractor.contractStatus === "PENDIENTE" && (
         <ContractorActivationDocumentsCard contractorId={contractor.id} onChanged={onChanged} />
       )}
@@ -2391,6 +2401,346 @@ function ContractorProfile({
         </Pressable>
       ))}
     </Page>
+  );
+}
+
+const workwearMovementOptions: { id: number; name: string; type: WorkwearMovementType }[] = [
+  { id: 1, name: "Entrega", type: "ENTREGA" },
+  { id: 2, name: "Devolución", type: "DEVOLUCION" },
+  { id: 3, name: "Dada de baja", type: "BAJA" },
+];
+
+function workwearMovementLabel(type: WorkwearMovementType) {
+  if (type === "DEVOLUCION") return "Devolución";
+  if (type === "BAJA") return "Dada de baja";
+  return "Entrega";
+}
+
+function workwearMovementSuccess(type: WorkwearMovementType) {
+  if (type === "DEVOLUCION") return "Devolución registrada";
+  if (type === "BAJA") return "Dotación dada de baja";
+  return "Dotación entregada";
+}
+
+function ContractorWorkwearSection({
+  contractorId,
+  workwearTypes,
+}: {
+  contractorId: number;
+  workwearTypes: AppData["workwearTypes"];
+}) {
+  const [summary, setSummary] = useState<WorkwearSummary[]>([]);
+  const [movements, setMovements] = useState<WorkwearMovement[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [registerVisible, setRegisterVisible] = useState(false);
+  const [historyExpanded, setHistoryExpanded] = useState(false);
+
+  const loadWorkwear = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const [summaryResult, movementResult] = await Promise.all([
+        loadContractorWorkwearSummary(contractorId),
+        loadContractorWorkwearMovements(contractorId),
+      ]);
+      setSummary(summaryResult);
+      setMovements(movementResult);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setLoading(false);
+    }
+  }, [contractorId]);
+
+  useEffect(() => {
+    loadWorkwear();
+  }, [loadWorkwear]);
+
+  return (
+    <View style={styles.documentsSection}>
+      <View style={styles.historyHeader}>
+        <Text style={styles.formTitle}>Dotación</Text>
+        <Pressable style={styles.smallActionButton} onPress={() => setRegisterVisible(true)}>
+          <Ionicons name="add-circle-outline" size={16} color={C.navy} />
+          <Text style={styles.smallActionText}>Registrar dotación</Text>
+        </Pressable>
+      </View>
+
+      {loading ? (
+        <ActivityIndicator color={C.navy} />
+      ) : error ? (
+        <Notice icon="alert-circle-outline" text={error} tone="error" />
+      ) : (
+        <>
+          {summary.length === 0 ? (
+            <EmptyState icon="shirt-outline" text="No hay movimientos de dotación para este contratista." />
+          ) : (
+            <View style={styles.workwearSummaryGrid}>
+              {summary.map((item) => (
+                <View key={item.workwearTypeId} style={styles.workwearSummaryCard}>
+                  <Text style={styles.workwearSummaryTitle}>{item.workwearTypeName}</Text>
+                  <Text style={styles.workwearSummaryValue}>{item.pendingQuantity}</Text>
+                  <Text style={styles.caption}>Pendiente actual</Text>
+                  <Text style={styles.workwearSummaryMeta}>
+                    Entregado {item.deliveredQuantity} ⋅ Devuelto {item.returnedQuantity} ⋅ Baja {item.writtenOffQuantity}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          )}
+
+          <View style={styles.formCard}>
+            <Pressable
+              style={styles.historyHeader}
+              onPress={() => setHistoryExpanded((current) => !current)}
+            >
+              <View>
+                <Text style={styles.formTitle}>Historial de dotación</Text>
+                <Text style={styles.caption}>{movements.length} registros</Text>
+              </View>
+              <Ionicons
+                name={historyExpanded ? "chevron-up" : "chevron-down"}
+                size={20}
+                color={C.navy}
+              />
+            </Pressable>
+            {historyExpanded && (
+              movements.length === 0 ? (
+                <Text style={styles.caption}>Aún no hay historial registrado.</Text>
+              ) : movements.map((movement) => (
+                <View key={movement.id} style={styles.documentRow}>
+                  <View style={styles.flex}>
+                    <Text style={styles.cardTitle}>
+                      {workwearMovementLabel(movement.movementType)} ⋅ {movement.workwearTypeName}
+                    </Text>
+                    <Text style={styles.caption}>
+                      {formatDate(movement.movementDate)} ⋅ Cantidad {movement.quantity} ⋅ {movement.createdByName}
+                    </Text>
+                    <Text style={styles.cardMeta}>{movement.observations}</Text>
+                  </View>
+                </View>
+              ))
+            )}
+          </View>
+        </>
+      )}
+
+      <WorkwearMovementModal
+        visible={registerVisible}
+        workwearTypes={workwearTypes}
+        summary={summary}
+        onClose={() => setRegisterVisible(false)}
+        onSaved={async (message) => {
+          setRegisterVisible(false);
+          await loadWorkwear();
+          Alert.alert("Registro guardado", message);
+        }}
+        onRegister={async (input) => {
+          await registerContractorWorkwearMovement({
+            contractorId,
+            ...input,
+          });
+        }}
+      />
+    </View>
+  );
+}
+
+function WorkwearMovementModal({
+  visible,
+  workwearTypes,
+  summary,
+  onClose,
+  onSaved,
+  onRegister,
+}: {
+  visible: boolean;
+  workwearTypes: AppData["workwearTypes"];
+  summary: WorkwearSummary[];
+  onClose: () => void;
+  onSaved: (message: string) => Promise<void> | void;
+  onRegister: (input: {
+    workwearTypeId: number;
+    movementType: WorkwearMovementType;
+    movementDate: string;
+    quantity: number;
+    observations: string;
+  }) => Promise<void>;
+}) {
+  const [movementType, setMovementType] = useState<WorkwearMovementType>("ENTREGA");
+  const [workwearTypeId, setWorkwearTypeId] = useState(0);
+  const [movementDate, setMovementDate] = useState(todayIso());
+  const [quantity, setQuantity] = useState("1");
+  const [observations, setObservations] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [movementPickerVisible, setMovementPickerVisible] = useState(false);
+  const [workwearPickerVisible, setWorkwearPickerVisible] = useState(false);
+  const [calendarVisible, setCalendarVisible] = useState(false);
+
+  useEffect(() => {
+    if (visible) {
+      setMovementType("ENTREGA");
+      setWorkwearTypeId(workwearTypes[0]?.id ?? 0);
+      setMovementDate(todayIso());
+      setQuantity("1");
+      setObservations("");
+    }
+  }, [visible, workwearTypes]);
+
+  const selectedMovementId = workwearMovementOptions.find((option) => option.type === movementType)?.id ?? 1;
+  const selectedWorkwear = workwearTypes.find((type) => type.id === workwearTypeId);
+  const selectedSummary = summary.find((item) => item.workwearTypeId === workwearTypeId);
+  const pendingQuantity = selectedSummary?.pendingQuantity ?? 0;
+  const numericQuantity = Number(quantity);
+  const baseVisible = visible && !movementPickerVisible && !workwearPickerVisible && !calendarVisible;
+
+  async function saveMovement() {
+    const trimmedObservation = observations.trim();
+    if (!workwearTypeId) {
+      Alert.alert("Falta información", "Selecciona el tipo de dotación.");
+      return;
+    }
+    if (!Number.isInteger(numericQuantity) || numericQuantity <= 0) {
+      Alert.alert("Cantidad no válida", "La cantidad debe ser un número entero mayor a cero.");
+      return;
+    }
+    if ((movementType === "DEVOLUCION" || movementType === "BAJA") && numericQuantity > pendingQuantity) {
+      Alert.alert("Saldo insuficiente", "La cantidad supera el saldo pendiente de dotación.");
+      return;
+    }
+    if (!trimmedObservation) {
+      Alert.alert("Falta observación", "Escribe una observación para registrar el movimiento.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await onRegister({
+        workwearTypeId,
+        movementType,
+        movementDate,
+        quantity: numericQuantity,
+        observations: trimmedObservation,
+      });
+      await onSaved(workwearMovementSuccess(movementType));
+    } catch (cause) {
+      Alert.alert("No fue posible guardar", errorMessage(cause));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      <Modal visible={baseVisible} transparent animationType="fade" onRequestClose={onClose}>
+        <KeyboardAvoidingView
+          style={styles.modalKeyboardAvoider}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+        >
+          <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
+            <View style={styles.modalBackdrop}>
+              <View style={styles.workwearModalCard}>
+                <ScrollView
+                  contentContainerStyle={styles.workwearModalContent}
+                  keyboardShouldPersistTaps="handled"
+                  showsVerticalScrollIndicator={false}
+                >
+            <View style={styles.historyHeader}>
+              <Text style={styles.formTitle}>Registrar dotación</Text>
+              <Pressable style={styles.iconButton} onPress={onClose}>
+                <Ionicons name="close" size={20} color={C.ink} />
+              </Pressable>
+            </View>
+            <Choice
+              label="Tipo de movimiento *"
+              icon="swap-horizontal-outline"
+              value={workwearMovementLabel(movementType)}
+              onPress={() => setMovementPickerVisible(true)}
+            />
+            <Choice
+              label="Tipo de dotación *"
+              icon="shirt-outline"
+              value={selectedWorkwear?.name ?? "Selecciona dotación"}
+              onPress={() => setWorkwearPickerVisible(true)}
+            />
+            {(movementType === "DEVOLUCION" || movementType === "BAJA") && (
+              <Notice
+                icon="information-circle-outline"
+                text={`Saldo pendiente para ${selectedWorkwear?.name ?? "este tipo"}: ${pendingQuantity}`}
+              />
+            )}
+            <Choice
+              label="Fecha *"
+              icon="calendar-outline"
+              value={movementDate}
+              onPress={() => setCalendarVisible(true)}
+            />
+            <Label text="Cantidad *" />
+            <Input
+              icon="layers-outline"
+              value={quantity}
+              onChangeText={(value) => setQuantity(value.replace(/[^0-9]/g, ""))}
+              keyboardType="number-pad"
+              placeholder="Cantidad"
+            />
+            <Label text="Observación *" />
+            <TextInput
+              value={observations}
+              onChangeText={setObservations}
+              multiline
+              style={[styles.textArea, styles.workwearTextArea]}
+              placeholder="Describe la entrega, devolución o baja"
+              placeholderTextColor="#929BAD"
+            />
+            <View style={styles.actionRow}>
+              <Pressable style={styles.secondaryButton} onPress={onClose} disabled={saving}>
+                <Ionicons name="close" size={19} color={C.navy} />
+                <Text style={styles.secondaryButtonText}>Cancelar</Text>
+              </Pressable>
+              <Pressable style={[styles.primaryButton, styles.flex, saving && styles.buttonDisabled]} onPress={saveMovement} disabled={saving}>
+                {saving ? <ActivityIndicator color={C.white} /> : <Ionicons name="save-outline" size={19} color={C.white} />}
+                <Text style={styles.primaryButtonText}>Guardar</Text>
+              </Pressable>
+            </View>
+                </ScrollView>
+              </View>
+            </View>
+          </TouchableWithoutFeedback>
+        </KeyboardAvoidingView>
+      </Modal>
+      <DropdownModal
+        visible={movementPickerVisible}
+        title="Tipo de movimiento"
+        options={workwearMovementOptions}
+        selectedId={selectedMovementId}
+        onClose={() => setMovementPickerVisible(false)}
+        onSelect={(id) => {
+          setMovementType(workwearMovementOptions.find((option) => option.id === id)?.type ?? "ENTREGA");
+          setMovementPickerVisible(false);
+        }}
+      />
+      <DropdownModal
+        visible={workwearPickerVisible}
+        title="Tipo de dotación"
+        options={workwearTypes}
+        selectedId={workwearTypeId}
+        onClose={() => setWorkwearPickerVisible(false)}
+        onSelect={(id) => {
+          setWorkwearTypeId(id);
+          setWorkwearPickerVisible(false);
+        }}
+      />
+      <CalendarModal
+        visible={calendarVisible}
+        title="Fecha del movimiento"
+        selectedDate={movementDate}
+        onClose={() => setCalendarVisible(false)}
+        onSelect={(date) => {
+          setMovementDate(date);
+          setCalendarVisible(false);
+        }}
+      />
+    </>
   );
 }
 
@@ -3809,6 +4159,11 @@ const styles = StyleSheet.create({
   infoValue: { color: C.ink, fontSize: 11, fontWeight: "700", maxWidth: "58%", textAlign: "right" },
   extra: { color: C.navy, fontSize: 11, fontWeight: "900" },
   documentsSection: { gap: 10 },
+  workwearSummaryGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  workwearSummaryCard: { width: "48.5%", minWidth: 138, backgroundColor: C.white, borderRadius: 14, padding: 10, gap: 2, borderWidth: 1, borderColor: C.line },
+  workwearSummaryTitle: { color: C.ink, fontSize: 12, fontWeight: "900" },
+  workwearSummaryValue: { color: C.navy, fontSize: 18, fontWeight: "900", lineHeight: 22 },
+  workwearSummaryMeta: { color: C.muted, fontSize: 9, lineHeight: 13 },
   documentRow: { minHeight: 76, backgroundColor: C.white, borderRadius: 17, padding: 13, flexDirection: "row", alignItems: "center", gap: 11, borderWidth: 1, borderColor: C.line },
   pdfIcon: { width: 44, height: 44, borderRadius: 14, backgroundColor: C.orangeBg, alignItems: "center", justifyContent: "center" },
   documentError: { gap: 8, padding: 14, borderRadius: 15, backgroundColor: C.redBg, borderWidth: 1, borderColor: "#F5CDCD" },
@@ -3836,8 +4191,12 @@ const styles = StyleSheet.create({
   barGhost: { width: 30, borderRadius: 8, backgroundColor: "#EFF2F7", justifyContent: "flex-end", overflow: "hidden" },
   barFill: { width: "100%", borderRadius: 8, backgroundColor: C.navy },
   empty: { minHeight: 150, borderRadius: 18, borderWidth: 1, borderStyle: "dashed", borderColor: C.line, alignItems: "center", justifyContent: "center", gap: 10, padding: 20 },
+  modalKeyboardAvoider: { flex: 1 },
   modalBackdrop: { flex: 1, backgroundColor: "rgba(23,33,58,0.45)", alignItems: "center", justifyContent: "center", padding: 20 },
   modalCard: { width: "100%", maxWidth: 440, borderRadius: 22, padding: 18, backgroundColor: C.white, gap: 14 },
+  workwearModalCard: { width: "100%", maxWidth: 440, maxHeight: "88%", borderRadius: 22, backgroundColor: C.white, overflow: "hidden" },
+  workwearModalContent: { padding: 18, gap: 14 },
+  workwearTextArea: { minHeight: 76 },
   dropdownCard: { width: "100%", maxWidth: 440, maxHeight: "78%", borderRadius: 22, padding: 18, backgroundColor: C.white, gap: 14 },
   terminationCard: { width: "100%", maxWidth: 440, maxHeight: "88%", borderRadius: 22, backgroundColor: C.white, overflow: "hidden" },
   terminationContent: { padding: 18, gap: 14 },

@@ -13,6 +13,7 @@ export interface NamedRecord {
 }
 
 export type ContractStatus = "ACTIVO" | "PENDIENTE" | "INACTIVO";
+export type WorkwearMovementType = "ENTREGA" | "DEVOLUCION" | "BAJA";
 
 export interface UserContext {
   id: string;
@@ -120,6 +121,29 @@ export interface ContractorDocument {
   updatedAt: string;
 }
 
+export interface WorkwearSummary {
+  workwearTypeId: number;
+  workwearTypeName: string;
+  deliveredQuantity: number;
+  returnedQuantity: number;
+  writtenOffQuantity: number;
+  pendingQuantity: number;
+}
+
+export interface WorkwearMovement {
+  id: number;
+  workwearTypeId: number;
+  workwearTypeName: string;
+  movementType: WorkwearMovementType;
+  movementDate: string;
+  quantity: number;
+  observations: string;
+  relatedDeliveryId: number | null;
+  createdBy: string;
+  createdByName: string;
+  createdAt: string;
+}
+
 export interface ClientContractor {
   id: number;
   name: string;
@@ -157,6 +181,7 @@ export interface AppData {
   shifts: (NamedRecord & { areaId: number })[];
   services: { id: number; areaId: number }[];
   attendanceStatuses: NamedRecord[];
+  workwearTypes: NamedRecord[];
   terminationReasons: NamedRecord[];
   contractorDocumentTypes: NamedRecord[];
   users: AdminUser[];
