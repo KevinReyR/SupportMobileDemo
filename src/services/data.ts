@@ -38,19 +38,20 @@ function firstRelation<T>(value: T | T[] | null | undefined): T | null {
 function cleanText(value: string | null | undefined) {
   if (!value) return "";
   return value
-    .split("\u00C3\u00A1").join("?")
-    .split("\u00C3\u00A9").join("?")
-    .split("\u00C3\u00AD").join("?")
-    .split("\u00C3\u00B3").join("?")
-    .split("\u00C3\u00BA").join("?")
-    .split("\u00C3\u00B1").join("?")
-    .split("\u00C3\u00BC").join("?")
-    .split("\u00C3\u0081").join("?")
-    .split("\u00C3\u0089").join("?")
-    .split("\u00C3\u008D").join("?")
-    .split("\u00C3\u0093").join("?")
-    .split("\u00C3\u009A").join("?")
-    .split("\u00C2\u00B7").join("?");
+    .split("\u00C3\u00A1").join("á")
+    .split("\u00C3\u00A9").join("é")
+    .split("\u00C3\u00AD").join("í")
+    .split("\u00C3\u00B3").join("ó")
+    .split("\u00C3\u00BA").join("ú")
+    .split("\u00C3\u00B1").join("ñ")
+    .split("\u00C3\u00BC").join("ü")
+    .split("\u00C3\u0081").join("Á")
+    .split("\u00C3\u0089").join("É")
+    .split("\u00C3\u008D").join("Í")
+    .split("\u00C3\u0093").join("Ó")
+    .split("\u00C3\u009A").join("Ú")
+    .split("\u00E2\u2039\u2026").join("⋅")
+    .split("\u00C2\u00B7").join("⋅");
 }
 
 const CONTRACTOR_DOCUMENT_BUCKET = "contractor-documents";
@@ -162,6 +163,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
     supabase.from("workwear_type").select("id,name").order("name"),
     supabase.from("contractor_termination_reasons").select("id,name").eq("is_active", true).order("id"),
     supabase.from("contractor_document_types").select("id,name,code").eq("is_active", true).order("name"),
+    supabase.from("contract_type").select("id,name").order("id"),
   ]);
 
   common.forEach((result) => fail(result.error));
@@ -220,7 +222,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
         .is("deleted_at", null),
       supabase
         .from("contractor_contract")
-        .select("id,contractor_id,start_date,end_date,status_id,contract_status(name)")
+        .select("id,contractor_id,start_date,end_date,status_id,contract_type,contract_status(name),contract_type_ref:contract_type(name)")
         .order("start_date", { ascending: false })
         .order("id", { ascending: false }),
     ]);
@@ -238,14 +240,18 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       }
     }
 
-    const latestContracts = new Map<number, ContractStatus>();
+    const latestContracts = new Map<
+      number,
+      { status: ContractStatus; typeId: number | null; typeName: string }
+    >();
     for (const row of contractResult.data ?? []) {
       const contractorId = Number((row as any).contractor_id);
       if (!latestContracts.has(contractorId)) {
-        latestContracts.set(
-          contractorId,
-          normalizeContractStatus(firstRelation<any>((row as any).contract_status)?.name),
-        );
+        latestContracts.set(contractorId, {
+          status: normalizeContractStatus(firstRelation<any>((row as any).contract_status)?.name),
+          typeId: (row as any).contract_type ?? null,
+          typeName: cleanText(firstRelation<any>((row as any).contract_type_ref)?.name) || "Sin tipo",
+        });
       }
     }
 
@@ -254,6 +260,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       const firstName = cleanText(row.name);
       const lastName = cleanText(row.last_name);
       const fullName = `${firstName} ${lastName}`.trim();
+      const latestContract = latestContracts.get(row.id);
       return {
         id: row.id,
         name: firstName,
@@ -276,8 +283,10 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
         shoeSize: row.shoe_size,
         hireDate: row.hire_date,
         terminationDate: row.termination_date,
-        active: (latestContracts.get(row.id) ?? "INACTIVO") === "ACTIVO",
-        contractStatus: latestContracts.get(row.id) ?? "INACTIVO",
+        active: (latestContract?.status ?? "INACTIVO") === "ACTIVO",
+        contractStatus: latestContract?.status ?? "INACTIVO",
+        contractTypeId: latestContract?.typeId ?? null,
+        contractTypeName: latestContract?.typeName ?? "Sin tipo",
         lastClient: cleanText(firstRelation<any>(latest?.clients)?.name) || "Sin operación",
         lastArea: cleanText(firstRelation<any>(latest?.area)?.name) || "Sin área",
         lastDate: latest?.operation_date ?? null,
@@ -382,6 +391,10 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       id: documentType.id,
       name: cleanText(documentType.name),
       code: documentType.code,
+    })),
+    contractTypes: (common[11].data ?? []).map((contractType: any) => ({
+      id: contractType.id,
+      name: cleanText(contractType.name),
     })),
     users,
   };
@@ -536,6 +549,18 @@ export async function uploadContractorActivationDocument(
   file: ContractorPdfFile,
 ) {
   await uploadAndRegisterContractorPdf(contractorId, typeCode, file);
+}
+
+export async function selectContractorContractType(
+  contractorId: number,
+  contractTypeId: number,
+): Promise<boolean> {
+  const result = await supabase.rpc("select_contractor_contract_type", {
+    p_contractor_id: contractorId,
+    p_contract_type_id: contractTypeId,
+  });
+  fail(result.error);
+  return Boolean(result.data);
 }
 
 export async function uploadContractorDocument(

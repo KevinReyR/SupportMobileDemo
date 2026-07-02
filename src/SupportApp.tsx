@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+﻿import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -49,6 +49,7 @@ import {
   loadUserContext,
   registerContractorWorkwearMovement,
   reviewOperation,
+  selectContractorContractType,
   setUserActive,
   setUserRole,
   terminateContractor,
@@ -194,6 +195,7 @@ const EMPTY_DATA: AppData = {
   workwearTypes: [],
   terminationReasons: [],
   contractorDocumentTypes: [],
+  contractTypes: [],
   users: [],
 };
 
@@ -535,6 +537,7 @@ export default function SupportApp() {
                 contractor={selectedContractor}
                 terminationReasons={data.terminationReasons}
                 documentTypes={data.contractorDocumentTypes as ContractorDocumentTypeOption[]}
+                contractTypes={data.contractTypes}
                 workwearTypes={data.workwearTypes}
                 onDocument={openDocument}
                 onChanged={refresh}
@@ -2303,6 +2306,7 @@ function ContractorProfile({
   contractor,
   terminationReasons,
   documentTypes,
+  contractTypes,
   workwearTypes,
   onDocument,
   onChanged,
@@ -2312,6 +2316,7 @@ function ContractorProfile({
   contractor: Contractor;
   terminationReasons: AppData["terminationReasons"];
   documentTypes: ContractorDocumentTypeOption[];
+  contractTypes: AppData["contractTypes"];
   workwearTypes: AppData["workwearTypes"];
   onDocument: (document: ContractorDocument) => void;
   onChanged: () => void;
@@ -2357,7 +2362,11 @@ function ContractorProfile({
       ]} />
       <ContractorWorkwearSection contractorId={contractor.id} workwearTypes={workwearTypes} />
       {context.role === "Director" && contractor.contractStatus === "PENDIENTE" && (
-        <ContractorActivationDocumentsCard contractorId={contractor.id} onChanged={onChanged} />
+        <ContractorActivationDocumentsCard
+          contractor={contractor}
+          contractTypes={contractTypes}
+          onChanged={onChanged}
+        />
       )}
       {(context.role === "Director" || context.role === "Coordinador") && contractor.contractStatus !== "INACTIVO" && (
         <SecondaryButton
@@ -3214,21 +3223,27 @@ const activationDocumentOptions: { typeCode: ContractorActivationDocumentType; t
 ];
 
 function ContractorActivationDocumentsCard({
-  contractorId,
+  contractor,
+  contractTypes,
   onChanged,
 }: {
-  contractorId: number;
+  contractor: Contractor;
+  contractTypes: AppData["contractTypes"];
   onChanged: () => void;
 }) {
   const [selectedFiles, setSelectedFiles] = useState<Partial<Record<ContractorActivationDocumentType, ContractorPdfFile>>>({});
   const [existingCodes, setExistingCodes] = useState<ContractorActivationDocumentType[]>([]);
+  const [contractTypeId, setContractTypeId] = useState(contractor.contractTypeId ?? contractTypes[0]?.id ?? 0);
+  const [contractTypePickerVisible, setContractTypePickerVisible] = useState(false);
   const [loadingDocuments, setLoadingDocuments] = useState(true);
   const [saving, setSaving] = useState(false);
+  const selectedContractType = contractTypes.find((type) => type.id === contractTypeId);
+  const contractTypeChanged = Boolean(contractTypeId && contractTypeId !== contractor.contractTypeId);
 
   const refreshDocuments = useCallback(async () => {
     setLoadingDocuments(true);
     try {
-      const documents = await loadContractorDocuments(contractorId);
+      const documents = await loadContractorDocuments(contractor.id);
       setExistingCodes(
         activationDocumentOptions
           .map((item) => item.typeCode)
@@ -3239,11 +3254,15 @@ function ContractorActivationDocumentsCard({
     } finally {
       setLoadingDocuments(false);
     }
-  }, [contractorId]);
+  }, [contractor.id]);
 
   useEffect(() => {
     refreshDocuments();
   }, [refreshDocuments]);
+
+  useEffect(() => {
+    setContractTypeId(contractor.contractTypeId ?? contractTypes[0]?.id ?? 0);
+  }, [contractTypes, contractor.contractTypeId, contractor.id]);
 
   const pickDocument = async (typeCode: ContractorActivationDocumentType, title: string) => {
     try {
@@ -3280,20 +3299,28 @@ function ContractorActivationDocumentsCard({
 
   const save = async () => {
     const pendingUploads = activationDocumentOptions.filter((item) => selectedFiles[item.typeCode]);
-    if (pendingUploads.length === 0) {
-      Alert.alert("Adjunta documentos", "Selecciona al menos un documento en PDF para guardar.");
+    if (!contractTypeId) {
+      Alert.alert("Selecciona el tipo", "Debes seleccionar el tipo de contrato del contratista.");
+      return;
+    }
+    if (pendingUploads.length === 0 && !contractTypeChanged) {
+      Alert.alert("Sin cambios", "Selecciona un tipo de contrato diferente o adjunta al menos un documento en PDF.");
       return;
     }
     setSaving(true);
     try {
+      let activatedByContractType = false;
+      if (contractTypeChanged) {
+        activatedByContractType = await selectContractorContractType(contractor.id, contractTypeId);
+      }
       for (const item of pendingUploads) {
         const file = selectedFiles[item.typeCode];
         if (file) {
-          await uploadContractorActivationDocument(contractorId, item.typeCode, file);
+          await uploadContractorActivationDocument(contractor.id, item.typeCode, file);
         }
       }
       setSelectedFiles({});
-      const documents = await loadContractorDocuments(contractorId);
+      const documents = await loadContractorDocuments(contractor.id);
       const completed = activationDocumentOptions.every((item) =>
         documents.some((document) => document.typeCode === item.typeCode),
       );
@@ -3303,10 +3330,12 @@ function ContractorActivationDocumentsCard({
           .filter((code) => documents.some((document) => document.typeCode === code)),
       );
       Alert.alert(
-        completed ? "Contrato activado" : "Documentos guardados",
-        completed
+        completed || activatedByContractType ? "Contrato activado" : "Documentos guardados",
+        completed || activatedByContractType
           ? "El contratista ya quedó disponible para operaciones."
-          : "Aún faltan documentos para activar el contrato.",
+          : pendingUploads.length === 0
+            ? "Tipo de contrato guardado. Aún faltan documentos para activar."
+            : "Tipo de contrato y documentos guardados. Aún faltan documentos para activar.",
       );
       await onChanged();
     } catch (cause) {
@@ -3317,6 +3346,7 @@ function ContractorActivationDocumentsCard({
   };
 
   return (
+    <>
     <View style={styles.activationCard}>
       <View style={styles.row}>
         <Ionicons name="shield-checkmark-outline" size={22} color={C.orange} />
@@ -3325,6 +3355,13 @@ function ContractorActivationDocumentsCard({
           <Text style={styles.caption}>El contratista se activará solo cuando estén los tres documentos.</Text>
         </View>
       </View>
+      <Choice
+        label="Tipo de contrato *"
+        value={selectedContractType?.name ?? "Selecciona tipo de contrato"}
+        icon="briefcase-outline"
+        disabled={contractTypes.length === 0}
+        onPress={() => setContractTypePickerVisible(true)}
+      />
       {loadingDocuments ? (
         <ActivityIndicator color={C.navy} />
       ) : (
@@ -3356,12 +3393,24 @@ function ContractorActivationDocumentsCard({
         })
       )}
       <PrimaryButton
-        label={saving ? "Guardando..." : "Guardar documentos"}
+        label={saving ? "Guardando..." : "Guardar activación"}
         icon="checkmark-circle-outline"
-        disabled={saving || loadingDocuments}
+        disabled={saving || loadingDocuments || contractTypes.length === 0}
         onPress={save}
       />
     </View>
+    <DropdownModal
+      visible={contractTypePickerVisible}
+      title="Tipo de contrato"
+      options={contractTypes}
+      selectedId={contractTypeId}
+      onClose={() => setContractTypePickerVisible(false)}
+      onSelect={(id) => {
+        setContractTypeId(id);
+        setContractTypePickerVisible(false);
+      }}
+    />
+    </>
   );
 }
 
@@ -4234,3 +4283,4 @@ const styles = StyleSheet.create({
   tabLabel: { color: C.muted, fontSize: 8, fontWeight: "600" },
   tabLabelActive: { color: C.navy, fontWeight: "800" },
 });
+

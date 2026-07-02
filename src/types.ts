@@ -90,6 +90,8 @@ export interface Contractor {
   terminationDate: string | null;
   active: boolean;
   contractStatus: ContractStatus;
+  contractTypeId: number | null;
+  contractTypeName: string;
   lastClient: string;
   lastArea: string;
   lastDate: string | null;
@@ -184,5 +186,6 @@ export interface AppData {
   workwearTypes: NamedRecord[];
   terminationReasons: NamedRecord[];
   contractorDocumentTypes: NamedRecord[];
+  contractTypes: NamedRecord[];
   users: AdminUser[];
 }
