@@ -6,12 +6,15 @@ import type {
   ClientContractor,
   ContractStatus,
   Contractor,
+  ContractorOnboardingForm,
+  ContractorOnboardingSubmission,
   ContractorDocument,
   ContractorHistory,
   Operation,
   PersonnelRequest,
   Role,
   RoleCode,
+  StatisticsSummary,
   UserContext,
   WorkwearMovement,
   WorkwearMovementType,
@@ -571,6 +574,37 @@ export async function uploadContractorDocument(
   await uploadAndRegisterContractorPdf(contractorId, typeCode, file);
 }
 
+export async function sendContractorOnboardingEmail(contractorId: number): Promise<string> {
+  const result = await supabase.functions.invoke("send-contractor-onboarding-email", {
+    body: { contractorId },
+  });
+  fail(result.error);
+  const email = (result.data as any)?.email;
+  return typeof email === "string" ? email : "";
+}
+
+export async function loadContractorOnboardingForm(
+  token: string,
+): Promise<ContractorOnboardingForm> {
+  const result = await supabase.functions.invoke("contractor-onboarding", {
+    body: { action: "get", token },
+  });
+  fail(result.error);
+  if ((result.data as any)?.error) throw new Error((result.data as any).error);
+  return result.data as ContractorOnboardingForm;
+}
+
+export async function submitContractorOnboardingForm(
+  token: string,
+  payload: ContractorOnboardingSubmission,
+) {
+  const result = await supabase.functions.invoke("contractor-onboarding", {
+    body: { action: "submit", token, payload },
+  });
+  fail(result.error);
+  if ((result.data as any)?.error) throw new Error((result.data as any).error);
+}
+
 export async function loadContractorWorkwearSummary(contractorId: number): Promise<WorkwearSummary[]> {
   const result = await supabase.rpc("get_contractor_workwear_summary", {
     p_contractor_id: contractorId,
@@ -686,6 +720,34 @@ export async function reviewOperation(
     p_observations: observations ?? null,
   });
   fail(result.error);
+}
+
+export async function loadStatisticsSummary(input: {
+  month: string;
+  clientId: number | null;
+  contractorId: number | null;
+}): Promise<StatisticsSummary> {
+  const result = await supabase.rpc("get_monthly_statistics", {
+    p_month: input.month,
+    p_client_id: input.clientId || null,
+    p_contractor_id: input.contractorId || null,
+  });
+  fail(result.error);
+  const row = Array.isArray(result.data) ? result.data[0] : result.data;
+  return {
+    saleTotal: Number(row?.sale_total ?? 0),
+    costTotal: Number(row?.cost_total ?? 0),
+    contractorsWorked: Number(row?.contractors_worked ?? 0),
+    activeContractors: Number(row?.active_contractors ?? 0),
+    assignedOperations: Number(row?.assigned_operations ?? 0),
+    workedShifts: Number(row?.worked_shifts ?? 0),
+    extraHours: Number(row?.extra_hours ?? 0),
+    contractorOptions: (row?.contractor_options ?? []).map((contractor: any) => ({
+      id: Number(contractor.id),
+      name: cleanText(contractor.name),
+      document: cleanText(contractor.document),
+    })),
+  };
 }
 
 export async function createPersonnelRequest(input: {

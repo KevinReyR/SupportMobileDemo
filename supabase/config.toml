@@ -1,0 +1,5 @@
+[functions.send-contractor-onboarding-email]
+verify_jwt = true
+
+[functions.contractor-onboarding]
+verify_jwt = false

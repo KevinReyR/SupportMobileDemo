@@ -23,13 +23,14 @@ import { Ionicons } from "@expo/vector-icons";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
+import * as Linking from "expo-linking";
 import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
 import { LinearGradient } from "expo-linear-gradient";
-import { PDFDocument } from "pdf-lib";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import type { Session } from "@supabase/supabase-js";
 
 import PdfViewer from "./components/pdf-viewer";
+import { buildCedulaPdfFromPhotos } from "./lib/cedula-pdf";
 import { supabase } from "./lib/supabase";
 import {
   cancelPersonnelRequest,
@@ -46,12 +47,16 @@ import {
   loadContractorWorkwearSummary,
   loadAvailableContractorIds,
   loadOperationAssignments,
+  loadStatisticsSummary,
   loadUserContext,
+  loadContractorOnboardingForm,
   registerContractorWorkwearMovement,
   reviewOperation,
+  sendContractorOnboardingEmail,
   selectContractorContractType,
   setUserActive,
   setUserRole,
+  submitContractorOnboardingForm,
   terminateContractor,
   toggleUserClient,
   uploadContractorActivationDocument,
@@ -65,10 +70,13 @@ import type {
   Contractor,
   ContractorDocument,
   ContractorHistory,
+  ContractorOnboardingForm,
+  ContractorOnboardingSubmission,
   Operation,
   OperationStatus,
   PersonnelRequest,
   Role,
+  StatisticsSummary,
   UserContext,
   WorkwearMovement,
   WorkwearMovementType,
@@ -111,74 +119,28 @@ const C = {
 };
 
 const MAX_CEDULA_PDF_BYTES = 1_048_576;
-const A4_WIDTH = 595.28;
-const A4_HEIGHT = 841.89;
-const PDF_PAGE_MARGIN = 36;
 
 type CedulaSide = "front" | "back";
 
-async function imageToBase64(uri: string) {
-  return FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
-}
-
-function base64ByteLength(value: string) {
-  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
-  return Math.ceil((value.length * 3) / 4) - padding;
-}
-
-async function buildCedulaPdfFromPhotos(frontUri: string, backUri: string): Promise<ContractorPdfFile> {
-  const attempts = [
-    { width: 1400, compress: 0.72 },
-    { width: 1150, compress: 0.58 },
-    { width: 950, compress: 0.45 },
-    { width: 800, compress: 0.36 },
-  ];
-
-  for (const attempt of attempts) {
-    const [frontImage, backImage] = await Promise.all([
-      manipulateAsync(frontUri, [{ resize: { width: attempt.width } }], {
-        compress: attempt.compress,
-        format: SaveFormat.JPEG,
-      }),
-      manipulateAsync(backUri, [{ resize: { width: attempt.width } }], {
-        compress: attempt.compress,
-        format: SaveFormat.JPEG,
-      }),
-    ]);
-
-    const pdf = await PDFDocument.create();
-    for (const imageResult of [frontImage, backImage]) {
-      const jpgBase64 = await imageToBase64(imageResult.uri);
-      const jpg = await pdf.embedJpg(jpgBase64);
-      const page = pdf.addPage([A4_WIDTH, A4_HEIGHT]);
-      const availableWidth = A4_WIDTH - PDF_PAGE_MARGIN * 2;
-      const availableHeight = A4_HEIGHT - PDF_PAGE_MARGIN * 2;
-      const scale = Math.min(availableWidth / jpg.width, availableHeight / jpg.height);
-      const width = jpg.width * scale;
-      const height = jpg.height * scale;
-      page.drawImage(jpg, {
-        x: (A4_WIDTH - width) / 2,
-        y: (A4_HEIGHT - height) / 2,
-        width,
-        height,
-      });
-    }
-
-    const pdfBase64 = await pdf.saveAsBase64({ dataUri: false });
-    const size = base64ByteLength(pdfBase64);
-    if (size <= MAX_CEDULA_PDF_BYTES) {
-      const uri = `${FileSystem.cacheDirectory ?? ""}cedula-fotos-${Date.now()}.pdf`;
-      await FileSystem.writeAsStringAsync(uri, pdfBase64, { encoding: FileSystem.EncodingType.Base64 });
-      return {
-        uri,
-        name: "cedula-fotos.pdf",
-        mimeType: "application/pdf",
-        size,
-      };
-    }
+async function imageUriToBase64(uri: string) {
+  const manipulated = await manipulateAsync(uri, [{ resize: { width: 900 } }], {
+    compress: 0.72,
+    format: SaveFormat.JPEG,
+  });
+  if (Platform.OS !== "web") {
+    return FileSystem.readAsStringAsync(manipulated.uri, { encoding: FileSystem.EncodingType.Base64 });
   }
-
-  throw new Error("No fue posible generar un PDF menor a 1 MB. Repite las fotos con mejor encuadre o iluminación.");
+  const response = await fetch(manipulated.uri);
+  const blob = await response.blob();
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("No fue posible leer la selfie."));
+    reader.onloadend = () => {
+      const value = String(reader.result ?? "");
+      resolve(value.includes(",") ? value.split(",").pop() ?? "" : value);
+    };
+    reader.readAsDataURL(blob);
+  });
 }
 
 const EMPTY_DATA: AppData = {
@@ -270,6 +232,27 @@ function addDaysIso(value: string, days: number) {
   return dateToIso(addDays(isoToDate(value), days));
 }
 
+function monthStartIso(value: string) {
+  const date = isoToDate(value);
+  return dateToIso(new Date(date.getFullYear(), date.getMonth(), 1));
+}
+
+function formatMonth(value: string) {
+  const label = new Intl.DateTimeFormat("es-CO", {
+    month: "long",
+    year: "numeric",
+  }).format(isoToDate(value));
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
+function formatCurrency(value: number) {
+  return new Intl.NumberFormat("es-CO", {
+    style: "currency",
+    currency: "COP",
+    maximumFractionDigits: 0,
+  }).format(value);
+}
+
 function errorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : "Ocurrió un error inesperado.";
   const postgresMessage = message.match(/P0001:\s*([^\n]+)/);
@@ -289,7 +272,20 @@ function withTimeout<T>(promise: Promise<T>, milliseconds: number, message: stri
   ]);
 }
 
+function onboardingTokenFromUrl() {
+  if (Platform.OS !== "web") return "";
+  const location = (globalThis as any).location;
+  if (!location) return "";
+  const search = new URLSearchParams(location.search ?? "");
+  const directToken = search.get("token");
+  if (directToken && String(location.pathname ?? "").includes("onboarding")) return directToken;
+  const hash = String(location.hash ?? "");
+  const hashQuery = hash.includes("?") ? hash.slice(hash.indexOf("?")) : "";
+  return new URLSearchParams(hashQuery).get("token") ?? "";
+}
+
 export default function SupportApp() {
+  const onboardingToken = onboardingTokenFromUrl();
   const [booting, setBooting] = useState(true);
   const [session, setSession] = useState<Session | null>(null);
   const [context, setContext] = useState<UserContext | null>(null);
@@ -411,6 +407,7 @@ export default function SupportApp() {
     navigate("document-preview");
   };
 
+  if (onboardingToken) return <PublicContractorOnboarding token={onboardingToken} />;
   if (booting) return <CenteredState label="Cargando Support Colombia..." />;
   if (!session || !context) {
     return <Login initialError={error} busy={loading} />;
@@ -572,6 +569,313 @@ export default function SupportApp() {
             onPress={navigate}
           />
         )}
+      </SafeAreaView>
+    </SafeAreaProvider>
+  );
+}
+
+function PublicContractorOnboarding({ token }: { token: string }) {
+  const [form, setForm] = useState<ContractorOnboardingForm | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [submitted, setSubmitted] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  const [picker, setPicker] = useState<null | "blood" | "civil" | "transport" | "education" | "stratum" | "shirt" | "pant" | "shoe">(null);
+  const [selfieOpen, setSelfieOpen] = useState(false);
+  const [selfieUri, setSelfieUri] = useState("");
+  const [fields, setFields] = useState({
+    bloodType: "",
+    birthDate: "",
+    birthPlace: "",
+    civilStateId: 0,
+    residenceDepartment: "",
+    residenceCity: "",
+    address: "",
+    stratum: "",
+    phone: "",
+    transportTypeId: 0,
+    educationLevelId: 0,
+    eps: "",
+    shirtSize: "",
+    pantSize: "",
+    shoeSize: "",
+    pensionFund: "",
+    emergencyContactName: "",
+    emergencyContactRelationship: "",
+    emergencyContactPhone: "",
+    acceptsDataPolicy: false,
+  });
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const nextForm = await loadContractorOnboardingForm(token);
+      setForm(nextForm);
+      setFields((current) => ({
+        ...current,
+        bloodType: current.bloodType || nextForm.catalogs.bloodTypes[0] || "",
+        civilStateId: current.civilStateId || nextForm.catalogs.civilStates[0]?.id || 0,
+        transportTypeId: current.transportTypeId || nextForm.catalogs.transportTypes[0]?.id || 0,
+        educationLevelId: current.educationLevelId || nextForm.catalogs.educationLevels[0]?.id || 0,
+        stratum: current.stratum || nextForm.catalogs.stratum[0] || "",
+        shirtSize: current.shirtSize || nextForm.catalogs.shirtSizes[0] || "",
+        pantSize: current.pantSize || nextForm.catalogs.pantSizes[0] || "",
+        shoeSize: current.shoeSize || nextForm.catalogs.shoeSizes[0] || "",
+      }));
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const stringOptions = (values: string[]) => values.map((name, index) => ({ id: index + 1, name }));
+  const currentStringId = (values: string[], value: string) => Math.max(1, values.indexOf(value) + 1);
+  const selectedName = (options: { id: number; name: string }[], id: number) =>
+    options.find((option) => option.id === id)?.name ?? "Selecciona";
+  const update = (key: keyof typeof fields, value: string | number | boolean) => {
+    setFields((current) => ({ ...current, [key]: value }));
+  };
+
+  async function submit() {
+    if (!form) return;
+    const requiredText = [
+      fields.bloodType,
+      fields.birthDate,
+      fields.birthPlace,
+      fields.residenceDepartment,
+      fields.residenceCity,
+      fields.address,
+      fields.stratum,
+      fields.phone,
+      fields.eps,
+      fields.shirtSize,
+      fields.pantSize,
+      fields.shoeSize,
+      fields.pensionFund,
+      fields.emergencyContactName,
+      fields.emergencyContactRelationship,
+      fields.emergencyContactPhone,
+    ];
+    if (requiredText.some((value) => !String(value).trim()) || !fields.civilStateId || !fields.transportTypeId || !fields.educationLevelId) {
+      Alert.alert("Completa el formulario", "Todos los campos son obligatorios.");
+      return;
+    }
+    if (!selfieUri) {
+      Alert.alert("Falta selfie", "Toma una foto frontal antes de enviar.");
+      return;
+    }
+    if (!fields.acceptsDataPolicy) {
+      Alert.alert("Acepta la política", "Debes aceptar la política de tratamiento de datos personales.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const selfieBase64 = await imageUriToBase64(selfieUri);
+      const payload: ContractorOnboardingSubmission = {
+        ...fields,
+        selfieBase64,
+        acceptsDataPolicy: fields.acceptsDataPolicy,
+      };
+      await submitContractorOnboardingForm(token, payload);
+      setSubmitted(true);
+    } catch (cause) {
+      Alert.alert("No fue posible enviar", errorMessage(cause));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) return <CenteredState label="Cargando formulario..." />;
+  if (submitted) {
+    return (
+      <SafeAreaProvider>
+        <SafeAreaView style={styles.center}>
+          <Ionicons name="checkmark-circle-outline" size={54} color={C.green} />
+          <Text style={styles.errorTitle}>Formulario enviado</Text>
+          <Text style={styles.subtitle}>Gracias. Support Colombia recibió tu información correctamente.</Text>
+        </SafeAreaView>
+      </SafeAreaProvider>
+    );
+  }
+  if (error || !form) {
+    return (
+      <SafeAreaProvider>
+        <SafeAreaView style={styles.center}>
+          <Ionicons name="alert-circle-outline" size={48} color={C.red} />
+          <Text style={styles.errorTitle}>No pudimos abrir el formulario</Text>
+          <Text style={styles.subtitle}>{error || "El enlace no está disponible."}</Text>
+          <PrimaryButton label="Reintentar" icon="refresh-outline" onPress={load} />
+        </SafeAreaView>
+      </SafeAreaProvider>
+    );
+  }
+
+  const pickerConfig = {
+    blood: {
+      title: "Tipo de sangre",
+      options: stringOptions(form.catalogs.bloodTypes),
+      selectedId: currentStringId(form.catalogs.bloodTypes, fields.bloodType),
+      onSelect: (id: number) => update("bloodType", form.catalogs.bloodTypes[id - 1] ?? ""),
+    },
+    civil: {
+      title: "Estado civil",
+      options: form.catalogs.civilStates,
+      selectedId: fields.civilStateId,
+      onSelect: (id: number) => update("civilStateId", id),
+    },
+    transport: {
+      title: "Medio de transporte",
+      options: form.catalogs.transportTypes,
+      selectedId: fields.transportTypeId,
+      onSelect: (id: number) => update("transportTypeId", id),
+    },
+    education: {
+      title: "Grado de escolaridad",
+      options: form.catalogs.educationLevels,
+      selectedId: fields.educationLevelId,
+      onSelect: (id: number) => update("educationLevelId", id),
+    },
+    stratum: {
+      title: "Estrato",
+      options: stringOptions(form.catalogs.stratum),
+      selectedId: currentStringId(form.catalogs.stratum, fields.stratum),
+      onSelect: (id: number) => update("stratum", form.catalogs.stratum[id - 1] ?? ""),
+    },
+    shirt: {
+      title: "Talla de camisa",
+      options: stringOptions(form.catalogs.shirtSizes),
+      selectedId: currentStringId(form.catalogs.shirtSizes, fields.shirtSize),
+      onSelect: (id: number) => update("shirtSize", form.catalogs.shirtSizes[id - 1] ?? ""),
+    },
+    pant: {
+      title: "Talla de pantalón",
+      options: stringOptions(form.catalogs.pantSizes),
+      selectedId: currentStringId(form.catalogs.pantSizes, fields.pantSize),
+      onSelect: (id: number) => update("pantSize", form.catalogs.pantSizes[id - 1] ?? ""),
+    },
+    shoe: {
+      title: "Talla de zapatos",
+      options: stringOptions(form.catalogs.shoeSizes),
+      selectedId: currentStringId(form.catalogs.shoeSizes, fields.shoeSize),
+      onSelect: (id: number) => update("shoeSize", form.catalogs.shoeSizes[id - 1] ?? ""),
+    },
+  } as const;
+  const activePicker = picker ? pickerConfig[picker] : null;
+
+  return (
+    <SafeAreaProvider>
+      <SafeAreaView style={styles.safe}>
+        <StatusBar barStyle="dark-content" backgroundColor={C.bg} />
+        <ScrollView contentContainerStyle={styles.pageContent} keyboardShouldPersistTaps="handled">
+          <View style={styles.publicHero}>
+            <Image source={require("../assets/support-icon.png")} style={styles.headerLogo} resizeMode="contain" />
+            <View style={styles.flex}>
+              <Text style={styles.eyebrow}>REGISTRO DE CONTRATISTA</Text>
+              <Text style={styles.greeting}>Completa tus datos</Text>
+              <Text style={styles.subtitle}>{form.contractor.name} ⋅ CC {form.contractor.document}</Text>
+            </View>
+          </View>
+          <FormCard title="Información personal">
+            <Choice label="Tipo de sangre *" value={fields.bloodType} icon="water-outline" onPress={() => setPicker("blood")} />
+            <Choice label="Fecha de nacimiento *" value={fields.birthDate || "Selecciona fecha"} icon="calendar-outline" onPress={() => setCalendarOpen(true)} />
+            <Label text="Lugar de nacimiento *" />
+            <Input icon="location-outline" value={fields.birthPlace} onChangeText={(value) => update("birthPlace", value)} autoCapitalize="words" />
+            <Choice label="Estado civil *" value={selectedName(form.catalogs.civilStates, fields.civilStateId)} icon="heart-outline" onPress={() => setPicker("civil")} />
+          </FormCard>
+          <FormCard title="Residencia y contacto">
+            <Label text="Departamento de residencia *" />
+            <Input icon="map-outline" value={fields.residenceDepartment} onChangeText={(value) => update("residenceDepartment", value)} autoCapitalize="words" />
+            <Label text="Ciudad de residencia *" />
+            <Input icon="business-outline" value={fields.residenceCity} onChangeText={(value) => update("residenceCity", value)} autoCapitalize="words" />
+            <Label text="Dirección de residencia *" />
+            <Input icon="home-outline" value={fields.address} onChangeText={(value) => update("address", value)} />
+            <Choice label="Estrato *" value={fields.stratum} icon="layers-outline" onPress={() => setPicker("stratum")} />
+            <Label text="Teléfono *" />
+            <Input icon="call-outline" value={fields.phone} onChangeText={(value) => update("phone", value)} keyboardType="phone-pad" />
+          </FormCard>
+          <FormCard title="Información laboral y logística">
+            <Choice label="Medio de transporte *" value={selectedName(form.catalogs.transportTypes, fields.transportTypeId)} icon="car-outline" onPress={() => setPicker("transport")} />
+            <Choice label="Grado de escolaridad *" value={selectedName(form.catalogs.educationLevels, fields.educationLevelId)} icon="school-outline" onPress={() => setPicker("education")} />
+            <Label text="EPS *" />
+            <Input icon="medkit-outline" value={fields.eps} onChangeText={(value) => update("eps", value)} autoCapitalize="words" />
+            <Label text="Fondo de pensiones *" />
+            <Input icon="business-outline" value={fields.pensionFund} onChangeText={(value) => update("pensionFund", value)} autoCapitalize="words" />
+            <Choice label="Talla de camisa *" value={fields.shirtSize} icon="shirt-outline" onPress={() => setPicker("shirt")} />
+            <Choice label="Talla de pantalón *" value={fields.pantSize} icon="resize-outline" onPress={() => setPicker("pant")} />
+            <Choice label="Talla de zapatos *" value={fields.shoeSize} icon="footsteps-outline" onPress={() => setPicker("shoe")} />
+          </FormCard>
+          <FormCard title="Contacto de emergencia">
+            <Label text="Nombre *" />
+            <Input icon="person-outline" value={fields.emergencyContactName} onChangeText={(value) => update("emergencyContactName", value)} autoCapitalize="words" />
+            <Label text="Parentesco *" />
+            <Input icon="people-outline" value={fields.emergencyContactRelationship} onChangeText={(value) => update("emergencyContactRelationship", value)} autoCapitalize="words" />
+            <Label text="Teléfono *" />
+            <Input icon="call-outline" value={fields.emergencyContactPhone} onChangeText={(value) => update("emergencyContactPhone", value)} keyboardType="phone-pad" />
+          </FormCard>
+          <FormCard title="Foto de perfil">
+            <Notice icon="camera-outline" text="Tómate una foto frontal, con buena luz y el rostro centrado. Esta será tu foto de perfil." />
+            <Pressable style={styles.uploadCard} onPress={() => setSelfieOpen(true)}>
+              <View style={styles.pdfIcon}>
+                <Ionicons name={selfieUri ? "checkmark-circle-outline" : "camera-outline"} size={23} color={selfieUri ? C.green : C.orange} />
+              </View>
+              <View style={styles.flex}>
+                <Text style={styles.cardTitle}>{selfieUri ? "Selfie lista" : "Tomar selfie"}</Text>
+                <Text style={styles.cardMeta}>{selfieUri ? "Puedes repetir la foto si lo necesitas." : "Foto frontal obligatoria."}</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={20} color={C.muted} />
+            </Pressable>
+            {selfieUri ? <Image source={{ uri: selfieUri }} style={styles.selfiePreview} resizeMode="cover" /> : null}
+          </FormCard>
+          <FormCard title="Tratamiento de datos personales">
+            <Notice icon="document-text-outline" text="Lee la política antes de enviar. El check quedará guardado como evidencia de aceptación." />
+            <SecondaryButton label="Ver política PDF" icon="open-outline" onPress={() => Linking.openURL(form.policy.url)} />
+            <Pressable style={styles.policyCheckRow} onPress={() => update("acceptsDataPolicy", !fields.acceptsDataPolicy)}>
+              <View style={[styles.checkbox, fields.acceptsDataPolicy && styles.checkboxOn]}>
+                {fields.acceptsDataPolicy ? <Ionicons name="checkmark" size={14} color={C.white} /> : null}
+              </View>
+              <Text style={styles.noticeText}>{form.policy.acceptanceText}</Text>
+            </Pressable>
+          </FormCard>
+          <PrimaryButton label={saving ? "Enviando..." : "Enviar información"} icon="send-outline" disabled={saving} onPress={submit} />
+        </ScrollView>
+        <CalendarModal
+          visible={calendarOpen}
+          selectedDate={fields.birthDate || null}
+          defaultDate="1990-01-01"
+          title="Fecha de nacimiento"
+          onClose={() => setCalendarOpen(false)}
+          onSelect={(date) => {
+            update("birthDate", date);
+            setCalendarOpen(false);
+          }}
+        />
+        <DropdownModal
+          visible={Boolean(activePicker)}
+          title={activePicker?.title ?? ""}
+          options={activePicker?.options ?? []}
+          selectedId={activePicker?.selectedId ?? 0}
+          onClose={() => setPicker(null)}
+          onSelect={(id) => {
+            activePicker?.onSelect(id);
+            setPicker(null);
+          }}
+        />
+        <SelfieCaptureModal
+          visible={selfieOpen}
+          currentUri={selfieUri}
+          onClose={() => setSelfieOpen(false)}
+          onReady={(uri) => {
+            setSelfieUri(uri);
+            setSelfieOpen(false);
+          }}
+        />
       </SafeAreaView>
     </SafeAreaProvider>
   );
@@ -2148,6 +2452,104 @@ function CedulaCaptureFlow({
   );
 }
 
+function SelfieCaptureModal({
+  visible,
+  currentUri,
+  onClose,
+  onReady,
+}: {
+  visible: boolean;
+  currentUri: string;
+  onClose: () => void;
+  onReady: (uri: string) => void;
+}) {
+  const cameraRef = useRef<CameraView | null>(null);
+  const [permission, requestPermission] = useCameraPermissions();
+  const [previewUri, setPreviewUri] = useState(currentUri);
+  const [cameraOpen, setCameraOpen] = useState(!currentUri);
+
+  useEffect(() => {
+    if (visible) {
+      setPreviewUri(currentUri);
+      setCameraOpen(!currentUri);
+    }
+  }, [currentUri, visible]);
+
+  const ensurePermission = async () => {
+    if (permission?.granted) return true;
+    const result = await requestPermission();
+    if (!result.granted) {
+      Alert.alert("Permiso de cámara", "Necesitamos acceso a la cámara para tomar tu foto de perfil.");
+      return false;
+    }
+    return true;
+  };
+
+  const takePhoto = async () => {
+    try {
+      if (!(await ensurePermission())) return;
+      const photo = await cameraRef.current?.takePictureAsync({
+        quality: 0.82,
+        skipProcessing: false,
+      });
+      if (!photo?.uri) return;
+      setPreviewUri(photo.uri);
+      setCameraOpen(false);
+    } catch (cause) {
+      Alert.alert("No fue posible tomar la foto", errorMessage(cause));
+    }
+  };
+
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={styles.cameraShell}>
+        <View style={styles.cameraHeader}>
+          <View style={styles.flex}>
+            <Text style={styles.formTitle}>Selfie de perfil</Text>
+            <Text style={styles.caption}>Foto frontal, rostro centrado y buena iluminación.</Text>
+          </View>
+          <Pressable style={styles.iconButton} onPress={onClose}>
+            <Ionicons name="close" size={20} color={C.ink} />
+          </Pressable>
+        </View>
+        {cameraOpen ? (
+          <View style={styles.cameraStage}>
+            {permission?.granted ? (
+              <CameraView ref={cameraRef} style={styles.cameraView} facing="front" mode="picture" />
+            ) : (
+              <View style={styles.cameraPermission}>
+                <Ionicons name="camera-outline" size={42} color={C.navy} />
+                <Text style={styles.cardTitle}>Permiso de cámara requerido</Text>
+                <Text style={styles.caption}>Autoriza la cámara para tomar la selfie.</Text>
+                <PrimaryButton label="Permitir cámara" icon="camera-outline" onPress={ensurePermission} />
+              </View>
+            )}
+            {permission?.granted ? (
+              <View style={styles.cameraControls}>
+                <Text style={styles.cameraInstruction}>Mira al frente y centra tu rostro</Text>
+                <PrimaryButton label="Tomar foto" icon="camera" onPress={takePhoto} />
+                {previewUri ? <SecondaryButton label="Ver previsualización" icon="image-outline" onPress={() => setCameraOpen(false)} /> : null}
+              </View>
+            ) : null}
+          </View>
+        ) : (
+          <ScrollView contentContainerStyle={styles.capturePreviewContent}>
+            <Notice icon="person-circle-outline" text="Revisa la foto antes de continuar. Puedes repetirla si quedó borrosa u oscura." />
+            {previewUri ? (
+              <Image source={{ uri: previewUri }} style={styles.selfieLargePreview} resizeMode="cover" />
+            ) : (
+              <EmptyState icon="camera-outline" text="Aún no hay selfie." />
+            )}
+            <PrimaryButton label="Usar esta foto" icon="checkmark-circle-outline" disabled={!previewUri} onPress={() => previewUri && onReady(previewUri)} />
+            <SecondaryButton label="Repetir foto" icon="camera-outline" onPress={() => setCameraOpen(true)} />
+            <SecondaryButton label="Cancelar" icon="close-outline" onPress={onClose} />
+          </ScrollView>
+        )}
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
 function CedulaPreviewSlot({ title, uri, onTake }: { title: string; uri: string; onTake: () => void }) {
   return (
     <View style={styles.previewCard}>
@@ -3324,6 +3726,17 @@ function ContractorActivationDocumentsCard({
       const completed = activationDocumentOptions.every((item) =>
         documents.some((document) => document.typeCode === item.typeCode),
       );
+      let onboardingMessage = "";
+      if (completed || activatedByContractType) {
+        try {
+          const email = await sendContractorOnboardingEmail(contractor.id);
+          onboardingMessage = email
+            ? ` Se envió el formulario de datos a ${email}.`
+            : " Se envió el formulario de datos al correo registrado.";
+        } catch (cause) {
+          onboardingMessage = ` No fue posible enviar el formulario por correo: ${errorMessage(cause)}`;
+        }
+      }
       setExistingCodes(
         activationDocumentOptions
           .map((item) => item.typeCode)
@@ -3332,7 +3745,7 @@ function ContractorActivationDocumentsCard({
       Alert.alert(
         completed || activatedByContractType ? "Contrato activado" : "Documentos guardados",
         completed || activatedByContractType
-          ? "El contratista ya quedó disponible para operaciones."
+          ? `El contratista ya quedó disponible para operaciones.${onboardingMessage}`
           : pendingUploads.length === 0
             ? "Tipo de contrato guardado. Aún faltan documentos para activar."
             : "Tipo de contrato y documentos guardados. Aún faltan documentos para activar.",
@@ -3511,172 +3924,184 @@ function ClientHistoryDetail({ history }: { history: ContractorHistory }) {
 }
 
 function Statistics({ context, data }: { context: UserContext; data: AppData }) {
-  const today = todayIso();
-  const defaultStart = dateToIso(addDays(isoToDate(today), -29));
+  const defaultMonth = monthStartIso(todayIso());
   const fixedClientId = context.role === "Cliente" ? context.clients[0]?.id ?? 0 : 0;
-  const [startDate, setStartDate] = useState(defaultStart);
-  const [endDate, setEndDate] = useState(today);
+  const [month, setMonth] = useState(defaultMonth);
   const [clientId, setClientId] = useState(fixedClientId);
-  const [areaId, setAreaId] = useState(0);
-  const [openFilter, setOpenFilter] = useState<"start" | "end" | "client" | "area" | null>(null);
+  const [contractorId, setContractorId] = useState(0);
+  const [openFilter, setOpenFilter] = useState<"month" | "client" | "contractor" | null>(null);
+  const [summary, setSummary] = useState<StatisticsSummary | null>(null);
+  const [contractorOptions, setContractorOptions] = useState<StatisticsSummary["contractorOptions"]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  const availableAreas = data.areas.filter(
-    (area) => clientId === 0 || area.clientId === clientId,
-  );
-  const filteredOperations = data.operations.filter(
-    (operation) =>
-      operation.date >= startDate &&
-      operation.date <= endDate &&
-      (clientId === 0 || operation.clientId === clientId) &&
-      (areaId === 0 || operation.areaId === areaId),
-  );
-  const filteredRequests = data.requests.filter(
-    (request) =>
-      request.requiredDate >= startDate &&
-      request.requiredDate <= endDate &&
-      (clientId === 0 || request.clientId === clientId) &&
-      (areaId === 0 || request.areaId === areaId),
-  );
-  const planned = filteredOperations.reduce((total, item) => total + item.people, 0);
-  const worked = filteredOperations.reduce((total, item) => total + item.worked, 0);
-  const extras = filteredOperations.reduce((total, item) => total + item.extraHours, 0);
-  const coverage = planned ? Math.round((worked / planned) * 100) : 0;
-  const openRequests = filteredRequests.filter((item) => item.status === "ABIERTA").length;
-  const bars = filteredOperations.slice(0, 5).reverse();
+  const clientOptions = context.role === "Director" ? data.clients : context.clients;
+  const selectedClientName =
+    clientId === 0
+      ? "Todas las empresas"
+      : clientOptions.find((client) => client.id === clientId)?.name ?? "Todas las empresas";
+  const selectedContractorName =
+    contractorId === 0
+      ? "Todos los contratistas"
+      : contractorOptions.find((contractor) => contractor.id === contractorId)?.name ?? "Todos los contratistas";
 
-  const selectStartDate = (date: string) => {
-    if (date > endDate) {
-      Alert.alert("Rango inválido", "La fecha inicial no puede ser posterior a la fecha final.");
-      return;
+  const refreshStatistics = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [summaryResult, optionsResult] = await Promise.all([
+        loadStatisticsSummary({
+          month,
+          clientId: clientId || null,
+          contractorId: contractorId || null,
+        }),
+        loadStatisticsSummary({
+          month,
+          clientId: clientId || null,
+          contractorId: null,
+        }),
+      ]);
+      setSummary(summaryResult);
+      setContractorOptions(optionsResult.contractorOptions);
+    } catch (cause) {
+      setError(errorMessage(cause));
+      setSummary(null);
+      setContractorOptions([]);
+    } finally {
+      setLoading(false);
     }
-    setStartDate(date);
-    setOpenFilter(null);
-  };
+  }, [clientId, contractorId, month]);
 
-  const selectEndDate = (date: string) => {
-    if (date < startDate) {
-      Alert.alert("Rango inválido", "La fecha final no puede ser anterior a la fecha inicial.");
-      return;
-    }
-    setEndDate(date);
+  useEffect(() => {
+    refreshStatistics();
+  }, [refreshStatistics]);
+
+  const hasData = summary
+    ? summary.saleTotal > 0 ||
+      summary.costTotal > 0 ||
+      summary.contractorsWorked > 0 ||
+      summary.activeContractors > 0 ||
+      summary.assignedOperations > 0 ||
+      summary.workedShifts > 0 ||
+      summary.extraHours > 0
+    : false;
+
+  const selectMonth = (date: string) => {
+    setMonth(monthStartIso(date));
+    setContractorId(0);
     setOpenFilter(null);
   };
 
   return (
     <Page>
       <View>
-        <Text style={styles.eyebrow}>RENDIMIENTO OPERATIVO</Text>
-        <Text style={styles.greeting}>{context.role === "Cliente" ? "Resultados de tu empresa" : "Panorama general"}</Text>
-        <Text style={styles.subtitle}>Calculado desde operaciones, asignaciones y solicitudes visibles.</Text>
+        <Text style={styles.eyebrow}>ESTADÍSTICAS</Text>
+        <Text style={styles.greeting}>
+          {context.role === "Director" ? "Resultados financieros" : "Resultados operativos"}
+        </Text>
+        <Text style={styles.subtitle}>
+          {context.role === "Director"
+            ? "Venta y costos de operaciones cerradas."
+            : "Operaciones, turnos, extras y contratistas visibles según tu perfil."}
+        </Text>
       </View>
       <FormCard title="Filtros">
-        <View style={styles.statsFilterRow}>
-          <View style={styles.flex}>
-            <Choice
-              label="Fecha inicial"
-              value={formatDate(startDate)}
-              icon="calendar-outline"
-              onPress={() => setOpenFilter("start")}
-            />
-          </View>
-          <View style={styles.flex}>
-            <Choice
-              label="Fecha final"
-              value={formatDate(endDate)}
-              icon="calendar-outline"
-              onPress={() => setOpenFilter("end")}
-            />
-          </View>
-        </View>
+        <Choice
+          label="Mes"
+          value={formatMonth(month)}
+          icon="calendar-outline"
+          onPress={() => setOpenFilter("month")}
+        />
         {context.role !== "Cliente" && (
           <Choice
-            label="Cliente"
-            value={clientId === 0 ? "Todos los clientes" : data.clients.find((client) => client.id === clientId)?.name ?? "Todos los clientes"}
+            label="Empresa"
+            value={selectedClientName}
             icon="business-outline"
             onPress={() => setOpenFilter("client")}
           />
         )}
         <Choice
-          label="Área"
-          value={areaId === 0 ? "Todas las áreas" : availableAreas.find((area) => area.id === areaId)?.name ?? "Todas las áreas"}
-          icon="location-outline"
-          onPress={() => setOpenFilter("area")}
+          label="Contratista"
+          value={selectedContractorName}
+          icon="person-outline"
+          disabled={contractorOptions.length === 0}
+          onPress={() => setOpenFilter("contractor")}
         />
       </FormCard>
-      {filteredOperations.length === 0 ? (
-        <EmptyState icon="bar-chart-outline" text="No hay operaciones para los filtros seleccionados." />
+      {loading ? (
+        <View style={styles.centerCard}><ActivityIndicator color={C.navy} /></View>
+      ) : error ? (
+        <Notice icon="cloud-offline-outline" tone="error" text={error} />
+      ) : !summary || !hasData ? (
+        <EmptyState icon="bar-chart-outline" text="No hay estadísticas para los filtros seleccionados." />
       ) : (
         <>
           <View style={styles.statsGrid}>
-            <Stat value={`${coverage}%`} label="Cobertura" icon="trending-up" />
-            <Stat value={String(worked)} label="Turnos trabajados" icon="people" />
-            <Stat value={`${extras} h`} label="Horas extra" icon="time" />
-            <Stat value={String(openRequests)} label="Solicitudes abiertas" icon="document-text" />
-          </View>
-          <View style={styles.chartCard}>
-            <Text style={styles.formTitle}>Planeado vs. trabajado</Text>
-            <Text style={styles.caption}>Últimas operaciones del periodo seleccionado</Text>
-            <View style={styles.barChart}>
-              {bars.map((item) => {
-                const plannedHeight = Math.max(20, Math.min(120, item.people * 18));
-                const workedHeight = item.people ? Math.round(plannedHeight * (item.worked / item.people)) : 0;
-                return (
-                  <View key={item.id} style={styles.barGroup}>
-                    <View style={[styles.barGhost, { height: plannedHeight }]}>
-                      <View style={[styles.barFill, { height: workedHeight }]} />
-                    </View>
-                    <Text style={styles.caption}>{item.area.slice(0, 4)}</Text>
-                  </View>
-                );
-              })}
-            </View>
+            {context.role === "Director" ? (
+              <>
+                <Stat value={formatCurrency(summary.saleTotal)} label="Venta" icon="cash-outline" />
+                <Stat value={formatCurrency(summary.costTotal)} label="Costos" icon="receipt-outline" />
+                <Stat value={String(summary.contractorsWorked)} label="Contratistas" icon="people" />
+              </>
+            ) : (
+              <>
+                <Stat value={String(summary.contractorsWorked)} label="Contratistas" icon="people" />
+                <Stat value={String(summary.assignedOperations)} label="Operaciones" icon="briefcase-outline" />
+                <Stat value={String(summary.workedShifts)} label="Turnos trabajados" icon="checkmark-circle-outline" />
+                <Stat value={`${summary.extraHours} h`} label="Horas extra" icon="time-outline" />
+                {context.role === "Coordinador" && (
+                  <Stat value={String(summary.activeContractors)} label="Contratistas activos" icon="shield-checkmark-outline" />
+                )}
+              </>
+            )}
           </View>
           <Notice
             icon="bulb-outline"
             text={
-              coverage >= 90
-                ? `La cobertura visible es ${coverage}%. La operación mantiene un nivel alto.`
-                : `La cobertura visible es ${coverage}%. Revisa solicitudes abiertas y ausencias.`
+              context.role === "Director"
+                ? `La venta y los costos corresponden a operaciones cerradas de ${formatMonth(month)}.`
+                : `Las métricas corresponden a operaciones visibles de ${formatMonth(month)}.`
             }
           />
         </>
       )}
       <CalendarModal
-        visible={openFilter === "start"}
-        selectedDate={startDate}
-        title="Fecha inicial"
-        subtitle="Selecciona el inicio del periodo."
+        visible={openFilter === "month"}
+        selectedDate={month}
+        title="Seleccionar mes"
+        subtitle="Elige cualquier día del mes que quieres visualizar."
         onClose={() => setOpenFilter(null)}
-        onSelect={selectStartDate}
-      />
-      <CalendarModal
-        visible={openFilter === "end"}
-        selectedDate={endDate}
-        title="Fecha final"
-        subtitle="Selecciona el final del periodo."
-        onClose={() => setOpenFilter(null)}
-        onSelect={selectEndDate}
+        onSelect={selectMonth}
       />
       <DropdownModal
         visible={openFilter === "client"}
-        title="Seleccionar cliente"
-        options={[{ id: 0, name: "Todos los clientes" }, ...data.clients]}
+        title="Seleccionar empresa"
+        options={[{ id: 0, name: "Todas las empresas" }, ...clientOptions]}
         selectedId={clientId}
         onClose={() => setOpenFilter(null)}
         onSelect={(id) => {
           setClientId(id);
-          setAreaId(0);
+          setContractorId(0);
           setOpenFilter(null);
         }}
       />
       <DropdownModal
-        visible={openFilter === "area"}
-        title="Seleccionar Área"
-        options={[{ id: 0, name: "Todas las Áreas" }, ...availableAreas]}
-        selectedId={areaId}
+        visible={openFilter === "contractor"}
+        title="Seleccionar contratista"
+        options={[
+          { id: 0, name: "Todos los contratistas" },
+          ...contractorOptions.map((contractor) => ({
+            id: contractor.id,
+            name: contractor.name,
+            detail: contractor.document,
+          })),
+        ]}
+        selectedId={contractorId}
+        searchable
+        searchPlaceholder="Buscar por nombre o documento"
         onClose={() => setOpenFilter(null)}
         onSelect={(id) => {
-          setAreaId(id);
+          setContractorId(id);
           setOpenFilter(null);
         }}
       />
@@ -4117,6 +4542,7 @@ const styles = StyleSheet.create({
   headerLeft: { flex: 1, flexDirection: "row", alignItems: "center", gap: 11 },
   headerLogo: { width: 34, height: 34 },
   headerTitle: { color: C.ink, fontSize: 18, fontWeight: "800" },
+  publicHero: { backgroundColor: C.white, borderRadius: 22, padding: 17, flexDirection: "row", alignItems: "center", gap: 12, borderWidth: 1, borderColor: C.line },
   avatar: { width: 39, height: 39, borderRadius: 13, backgroundColor: C.navy, alignItems: "center", justifyContent: "center" },
   avatarText: { color: C.white, fontSize: 12, fontWeight: "900" },
   iconButton: { width: 39, height: 39, borderRadius: 13, backgroundColor: C.white, borderWidth: 1, borderColor: C.line, alignItems: "center", justifyContent: "center" },
@@ -4147,6 +4573,7 @@ const styles = StyleSheet.create({
   kpi: { flex: 1, minHeight: 105, borderRadius: 17, padding: 13, backgroundColor: C.white, borderWidth: 1, borderColor: C.line, gap: 5 },
   kpiValue: { color: C.ink, fontSize: 22, fontWeight: "900" },
   card: { backgroundColor: C.white, borderRadius: 18, padding: 14, gap: 11, borderWidth: 1, borderColor: C.line },
+  centerCard: { minHeight: 120, backgroundColor: C.white, borderRadius: 18, padding: 18, borderWidth: 1, borderColor: C.line, alignItems: "center", justifyContent: "center" },
   cardTop: { flexDirection: "row", alignItems: "center", gap: 11 },
   cardTitle: { color: C.ink, fontSize: 15, fontWeight: "800" },
   cardMeta: { color: C.muted, fontSize: 11, marginTop: 3 },
@@ -4174,6 +4601,7 @@ const styles = StyleSheet.create({
   notice: { flexDirection: "row", alignItems: "flex-start", gap: 10, padding: 13, borderRadius: 15, backgroundColor: C.blueBg, borderWidth: 1, borderColor: "#CED9F6" },
   noticeError: { backgroundColor: C.redBg, borderColor: "#F5CDCD" },
   noticeText: { flex: 1, color: C.navy, fontSize: 11, lineHeight: 17 },
+  policyCheckRow: { flexDirection: "row", alignItems: "flex-start", gap: 10, padding: 13, borderRadius: 15, backgroundColor: C.blueBg, borderWidth: 1, borderColor: "#CED9F6" },
   personRow: { backgroundColor: C.white, borderRadius: 15, padding: 13, flexDirection: "row", alignItems: "center", gap: 11, borderWidth: 1, borderColor: C.line, marginBottom: 8 },
   personRowPlain: { flexDirection: "row", alignItems: "center", gap: 11 },
   personName: { color: C.ink, fontSize: 13, fontWeight: "800" },
@@ -4193,6 +4621,8 @@ const styles = StyleSheet.create({
   capturePreviewContent: { padding: 18, gap: 14 },
   previewCard: { backgroundColor: C.white, borderRadius: 18, padding: 14, gap: 12, borderWidth: 1, borderColor: C.line },
   cedulaPreviewImage: { width: "100%", height: 220, borderRadius: 14, backgroundColor: "#F8FAFF" },
+  selfiePreview: { width: 116, height: 116, borderRadius: 24, alignSelf: "center", backgroundColor: "#F8FAFF" },
+  selfieLargePreview: { width: "100%", height: 420, borderRadius: 22, backgroundColor: "#F8FAFF" },
   emptyPreview: { height: 160, borderRadius: 14, borderWidth: 1, borderStyle: "dashed", borderColor: C.line, alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: "#FBFCFE" },
   activationCard: { backgroundColor: C.white, borderRadius: 20, padding: 17, gap: 12, borderWidth: 1, borderColor: "#FFD4C4" },
   boundedList: { maxHeight: 250 },

@@ -172,6 +172,74 @@ export interface AdminUser {
   clientIds: number[];
 }
 
+export interface StatisticsContractorOption extends NamedRecord {
+  document: string;
+}
+
+export interface StatisticsSummary {
+  saleTotal: number;
+  costTotal: number;
+  contractorsWorked: number;
+  activeContractors: number;
+  assignedOperations: number;
+  workedShifts: number;
+  extraHours: number;
+  contractorOptions: StatisticsContractorOption[];
+}
+
+export interface OnboardingOption {
+  id: number;
+  name: string;
+}
+
+export interface ContractorOnboardingForm {
+  contractor: {
+    id: number;
+    name: string;
+    document: string;
+    email: string;
+  };
+  catalogs: {
+    civilStates: OnboardingOption[];
+    transportTypes: OnboardingOption[];
+    educationLevels: OnboardingOption[];
+    bloodTypes: string[];
+    stratum: string[];
+    shirtSizes: string[];
+    pantSizes: string[];
+    shoeSizes: string[];
+  };
+  policy: {
+    fileId: string | null;
+    url: string;
+    acceptanceText: string;
+  };
+}
+
+export interface ContractorOnboardingSubmission {
+  bloodType: string;
+  birthDate: string;
+  birthPlace: string;
+  civilStateId: number;
+  residenceDepartment: string;
+  residenceCity: string;
+  address: string;
+  stratum: string;
+  phone: string;
+  transportTypeId: number;
+  educationLevelId: number;
+  eps: string;
+  shirtSize: string;
+  pantSize: string;
+  shoeSize: string;
+  pensionFund: string;
+  emergencyContactName: string;
+  emergencyContactRelationship: string;
+  emergencyContactPhone: string;
+  selfieBase64: string;
+  acceptsDataPolicy: boolean;
+}
+
 export interface AppData {
   clients: NamedRecord[];
   documentTypes: NamedRecord[];
