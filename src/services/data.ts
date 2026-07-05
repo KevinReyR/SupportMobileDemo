@@ -579,6 +579,7 @@ export async function sendContractorOnboardingEmail(contractorId: number): Promi
     body: { contractorId },
   });
   fail(result.error);
+  if ((result.data as any)?.error) throw new Error((result.data as any).error);
   const email = (result.data as any)?.email;
   return typeof email === "string" ? email : "";
 }

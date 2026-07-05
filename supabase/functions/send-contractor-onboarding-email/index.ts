@@ -106,7 +106,16 @@ Deno.serve(async (req) => {
 
   if (!emailResponse.ok) {
     const detail = await emailResponse.text();
-    return jsonResponse({ error: `No fue posible enviar el correo: ${detail}` }, 502);
+    console.error("Resend rejected onboarding email", {
+      status: emailResponse.status,
+      detail,
+      from: fromEmail,
+      to: contractor.email,
+    });
+    return jsonResponse({
+      ok: false,
+      error: `No fue posible enviar el correo: ${detail}`,
+    });
   }
 
   return jsonResponse({ ok: true, email: contractor.email });
