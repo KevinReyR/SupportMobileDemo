@@ -9,8 +9,11 @@ function loadEnv() {
   try {
     const content = readFileSync(".env", "utf8");
     for (const line of content.split(/\r?\n/)) {
-      const match = line.match(/^([A-Z0-9_]+)=(.*)$/);
-      if (match && !process.env[match[1]]) process.env[match[1]] = match[2];
+      const match = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)$/);
+      if (match && !process.env[match[1]]) {
+        const value = match[2].trim().replace(/^['"]|['"]$/g, "");
+        process.env[match[1]] = value;
+      }
     }
   } catch {
     // .env is optional; CI can pass env vars directly.
