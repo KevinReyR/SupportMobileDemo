@@ -49,6 +49,35 @@ function base64ToBytes(value: string) {
   return bytes;
 }
 
+async function createFaceProtectionMask(selfieBytes: Uint8Array) {
+  const source = await Image.decode(selfieBytes);
+  const size = Math.max(source.width, source.height);
+  const mask = new Image(size, size);
+  const opaqueWhite = Image.rgbaToColor(255, 255, 255, 255);
+  const centerX = size * 0.5;
+  const centerY = size * 0.34;
+  const radiusX = size * 0.23;
+  const radiusY = size * 0.24;
+  const neckLeft = size * 0.36;
+  const neckRight = size * 0.64;
+  const neckTop = size * 0.47;
+  const neckBottom = size * 0.62;
+
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const normalizedFaceX = (x - centerX) / radiusX;
+      const normalizedFaceY = (y - centerY) / radiusY;
+      const insideFaceProtection = normalizedFaceX * normalizedFaceX + normalizedFaceY * normalizedFaceY <= 1;
+      const insideNeckProtection = x >= neckLeft && x <= neckRight && y >= neckTop && y <= neckBottom;
+      if (insideFaceProtection || insideNeckProtection) {
+        mask.setPixelAt(x + 1, y + 1, opaqueWhite);
+      }
+    }
+  }
+
+  return await mask.encodePNG();
+}
+
 async function generateCorporateProfilePhoto(serviceClient: any, selfieBytes: Uint8Array) {
   const openAiKey = Deno.env.get("OPENAI_API_KEY") ?? "";
   if (!openAiKey) return null;
@@ -56,6 +85,12 @@ async function generateCorporateProfilePhoto(serviceClient: any, selfieBytes: Ui
   const form = new FormData();
   form.append("model", Deno.env.get("OPENAI_IMAGE_MODEL") ?? "gpt-image-1");
   form.append("image[]", new File([selfieBytes], "selfie-original.jpg", { type: "image/jpeg" }));
+  try {
+    const maskBytes = await createFaceProtectionMask(selfieBytes);
+    form.append("mask", new File([maskBytes], "face-protection-mask.png", { type: "image/png" }));
+  } catch (maskError) {
+    console.error("Face protection mask generation failed", maskError);
+  }
   form.append(
     "prompt",
     [
