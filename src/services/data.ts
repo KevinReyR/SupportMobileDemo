@@ -216,7 +216,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       supabase
         .from("contractor")
         .select(
-          "id,name,last_name,document_number,birth_date,phone_number,email,rh,eps,arl,disponibility,shirt_size,pant_size,shoe_size,hire_date,termination_date,transport_type(name),civil_state_type(name)",
+          "id,name,last_name,document_number,profile_photo_file_id,birth_date,phone_number,email,rh,eps,arl,disponibility,shirt_size,pant_size,shoe_size,hire_date,termination_date,transport_type(name),civil_state_type(name)",
         )
         .order("name"),
       supabase
@@ -271,6 +271,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
         fullName,
         initials: `${firstName[0] ?? ""}${lastName[0] ?? ""}`.toUpperCase(),
         document: row.document_number,
+        profilePhotoFileId: row.profile_photo_file_id ?? null,
         birthDate: row.birth_date,
         phone: row.phone_number,
         email: row.email,
@@ -308,6 +309,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
         fullName: `${name} ${lastName}`.trim(),
         initials: `${name[0] ?? ""}${lastName[0] ?? ""}`.toUpperCase(),
         document: cleanText(row.document_number),
+        profilePhotoFileId: row.profile_photo_file_id ?? null,
         birthDate: row.birth_date,
         rh: cleanText(row.rh) || null,
         eps: cleanText(row.eps) || null,
@@ -491,6 +493,28 @@ export async function createContractorDocumentSignedUrl(
     throw new Error("No fue posible generar el acceso temporal al documento.");
   }
   return result.data.signedUrl;
+}
+
+export async function createContractorProfilePhotoSignedUrl(
+  fileId: string | null,
+): Promise<string> {
+  if (!fileId) return "";
+  const fileResult = await supabase
+    .from("app_files")
+    .select("provider,bucket,path")
+    .eq("id", fileId)
+    .single();
+  fail(fileResult.error);
+  const file = fileResult.data as any;
+  if (file.provider !== "supabase") {
+    throw new Error("El proveedor de la foto no está disponible.");
+  }
+  const urlResult = await supabase.storage
+    .from(file.bucket)
+    .createSignedUrl(file.path, 300);
+  fail(urlResult.error);
+  if (!urlResult.data?.signedUrl) throw new Error("No fue posible generar la foto de perfil.");
+  return urlResult.data.signedUrl;
 }
 
 async function uploadAndRegisterContractorPdf(

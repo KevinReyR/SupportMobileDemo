@@ -72,6 +72,7 @@ Deno.serve(async (req) => {
   const expiresAt = addDaysColombia(ONBOARDING_DAYS);
   const fullName = `${contractor.name ?? ""} ${contractor.last_name ?? ""}`.trim();
   const link = `${webUrl.replace(/\/$/, "")}/onboarding?token=${encodeURIComponent(token)}`;
+  const bannerUrl = `${supabaseUrl.replace(/\/$/, "")}/storage/v1/object/public/supplies/images/bannersupport-email.jpg`;
 
   const { error: inviteError } = await serviceClient.from("contractor_onboarding_invites").insert({
     contractor_id: contractorId,
@@ -94,12 +95,27 @@ Deno.serve(async (req) => {
       to: contractor.email,
       subject: "Completa tus datos - Support Colombia",
       html: `
-        <div style="font-family:Arial,sans-serif;color:#17213A;line-height:1.5">
-          <h2>Hola ${fullName || "contratista"},</h2>
-          <p>Tu contrato fue activado en Support Colombia. Completa tus datos personales y acepta la política de tratamiento de datos para finalizar tu registro.</p>
-          <p><a href="${link}" style="display:inline-block;background:#15285A;color:#fff;padding:12px 18px;border-radius:10px;text-decoration:none;font-weight:bold">Diligenciar formulario</a></p>
-          <p>Este enlace vence en ${ONBOARDING_DAYS} días y solo puede usarse una vez.</p>
-        </div>
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="width:100%;background:#F4F6FA;font-family:Arial,sans-serif;color:#17213A">
+          <tr>
+            <td align="center" style="padding:16px 10px">
+              <table role="presentation" width="640" cellspacing="0" cellpadding="0" style="width:100%;max-width:640px;background:#FFFFFF;border:1px solid #E2E7F0;border-radius:14px;overflow:hidden">
+                <tr>
+                  <td>
+                    <img src="${bannerUrl}" width="640" alt="Support Colombia" style="display:block;width:100%;max-width:640px;height:auto;border:0" />
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:22px 26px 24px">
+                    <h1 style="margin:0 0 10px;font-size:24px;line-height:1.2;color:#15285A">Hola ${fullName || "contratista"},</h1>
+                    <p style="margin:0 0 18px;font-size:15px;line-height:1.45;color:#39445C">Completa tus datos personales y acepta la política de tratamiento de datos para finalizar tu registro.</p>
+                    <a href="${link}" style="display:inline-block;background:#15285A;color:#FFFFFF;padding:12px 18px;border-radius:9px;text-decoration:none;font-size:15px;font-weight:bold">Diligenciar formulario</a>
+                    <p style="margin:16px 0 0;font-size:12px;line-height:1.4;color:#6B7280">Este enlace vence en ${ONBOARDING_DAYS} días y solo puede usarse una vez.</p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
       `,
     }),
   });

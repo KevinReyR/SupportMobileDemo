@@ -1,9 +1,11 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { Image } from "https://deno.land/x/imagescript@1.2.17/mod.ts";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import {
   colombiaNow,
   POLICY_BUCKET,
   POLICY_PATH,
+  PROFILE_LOGO_PATH,
   PROFILE_PHOTO_BUCKET,
   publicPolicyUrl,
   sha256Hex,
@@ -36,6 +38,100 @@ function requireString(value: unknown, label: string) {
   const text = typeof value === "string" ? value.trim() : "";
   if (!text) throw new Error(`${label} es obligatorio.`);
   return text;
+}
+
+function base64ToBytes(value: string) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+async function generateCorporateProfilePhoto(serviceClient: any, selfieBytes: Uint8Array) {
+  const openAiKey = Deno.env.get("OPENAI_API_KEY") ?? "";
+  if (!openAiKey) return null;
+
+  const form = new FormData();
+  form.append("model", Deno.env.get("OPENAI_IMAGE_MODEL") ?? "gpt-image-1");
+  form.append("image[]", new File([selfieBytes], "selfie-original.jpg", { type: "image/jpeg" }));
+  form.append(
+    "prompt",
+    [
+      "Create a professional corporate employee profile photo from the selfie.",
+      "The face must remain pixel-identical in identity: do not change facial structure, eyes, nose, mouth, jaw, cheeks, forehead, ears, hairline, skin texture, skin tone, expression, age, or any identifying facial detail.",
+      "Do not beautify, retouch, smooth skin, reshape, age, de-age, stylize, replace, or redraw the face.",
+      "Only change non-facial context: background, lighting balance, clothing from neck down, and shirt branding.",
+      "Use a clean studio background, business-ready lighting, and a neat corporate shirt while keeping the original head and face unchanged.",
+      "Place the Support Colombia logo naturally on the shirt as a small embroidered company logo.",
+      "Head-and-shoulders portrait, centered, realistic, suitable for an employee profile.",
+    ].join(" "),
+  );
+  form.append("size", "1024x1024");
+  form.append("quality", "low");
+
+  const response = await fetch("https://api.openai.com/v1/images/edits", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${openAiKey}` },
+    body: form,
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`OpenAI image edit failed: ${detail}`);
+  }
+  const result = await response.json();
+  const imageBase64 = result?.data?.[0]?.b64_json;
+  if (typeof imageBase64 !== "string" || !imageBase64) {
+    throw new Error("OpenAI no devolvio imagen generada.");
+  }
+  const generatedBytes = base64ToBytes(imageBase64);
+  try {
+    return await addSupportLogoToProfilePhoto(serviceClient, generatedBytes);
+  } catch (logoError) {
+    console.error("Support logo composition failed", logoError);
+    return generatedBytes;
+  }
+}
+
+async function addSupportLogoToProfilePhoto(serviceClient: any, generatedBytes: Uint8Array) {
+  const { data: logoBlob, error: logoError } = await serviceClient.storage
+    .from(POLICY_BUCKET)
+    .download(PROFILE_LOGO_PATH);
+  if (logoError || !logoBlob) throw new Error(logoError?.message ?? "No fue posible cargar el logo.");
+
+  const [profileImage, logoImage] = await Promise.all([
+    Image.decode(generatedBytes),
+    Image.decode(new Uint8Array(await logoBlob.arrayBuffer())),
+  ]);
+  const logoWidth = Math.round(profileImage.width * 0.18);
+  const logoHeight = Math.round((logoImage.height / logoImage.width) * logoWidth);
+  const resizedLogo = logoImage.resize(logoWidth, logoHeight);
+  const x = Math.round(profileImage.width * 0.58 - resizedLogo.width / 2);
+  const y = Math.round(profileImage.height * 0.62 - resizedLogo.height / 2);
+
+  profileImage.composite(resizedLogo, x, y);
+  return await encodeCompressedProfilePhoto(profileImage);
+}
+
+async function encodeCompressedProfilePhoto(image: Image) {
+  const attempts = [
+    { size: 768, quality: 78 },
+    { size: 640, quality: 70 },
+    { size: 512, quality: 66 },
+  ];
+  let current = image;
+  let lastBytes: Uint8Array | null = null;
+
+  for (const attempt of attempts) {
+    if (current.width > attempt.size || current.height > attempt.size) {
+      current = current.contain(attempt.size, attempt.size);
+    }
+    lastBytes = await current.encodeJPEG(attempt.quality);
+    if (lastBytes.byteLength <= 1_500_000) return lastBytes;
+  }
+
+  return lastBytes ?? await image.encodeJPEG(66);
 }
 
 async function getInvite(serviceClient: any, token: string) {
@@ -137,7 +233,7 @@ Deno.serve(async (req) => {
       throw new Error("Selecciona estado civil, transporte y grado de escolaridad.");
     }
 
-    const photoPath = `contractor/${invite.contractor_id}/profile/${crypto.randomUUID()}.jpg`;
+    const photoPath = `contractor/${invite.contractor_id}/profile/original/${crypto.randomUUID()}.jpg`;
     const upload = await serviceClient.storage
       .from(PROFILE_PHOTO_BUCKET)
       .upload(photoPath, selfieBytes, {
@@ -152,13 +248,45 @@ Deno.serve(async (req) => {
         provider: "supabase",
         bucket: PROFILE_PHOTO_BUCKET,
         path: photoPath,
-        original_name: "selfie-perfil.jpg",
+        original_name: "selfie-original.jpg",
         mime_type: "image/jpeg",
         size_bytes: selfieBytes.byteLength,
       })
       .select("id")
       .single();
     if (photoFileError) throw new Error(photoFileError.message);
+
+    let profilePhotoFileId = photoFile.id;
+    try {
+      const generatedBytes = await generateCorporateProfilePhoto(serviceClient, selfieBytes);
+      if (generatedBytes) {
+        const generatedPath = `contractor/${invite.contractor_id}/profile/generated/${crypto.randomUUID()}.jpg`;
+        const generatedUpload = await serviceClient.storage
+          .from(PROFILE_PHOTO_BUCKET)
+          .upload(generatedPath, generatedBytes, {
+            contentType: "image/jpeg",
+            upsert: false,
+          });
+        if (generatedUpload.error) throw new Error(generatedUpload.error.message);
+
+        const { data: generatedFile, error: generatedFileError } = await serviceClient
+          .from("app_files")
+          .insert({
+            provider: "supabase",
+            bucket: PROFILE_PHOTO_BUCKET,
+            path: generatedPath,
+            original_name: "foto-perfil-empresarial.jpg",
+            mime_type: "image/jpeg",
+            size_bytes: generatedBytes.byteLength,
+          })
+          .select("id")
+          .single();
+        if (generatedFileError) throw new Error(generatedFileError.message);
+        profilePhotoFileId = generatedFile.id;
+      }
+    } catch (photoError) {
+      console.error("Corporate profile photo generation failed", photoError);
+    }
 
     const { data: policyFile } = await serviceClient
       .from("app_files")
@@ -189,7 +317,7 @@ Deno.serve(async (req) => {
         emergency_contact_name: requireString(payload.emergencyContactName, "Contacto de emergencia"),
         emergency_contact_relationship: requireString(payload.emergencyContactRelationship, "Parentesco"),
         emergency_contact_phone: requireString(payload.emergencyContactPhone, "Telefono de emergencia"),
-        profile_photo_file_id: photoFile.id,
+        profile_photo_file_id: profilePhotoFileId,
         data_policy_accepted_at: colombiaNow(),
       })
       .eq("id", invite.contractor_id);

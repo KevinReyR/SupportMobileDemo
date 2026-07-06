@@ -30,12 +30,14 @@ import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import type { Session } from "@supabase/supabase-js";
 
 import PdfViewer from "./components/pdf-viewer";
+import { COLOMBIA_DEPARTMENTS, COLOMBIA_MUNICIPALITIES_BY_DEPARTMENT } from "./data/colombia-locations";
 import { buildCedulaPdfFromPhotos } from "./lib/cedula-pdf";
 import { supabase } from "./lib/supabase";
 import {
   cancelPersonnelRequest,
   createContractorDraft,
   createContractorDocumentSignedUrl,
+  createContractorProfilePhotoSignedUrl,
   createOperation,
   createPersonnelRequest,
   finalizeOperation,
@@ -580,8 +582,12 @@ function PublicContractorOnboarding({ token }: { token: string }) {
   const [error, setError] = useState("");
   const [submitted, setSubmitted] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [onboardingProgress, setOnboardingProgress] = useState(0);
+  const [onboardingStepLabel, setOnboardingStepLabel] = useState("");
   const [calendarOpen, setCalendarOpen] = useState(false);
-  const [picker, setPicker] = useState<null | "blood" | "civil" | "transport" | "education" | "stratum" | "shirt" | "pant" | "shoe">(null);
+  const [picker, setPicker] = useState<
+    null | "blood" | "civil" | "department" | "city" | "transport" | "education" | "stratum" | "shirt" | "pant" | "shoe"
+  >(null);
   const [selfieOpen, setSelfieOpen] = useState(false);
   const [selfieUri, setSelfieUri] = useState("");
   const [fields, setFields] = useState({
@@ -642,6 +648,15 @@ function PublicContractorOnboarding({ token }: { token: string }) {
   const update = (key: keyof typeof fields, value: string | number | boolean) => {
     setFields((current) => ({ ...current, [key]: value }));
   };
+  const departmentOptions = Array.from(COLOMBIA_DEPARTMENTS);
+  const cityOptions = fields.residenceDepartment ? COLOMBIA_MUNICIPALITIES_BY_DEPARTMENT[fields.residenceDepartment] ?? [] : [];
+  const selectResidenceDepartment = (department: string) => {
+    setFields((current) => ({ ...current, residenceDepartment: department, residenceCity: "" }));
+  };
+  const setProgress = (progress: number, label: string) => {
+    setOnboardingProgress(progress);
+    setOnboardingStepLabel(label);
+  };
 
   async function submit() {
     if (!form) return;
@@ -676,16 +691,22 @@ function PublicContractorOnboarding({ token }: { token: string }) {
       return;
     }
     setSaving(true);
+    setProgress(0, "Validando formulario");
     try {
+      setProgress(20, "Preparando selfie");
       const selfieBase64 = await imageUriToBase64(selfieUri);
+      setProgress(55, "Enviando información");
       const payload: ContractorOnboardingSubmission = {
         ...fields,
         selfieBase64,
         acceptsDataPolicy: fields.acceptsDataPolicy,
       };
+      setProgress(70, "Procesando datos");
       await submitContractorOnboardingForm(token, payload);
+      setProgress(100, "Formulario enviado");
       setSubmitted(true);
     } catch (cause) {
+      setProgress(0, "");
       Alert.alert("No fue posible enviar", errorMessage(cause));
     } finally {
       setSaving(false);
@@ -729,6 +750,18 @@ function PublicContractorOnboarding({ token }: { token: string }) {
       options: form.catalogs.civilStates,
       selectedId: fields.civilStateId,
       onSelect: (id: number) => update("civilStateId", id),
+    },
+    department: {
+      title: "Departamento de residencia",
+      options: stringOptions(departmentOptions),
+      selectedId: currentStringId(departmentOptions, fields.residenceDepartment),
+      onSelect: (id: number) => selectResidenceDepartment(departmentOptions[id - 1] ?? ""),
+    },
+    city: {
+      title: "Ciudad de residencia",
+      options: stringOptions(cityOptions),
+      selectedId: currentStringId(cityOptions, fields.residenceCity),
+      onSelect: (id: number) => update("residenceCity", cityOptions[id - 1] ?? ""),
     },
     transport: {
       title: "Medio de transporte",
@@ -790,10 +823,19 @@ function PublicContractorOnboarding({ token }: { token: string }) {
             <Choice label="Estado civil *" value={selectedName(form.catalogs.civilStates, fields.civilStateId)} icon="heart-outline" onPress={() => setPicker("civil")} />
           </FormCard>
           <FormCard title="Residencia y contacto">
-            <Label text="Departamento de residencia *" />
-            <Input icon="map-outline" value={fields.residenceDepartment} onChangeText={(value) => update("residenceDepartment", value)} autoCapitalize="words" />
-            <Label text="Ciudad de residencia *" />
-            <Input icon="business-outline" value={fields.residenceCity} onChangeText={(value) => update("residenceCity", value)} autoCapitalize="words" />
+            <Choice
+              label="Departamento de residencia *"
+              value={fields.residenceDepartment || "Selecciona departamento"}
+              icon="map-outline"
+              onPress={() => setPicker("department")}
+            />
+            <Choice
+              label="Ciudad de residencia *"
+              value={fields.residenceCity || (fields.residenceDepartment ? "Selecciona ciudad" : "Selecciona departamento primero")}
+              icon="business-outline"
+              disabled={!fields.residenceDepartment || cityOptions.length === 0}
+              onPress={() => setPicker("city")}
+            />
             <Label text="Dirección de residencia *" />
             <Input icon="home-outline" value={fields.address} onChangeText={(value) => update("address", value)} />
             <Choice label="Estrato *" value={fields.stratum} icon="layers-outline" onPress={() => setPicker("stratum")} />
@@ -843,7 +885,17 @@ function PublicContractorOnboarding({ token }: { token: string }) {
               <Text style={styles.noticeText}>{form.policy.acceptanceText}</Text>
             </Pressable>
           </FormCard>
-          <PrimaryButton label={saving ? "Enviando..." : "Enviar información"} icon="send-outline" disabled={saving} onPress={submit} />
+          <PrimaryButton
+            label={saving ? `${onboardingStepLabel || "Enviando"}... ${onboardingProgress}%` : "Enviar información"}
+            icon="send-outline"
+            disabled={saving}
+            onPress={submit}
+          />
+          {saving ? (
+            <View style={styles.activationProgressWrap}>
+              <View style={[styles.activationProgressFill, { width: `${onboardingProgress}%` }]} />
+            </View>
+          ) : null}
         </ScrollView>
         <CalendarModal
           visible={calendarOpen}
@@ -2658,9 +2710,7 @@ function ClientContractorProfile({
   return (
     <Page>
       <LinearGradient colors={[C.navy, C.navy2]} style={styles.profileHero}>
-        <View style={styles.profileInitials}>
-          <Text style={styles.profileInitialsText}>{contractor.initials}</Text>
-        </View>
+        <ContractorProfileAvatar fileId={contractor.profilePhotoFileId} initials={contractor.initials} />
         <Text style={styles.profileName}>{contractor.fullName}</Text>
         <Text style={styles.profileMeta}>CC {contractor.document}</Text>
       </LinearGradient>
@@ -2736,7 +2786,7 @@ function ContractorProfile({
   return (
     <Page>
       <LinearGradient colors={[C.navy, C.navy2]} style={styles.profileHero}>
-        <View style={styles.profileInitials}><Text style={styles.profileInitialsText}>{contractor.initials}</Text></View>
+        <ContractorProfileAvatar fileId={contractor.profilePhotoFileId} initials={contractor.initials} />
         <Text style={styles.profileName}>{contractor.fullName}</Text>
         <Text style={styles.profileMeta}>CC {contractor.document}</Text>
         <ContractStatusPill status={contractor.contractStatus} />
@@ -2812,6 +2862,55 @@ function ContractorProfile({
         </Pressable>
       ))}
     </Page>
+  );
+}
+
+function ContractorProfileAvatar({ fileId, initials }: { fileId: string | null; initials: string }) {
+  const [photoUrl, setPhotoUrl] = useState("");
+  const [previewVisible, setPreviewVisible] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    setPhotoUrl("");
+    if (!fileId) return;
+    createContractorProfilePhotoSignedUrl(fileId)
+      .then((url) => {
+        if (active) setPhotoUrl(url);
+      })
+      .catch(() => {
+        if (active) setPhotoUrl("");
+      });
+    return () => {
+      active = false;
+    };
+  }, [fileId]);
+
+  if (fileId && photoUrl) {
+    return (
+      <>
+        <Pressable onPress={() => setPreviewVisible(true)}>
+          <Image source={{ uri: photoUrl }} style={styles.profilePhoto} resizeMode="cover" />
+        </Pressable>
+        <Modal
+          visible={previewVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setPreviewVisible(false)}
+        >
+          <View style={styles.photoPreviewBackdrop}>
+            <Pressable style={styles.photoPreviewClose} onPress={() => setPreviewVisible(false)}>
+              <Ionicons name="close" size={24} color={C.ink} />
+            </Pressable>
+            <Image source={{ uri: photoUrl }} style={styles.photoPreviewImage} resizeMode="contain" />
+          </View>
+        </Modal>
+      </>
+    );
+  }
+  return (
+    <View style={styles.profileInitials}>
+      <Text style={styles.profileInitialsText}>{initials}</Text>
+    </View>
   );
 }
 
@@ -3639,6 +3738,8 @@ function ContractorActivationDocumentsCard({
   const [contractTypePickerVisible, setContractTypePickerVisible] = useState(false);
   const [loadingDocuments, setLoadingDocuments] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [activationProgress, setActivationProgress] = useState(0);
+  const [activationStepLabel, setActivationStepLabel] = useState("");
   const selectedContractType = contractTypes.find((type) => type.id === contractTypeId);
   const contractTypeChanged = Boolean(contractTypeId && contractTypeId !== contractor.contractTypeId);
 
@@ -3701,6 +3802,10 @@ function ContractorActivationDocumentsCard({
 
   const save = async () => {
     const pendingUploads = activationDocumentOptions.filter((item) => selectedFiles[item.typeCode]);
+    const updateProgress = (progress: number, label: string) => {
+      setActivationProgress(progress);
+      setActivationStepLabel(label);
+    };
     if (!contractTypeId) {
       Alert.alert("Selecciona el tipo", "Debes seleccionar el tipo de contrato del contratista.");
       return;
@@ -3710,18 +3815,24 @@ function ContractorActivationDocumentsCard({
       return;
     }
     setSaving(true);
+    updateProgress(0, "Validando información");
     try {
       let activatedByContractType = false;
       if (contractTypeChanged) {
+        updateProgress(15, "Guardando tipo de contrato");
         activatedByContractType = await selectContractorContractType(contractor.id, contractTypeId);
       }
-      for (const item of pendingUploads) {
+      if (pendingUploads.length > 0) updateProgress(35, "Subiendo documentos");
+      for (const [index, item] of pendingUploads.entries()) {
         const file = selectedFiles[item.typeCode];
         if (file) {
           await uploadContractorActivationDocument(contractor.id, item.typeCode, file);
+          const uploadProgress = 35 + Math.round(((index + 1) / pendingUploads.length) * 25);
+          updateProgress(uploadProgress, `Subiendo documentos (${index + 1}/${pendingUploads.length})`);
         }
       }
       setSelectedFiles({});
+      updateProgress(60, "Verificando documentos requeridos");
       const documents = await loadContractorDocuments(contractor.id);
       const completed = activationDocumentOptions.every((item) =>
         documents.some((document) => document.typeCode === item.typeCode),
@@ -3729,6 +3840,7 @@ function ContractorActivationDocumentsCard({
       let onboardingMessage = "";
       if (completed || activatedByContractType) {
         try {
+          updateProgress(80, "Enviando correo de onboarding");
           const email = await sendContractorOnboardingEmail(contractor.id);
           onboardingMessage = email
             ? ` Se envió el formulario de datos a ${email}.`
@@ -3742,6 +3854,7 @@ function ContractorActivationDocumentsCard({
           .map((item) => item.typeCode)
           .filter((code) => documents.some((document) => document.typeCode === code)),
       );
+      updateProgress(100, "Proceso completado");
       Alert.alert(
         completed || activatedByContractType ? "Contrato activado" : "Documentos guardados",
         completed || activatedByContractType
@@ -3751,7 +3864,13 @@ function ContractorActivationDocumentsCard({
             : "Tipo de contrato y documentos guardados. Aún faltan documentos para activar.",
       );
       await onChanged();
+      setTimeout(() => {
+        setActivationProgress(0);
+        setActivationStepLabel("");
+      }, 650);
     } catch (cause) {
+      setActivationProgress(0);
+      setActivationStepLabel("");
       Alert.alert("No fue posible guardar", errorMessage(cause));
     } finally {
       setSaving(false);
@@ -3806,11 +3925,16 @@ function ContractorActivationDocumentsCard({
         })
       )}
       <PrimaryButton
-        label={saving ? "Guardando..." : "Guardar activación"}
+        label={saving ? `${activationStepLabel || "Guardando"}... ${activationProgress}%` : "Guardar activación"}
         icon="checkmark-circle-outline"
         disabled={saving || loadingDocuments || contractTypes.length === 0}
         onPress={save}
       />
+      {saving && (
+        <View style={styles.activationProgressWrap}>
+          <View style={[styles.activationProgressFill, { width: `${activationProgress}%` }]} />
+        </View>
+      )}
     </View>
     <DropdownModal
       visible={contractTypePickerVisible}
@@ -4625,12 +4749,18 @@ const styles = StyleSheet.create({
   selfieLargePreview: { width: "100%", height: 420, borderRadius: 22, backgroundColor: "#F8FAFF" },
   emptyPreview: { height: 160, borderRadius: 14, borderWidth: 1, borderStyle: "dashed", borderColor: C.line, alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: "#FBFCFE" },
   activationCard: { backgroundColor: C.white, borderRadius: 20, padding: 17, gap: 12, borderWidth: 1, borderColor: "#FFD4C4" },
+  activationProgressWrap: { height: 7, borderRadius: 99, backgroundColor: "#FFE7DE", overflow: "hidden" },
+  activationProgressFill: { height: "100%", borderRadius: 99, backgroundColor: C.orange },
   boundedList: { maxHeight: 250 },
   counter: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 16, backgroundColor: C.bg, borderRadius: 13, padding: 10 },
   counterValue: { color: C.ink, fontSize: 13, fontWeight: "800" },
   fab: { width: 49, height: 49, borderRadius: 16, backgroundColor: C.orange, alignItems: "center", justifyContent: "center" },
   profileHero: { borderRadius: 22, padding: 22, alignItems: "center", gap: 8 },
   profileInitials: { width: 74, height: 74, borderRadius: 24, backgroundColor: "rgba(255,255,255,0.16)", alignItems: "center", justifyContent: "center", borderWidth: 2, borderColor: "rgba(255,255,255,0.4)" },
+  profilePhoto: { width: 74, height: 74, borderRadius: 24, backgroundColor: "rgba(255,255,255,0.16)", borderWidth: 2, borderColor: "rgba(255,255,255,0.4)" },
+  photoPreviewBackdrop: { flex: 1, backgroundColor: "rgba(8,11,18,0.88)", alignItems: "center", justifyContent: "center", padding: 22 },
+  photoPreviewClose: { position: "absolute", top: 54, right: 22, zIndex: 2, width: 46, height: 46, borderRadius: 16, backgroundColor: C.white, alignItems: "center", justifyContent: "center" },
+  photoPreviewImage: { width: "100%", height: "78%", borderRadius: 24 },
   profileInitialsText: { color: C.white, fontSize: 23, fontWeight: "900" },
   profileName: { color: C.white, fontSize: 21, fontWeight: "900" },
   profileMeta: { color: "#C6D0E8", fontSize: 11 },

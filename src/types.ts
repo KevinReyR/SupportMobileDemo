@@ -73,6 +73,7 @@ export interface Contractor {
   fullName: string;
   initials: string;
   document: string;
+  profilePhotoFileId: string | null;
   birthDate: string;
   phone: string | null;
   email: string | null;
@@ -153,6 +154,7 @@ export interface ClientContractor {
   fullName: string;
   initials: string;
   document: string;
+  profilePhotoFileId: string | null;
   birthDate: string;
   rh: string | null;
   eps: string | null;

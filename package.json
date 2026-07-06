@@ -51,6 +51,7 @@
     "web": "expo start --web",
     "seed:documents": "node scripts/seed-contractor-documents.mjs",
     "upload:data-policy": "node scripts/upload-data-policy.mjs",
+    "upload:email-banner": "node scripts/upload-email-banner.mjs",
     "typecheck": "tsc --noEmit",
     "export:web": "expo export --platform web --clear"
   },

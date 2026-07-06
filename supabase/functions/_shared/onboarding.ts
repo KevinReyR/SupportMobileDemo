@@ -1,5 +1,6 @@
 export const POLICY_BUCKET = "supplies";
 export const POLICY_PATH = "policies/politica-tratamiento-datos-personales-support-colombia.pdf";
+export const PROFILE_LOGO_PATH = "images/logo_support.png";
 export const PROFILE_PHOTO_BUCKET = "contractor-profile-photos";
 export const ONBOARDING_DAYS = 7;
 
