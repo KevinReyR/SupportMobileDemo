@@ -2583,7 +2583,7 @@ function SelfieCaptureModal({
                   <View style={styles.selfieFaceGuide} />
                   <View style={styles.selfieNeckGuide} />
                   <View style={styles.selfieShoulderGuide} />
-                  <Text style={styles.selfieMaskText}>Ubica tu rostro dentro del óvalo y tus hombros sobre la guía</Text>
+                  <Text style={styles.selfieMaskText}>Ubica tu rostro dentro del óvalo. Deja visibles cuello y hombros.</Text>
                 </View>
               </View>
             ) : (
@@ -2596,7 +2596,7 @@ function SelfieCaptureModal({
             )}
             {permission?.granted ? (
               <View style={styles.cameraControls}>
-                <Text style={styles.cameraInstruction}>Rostro dentro del óvalo, hombros sobre la guía</Text>
+                <Text style={styles.cameraInstruction}>Rostro dentro del óvalo, cuello y hombros visibles</Text>
                 <PrimaryButton label="Tomar foto" icon="camera" onPress={takePhoto} />
                 {previewUri ? <SecondaryButton label="Ver previsualización" icon="image-outline" onPress={() => setCameraOpen(false)} /> : null}
               </View>

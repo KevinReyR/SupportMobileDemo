@@ -84,6 +84,54 @@ async function createFaceProtectionMask(selfieBytes: Uint8Array) {
   return await mask.encodePNG();
 }
 
+function blendChannel(original: number, generated: number, alpha: number) {
+  return Math.round(original * alpha + generated * (1 - alpha));
+}
+
+function faceBlendAlpha(x: number, y: number, width: number, height: number) {
+  const centerX = width * 0.5;
+  const centerY = height * 0.34;
+  const radiusX = width * 0.23;
+  const radiusY = height * 0.24;
+  const neckLeft = width * 0.36;
+  const neckRight = width * 0.64;
+  const neckTop = height * 0.47;
+  const neckBottom = height * 0.62;
+  const feather = 0.15;
+  const faceDistance = Math.sqrt(((x - centerX) / radiusX) ** 2 + ((y - centerY) / radiusY) ** 2);
+  const faceAlpha = faceDistance <= 1 ? Math.min(1, Math.max(0, (1 - faceDistance) / feather)) : 0;
+  const neckAlpha = x >= neckLeft && x <= neckRight && y >= neckTop && y <= neckBottom ? 0.82 : 0;
+  return Math.max(faceAlpha, neckAlpha);
+}
+
+function preserveOriginalFace(generated: Image, original: Image) {
+  if (generated.width !== original.width || generated.height !== original.height) {
+    original = original.cover(generated.width, generated.height);
+  }
+  const result = generated.clone();
+
+  for (let y = 1; y <= result.height; y += 1) {
+    for (let x = 1; x <= result.width; x += 1) {
+      const alpha = faceBlendAlpha(x - 1, y - 1, result.width, result.height);
+      if (alpha <= 0) continue;
+      const [originalR, originalG, originalB] = Image.colorToRGBA(original.getPixelAt(x, y));
+      const [generatedR, generatedG, generatedB] = Image.colorToRGBA(generated.getPixelAt(x, y));
+      result.setPixelAt(
+        x,
+        y,
+        Image.rgbaToColor(
+          blendChannel(originalR, generatedR, alpha),
+          blendChannel(originalG, generatedG, alpha),
+          blendChannel(originalB, generatedB, alpha),
+          255,
+        ),
+      );
+    }
+  }
+
+  return result;
+}
+
 async function generateCorporateProfilePhoto(serviceClient: any, selfieBytes: Uint8Array) {
   const openAiKey = Deno.env.get("OPENAI_API_KEY") ?? "";
   if (!openAiKey) return null;
@@ -104,8 +152,11 @@ async function generateCorporateProfilePhoto(serviceClient: any, selfieBytes: Ui
       "Create a professional corporate employee profile photo from the selfie.",
       "The face must remain pixel-identical in identity: do not change facial structure, eyes, nose, mouth, jaw, cheeks, forehead, ears, hairline, skin texture, skin tone, expression, age, or any identifying facial detail.",
       "Do not beautify, retouch, smooth skin, reshape, age, de-age, stylize, replace, or redraw the face.",
-      "Only change non-facial context: background, lighting balance, clothing from neck down, and shirt branding.",
-      "Use a clean studio background, business-ready lighting, and a neat corporate shirt while keeping the original head and face unchanged.",
+      "Only change non-facial context: background, lighting balance, and clothing from neck down.",
+      "Use a plain white or very light gray studio background.",
+      "Dress the person in a clean white corporate button-down shirt.",
+      "No tie, no blue shirt, no logos, no brand marks, no accessories.",
+      "Keep the original head and face unchanged.",
       "Head-and-shoulders portrait, centered, realistic, suitable for an employee profile.",
     ].join(" "),
   );
@@ -127,7 +178,11 @@ async function generateCorporateProfilePhoto(serviceClient: any, selfieBytes: Ui
     throw new Error("OpenAI no devolvio imagen generada.");
   }
   const generatedBytes = base64ToBytes(imageBase64);
-  const profileImage = await Image.decode(generatedBytes);
+  const [generatedImage, originalImage] = await Promise.all([
+    Image.decode(generatedBytes),
+    Image.decode(normalizedSelfieBytes),
+  ]);
+  const profileImage = preserveOriginalFace(generatedImage, originalImage);
   return await encodeCompressedProfilePhoto(profileImage);
 }
 
