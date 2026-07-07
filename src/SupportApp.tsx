@@ -125,7 +125,17 @@ const MAX_CEDULA_PDF_BYTES = 1_048_576;
 type CedulaSide = "front" | "back";
 
 async function imageUriToBase64(uri: string) {
-  const manipulated = await manipulateAsync(uri, [{ resize: { width: 900 } }], {
+  const measured = await manipulateAsync(uri, [], {
+    compress: 0.9,
+    format: SaveFormat.JPEG,
+  });
+  const squareSize = Math.min(measured.width, measured.height);
+  const originX = Math.max(0, Math.round((measured.width - squareSize) / 2));
+  const originY = Math.max(0, Math.round((measured.height - squareSize) / 2));
+  const manipulated = await manipulateAsync(measured.uri, [
+    { crop: { originX, originY, width: squareSize, height: squareSize } },
+    { resize: { width: 1024, height: 1024 } },
+  ], {
     compress: 0.72,
     format: SaveFormat.JPEG,
   });
@@ -2567,7 +2577,15 @@ function SelfieCaptureModal({
         {cameraOpen ? (
           <View style={styles.cameraStage}>
             {permission?.granted ? (
-              <CameraView ref={cameraRef} style={styles.cameraView} facing="front" mode="picture" />
+              <View style={styles.selfieCameraFrame}>
+                <CameraView ref={cameraRef} style={styles.cameraView} facing="front" mode="picture" />
+                <View pointerEvents="none" style={styles.selfieMaskOverlay}>
+                  <View style={styles.selfieFaceGuide} />
+                  <View style={styles.selfieNeckGuide} />
+                  <View style={styles.selfieShoulderGuide} />
+                  <Text style={styles.selfieMaskText}>Ubica tu rostro dentro del óvalo y tus hombros sobre la guía</Text>
+                </View>
+              </View>
             ) : (
               <View style={styles.cameraPermission}>
                 <Ionicons name="camera-outline" size={42} color={C.navy} />
@@ -2578,7 +2596,7 @@ function SelfieCaptureModal({
             )}
             {permission?.granted ? (
               <View style={styles.cameraControls}>
-                <Text style={styles.cameraInstruction}>Mira al frente y centra tu rostro</Text>
+                <Text style={styles.cameraInstruction}>Rostro dentro del óvalo, hombros sobre la guía</Text>
                 <PrimaryButton label="Tomar foto" icon="camera" onPress={takePhoto} />
                 {previewUri ? <SecondaryButton label="Ver previsualización" icon="image-outline" onPress={() => setCameraOpen(false)} /> : null}
               </View>
@@ -4739,6 +4757,12 @@ const styles = StyleSheet.create({
   cameraHeader: { minHeight: 76, paddingHorizontal: 18, paddingVertical: 12, flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: C.white, borderBottomWidth: 1, borderBottomColor: C.line },
   cameraStage: { flex: 1, backgroundColor: "#080B12" },
   cameraView: { flex: 1 },
+  selfieCameraFrame: { flex: 1, position: "relative", overflow: "hidden" },
+  selfieMaskOverlay: { ...StyleSheet.absoluteFillObject, alignItems: "center" },
+  selfieFaceGuide: { position: "absolute", left: "27%", top: "10%", width: "46%", height: "48%", borderRadius: 999, borderWidth: 3, borderColor: "rgba(255,255,255,0.96)", backgroundColor: "rgba(255,255,255,0.04)" },
+  selfieNeckGuide: { position: "absolute", left: "36%", top: "47%", width: "28%", height: "15%", borderRadius: 18, borderWidth: 2, borderColor: "rgba(255,255,255,0.72)", borderTopWidth: 0 },
+  selfieShoulderGuide: { position: "absolute", left: "16%", top: "61%", width: "68%", height: "18%", borderBottomWidth: 3, borderLeftWidth: 2, borderRightWidth: 2, borderColor: "rgba(255,255,255,0.76)", borderBottomLeftRadius: 90, borderBottomRightRadius: 90 },
+  selfieMaskText: { position: "absolute", left: 22, right: 22, bottom: 24, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 16, overflow: "hidden", backgroundColor: "rgba(8,11,18,0.66)", color: C.white, fontSize: 13, fontWeight: "800", textAlign: "center" },
   cameraPermission: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12, padding: 24, backgroundColor: C.bg },
   cameraControls: { padding: 18, gap: 10, backgroundColor: C.white },
   cameraInstruction: { color: C.ink, fontSize: 15, fontWeight: "800", textAlign: "center" },

@@ -5,7 +5,6 @@ import {
   colombiaNow,
   POLICY_BUCKET,
   POLICY_PATH,
-  PROFILE_LOGO_PATH,
   PROFILE_PHOTO_BUCKET,
   publicPolicyUrl,
   sha256Hex,
@@ -49,22 +48,29 @@ function base64ToBytes(value: string) {
   return bytes;
 }
 
+async function normalizeSelfieForOpenAi(selfieBytes: Uint8Array) {
+  const source = await Image.decode(selfieBytes);
+  const normalized = source.width === 1024 && source.height === 1024 ? source : source.cover(1024, 1024);
+  return await normalized.encodeJPEG(78);
+}
+
 async function createFaceProtectionMask(selfieBytes: Uint8Array) {
   const source = await Image.decode(selfieBytes);
-  const size = Math.max(source.width, source.height);
-  const mask = new Image(size, size);
+  const width = source.width;
+  const height = source.height;
+  const mask = new Image(width, height);
   const opaqueWhite = Image.rgbaToColor(255, 255, 255, 255);
-  const centerX = size * 0.5;
-  const centerY = size * 0.34;
-  const radiusX = size * 0.23;
-  const radiusY = size * 0.24;
-  const neckLeft = size * 0.36;
-  const neckRight = size * 0.64;
-  const neckTop = size * 0.47;
-  const neckBottom = size * 0.62;
+  const centerX = width * 0.5;
+  const centerY = height * 0.34;
+  const radiusX = width * 0.23;
+  const radiusY = height * 0.24;
+  const neckLeft = width * 0.36;
+  const neckRight = width * 0.64;
+  const neckTop = height * 0.47;
+  const neckBottom = height * 0.62;
 
-  for (let y = 0; y < size; y += 1) {
-    for (let x = 0; x < size; x += 1) {
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
       const normalizedFaceX = (x - centerX) / radiusX;
       const normalizedFaceY = (y - centerY) / radiusY;
       const insideFaceProtection = normalizedFaceX * normalizedFaceX + normalizedFaceY * normalizedFaceY <= 1;
@@ -82,11 +88,12 @@ async function generateCorporateProfilePhoto(serviceClient: any, selfieBytes: Ui
   const openAiKey = Deno.env.get("OPENAI_API_KEY") ?? "";
   if (!openAiKey) return null;
 
+  const normalizedSelfieBytes = await normalizeSelfieForOpenAi(selfieBytes);
   const form = new FormData();
   form.append("model", Deno.env.get("OPENAI_IMAGE_MODEL") ?? "gpt-image-1");
-  form.append("image[]", new File([selfieBytes], "selfie-original.jpg", { type: "image/jpeg" }));
+  form.append("image[]", new File([normalizedSelfieBytes], "selfie-normalized.jpg", { type: "image/jpeg" }));
   try {
-    const maskBytes = await createFaceProtectionMask(selfieBytes);
+    const maskBytes = await createFaceProtectionMask(normalizedSelfieBytes);
     form.append("mask", new File([maskBytes], "face-protection-mask.png", { type: "image/png" }));
   } catch (maskError) {
     console.error("Face protection mask generation failed", maskError);
@@ -99,7 +106,6 @@ async function generateCorporateProfilePhoto(serviceClient: any, selfieBytes: Ui
       "Do not beautify, retouch, smooth skin, reshape, age, de-age, stylize, replace, or redraw the face.",
       "Only change non-facial context: background, lighting balance, clothing from neck down, and shirt branding.",
       "Use a clean studio background, business-ready lighting, and a neat corporate shirt while keeping the original head and face unchanged.",
-      "Place the Support Colombia logo naturally on the shirt as a small embroidered company logo.",
       "Head-and-shoulders portrait, centered, realistic, suitable for an employee profile.",
     ].join(" "),
   );
@@ -121,31 +127,7 @@ async function generateCorporateProfilePhoto(serviceClient: any, selfieBytes: Ui
     throw new Error("OpenAI no devolvio imagen generada.");
   }
   const generatedBytes = base64ToBytes(imageBase64);
-  try {
-    return await addSupportLogoToProfilePhoto(serviceClient, generatedBytes);
-  } catch (logoError) {
-    console.error("Support logo composition failed", logoError);
-    return generatedBytes;
-  }
-}
-
-async function addSupportLogoToProfilePhoto(serviceClient: any, generatedBytes: Uint8Array) {
-  const { data: logoBlob, error: logoError } = await serviceClient.storage
-    .from(POLICY_BUCKET)
-    .download(PROFILE_LOGO_PATH);
-  if (logoError || !logoBlob) throw new Error(logoError?.message ?? "No fue posible cargar el logo.");
-
-  const [profileImage, logoImage] = await Promise.all([
-    Image.decode(generatedBytes),
-    Image.decode(new Uint8Array(await logoBlob.arrayBuffer())),
-  ]);
-  const logoWidth = Math.round(profileImage.width * 0.18);
-  const logoHeight = Math.round((logoImage.height / logoImage.width) * logoWidth);
-  const resizedLogo = logoImage.resize(logoWidth, logoHeight);
-  const x = Math.round(profileImage.width * 0.58 - resizedLogo.width / 2);
-  const y = Math.round(profileImage.height * 0.62 - resizedLogo.height / 2);
-
-  profileImage.composite(resizedLogo, x, y);
+  const profileImage = await Image.decode(generatedBytes);
   return await encodeCompressedProfilePhoto(profileImage);
 }
 
