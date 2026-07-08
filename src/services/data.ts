@@ -6,7 +6,9 @@ import type {
   ClientContractor,
   ContractStatus,
   Contractor,
+  ContractorContractSignatureEvidence,
   ContractorOnboardingForm,
+  ContractorOnboardingContract,
   ContractorOnboardingSubmission,
   ContractorDocument,
   ContractorHistory,
@@ -625,6 +627,29 @@ export async function submitContractorOnboardingForm(
 ) {
   const result = await supabase.functions.invoke("contractor-onboarding", {
     body: { action: "submit", token, payload },
+  });
+  fail(result.error);
+  if ((result.data as any)?.error) throw new Error((result.data as any).error);
+}
+
+export async function loadContractorOnboardingContract(
+  token: string,
+): Promise<ContractorOnboardingContract> {
+  const result = await supabase.functions.invoke("contractor-onboarding", {
+    body: { action: "get-contract", token },
+  });
+  fail(result.error);
+  if ((result.data as any)?.error) throw new Error((result.data as any).error);
+  return result.data as ContractorOnboardingContract;
+}
+
+export async function signContractorOnboardingContract(
+  token: string,
+  signatureBase64: string,
+  evidence: ContractorContractSignatureEvidence,
+) {
+  const result = await supabase.functions.invoke("contractor-onboarding", {
+    body: { action: "sign-contract", token, signatureBase64, evidence },
   });
   fail(result.error);
   if ((result.data as any)?.error) throw new Error((result.data as any).error);

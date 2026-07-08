@@ -195,6 +195,7 @@ export interface OnboardingOption {
 }
 
 export interface ContractorOnboardingForm {
+  status: "PENDING" | "DATA_SUBMITTED";
   contractor: {
     id: number;
     name: string;
@@ -216,6 +217,11 @@ export interface ContractorOnboardingForm {
     url: string;
     acceptanceText: string;
   };
+}
+
+export interface ContractorOnboardingContract {
+  contractUrl: string;
+  acceptanceText: string;
 }
 
 export interface ContractorOnboardingSubmission {
@@ -240,6 +246,18 @@ export interface ContractorOnboardingSubmission {
   emergencyContactPhone: string;
   selfieBase64: string;
   acceptsDataPolicy: boolean;
+}
+
+export interface ContractorContractSignatureEvidence {
+  browser: string;
+  operatingSystem: string;
+  userAgent: string;
+  deviceFingerprint: string;
+  location: {
+    latitude: number;
+    longitude: number;
+    accuracy: number | null;
+  };
 }
 
 export interface AppData {

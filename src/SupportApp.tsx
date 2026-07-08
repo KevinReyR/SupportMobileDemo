@@ -52,12 +52,14 @@ import {
   loadStatisticsSummary,
   loadUserContext,
   loadContractorOnboardingForm,
+  loadContractorOnboardingContract,
   registerContractorWorkwearMovement,
   reviewOperation,
   sendContractorOnboardingEmail,
   selectContractorContractType,
   setUserActive,
   setUserRole,
+  signContractorOnboardingContract,
   submitContractorOnboardingForm,
   terminateContractor,
   toggleUserClient,
@@ -72,8 +74,10 @@ import type {
   Contractor,
   ContractorDocument,
   ContractorHistory,
+  ContractorOnboardingContract,
   ContractorOnboardingForm,
   ContractorOnboardingSubmission,
+  ContractorContractSignatureEvidence,
   Operation,
   OperationStatus,
   PersonnelRequest,
@@ -294,6 +298,58 @@ function onboardingTokenFromUrl() {
   const hash = String(location.hash ?? "");
   const hashQuery = hash.includes("?") ? hash.slice(hash.indexOf("?")) : "";
   return new URLSearchParams(hashQuery).get("token") ?? "";
+}
+
+function detectBrowser(userAgent: string) {
+  if (/Edg\//i.test(userAgent)) return "Microsoft Edge";
+  if (/Chrome\//i.test(userAgent)) return "Chrome";
+  if (/Safari\//i.test(userAgent) && !/Chrome\//i.test(userAgent)) return "Safari";
+  if (/Firefox\//i.test(userAgent)) return "Firefox";
+  return "Desconocido";
+}
+
+function detectOperatingSystem(userAgent: string) {
+  if (/iPhone|iPad|iPod/i.test(userAgent)) return "iOS";
+  if (/Android/i.test(userAgent)) return "Android";
+  if (/Windows/i.test(userAgent)) return "Windows";
+  if (/Mac OS/i.test(userAgent)) return "macOS";
+  if (/Linux/i.test(userAgent)) return "Linux";
+  return "Desconocido";
+}
+
+async function sha256Text(value: string) {
+  const cryptoApi = globalThis.crypto;
+  if (!cryptoApi?.subtle) return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const digest = await cryptoApi.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function collectSignatureEvidence(): Promise<ContractorContractSignatureEvidence> {
+  if (Platform.OS !== "web" || typeof navigator === "undefined") {
+    throw new Error("La firma del contrato debe realizarse desde el enlace web.");
+  }
+  const location = await new Promise<GeolocationPosition>((resolve, reject) => {
+    if (!navigator.geolocation) reject(new Error("Tu navegador no permite obtener ubicación."));
+    else navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 15000 });
+  });
+  const userAgent = navigator.userAgent || "";
+  const fingerprint = await sha256Text([
+    userAgent,
+    navigator.language,
+    `${screen.width}x${screen.height}`,
+    String(new Date().getTimezoneOffset()),
+  ].join("|"));
+  return {
+    browser: detectBrowser(userAgent),
+    operatingSystem: detectOperatingSystem(userAgent),
+    userAgent,
+    deviceFingerprint: fingerprint,
+    location: {
+      latitude: location.coords.latitude,
+      longitude: location.coords.longitude,
+      accuracy: Number.isFinite(location.coords.accuracy) ? location.coords.accuracy : null,
+    },
+  };
 }
 
 export default function SupportApp() {
@@ -588,10 +644,14 @@ export default function SupportApp() {
 
 function PublicContractorOnboarding({ token }: { token: string }) {
   const [form, setForm] = useState<ContractorOnboardingForm | null>(null);
+  const [contract, setContract] = useState<ContractorOnboardingContract | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [submitted, setSubmitted] = useState(false);
+  const [contractReady, setContractReady] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [signing, setSigning] = useState(false);
+  const [signatureOpen, setSignatureOpen] = useState(false);
   const [onboardingProgress, setOnboardingProgress] = useState(0);
   const [onboardingStepLabel, setOnboardingStepLabel] = useState("");
   const [calendarOpen, setCalendarOpen] = useState(false);
@@ -629,6 +689,12 @@ function PublicContractorOnboarding({ token }: { token: string }) {
     try {
       const nextForm = await loadContractorOnboardingForm(token);
       setForm(nextForm);
+      if (nextForm.status === "DATA_SUBMITTED") {
+        const nextContract = await loadContractorOnboardingContract(token);
+        setContract(nextContract);
+        setContractReady(true);
+        return;
+      }
       setFields((current) => ({
         ...current,
         bloodType: current.bloodType || nextForm.catalogs.bloodTypes[0] || "",
@@ -667,6 +733,11 @@ function PublicContractorOnboarding({ token }: { token: string }) {
     setOnboardingProgress(progress);
     setOnboardingStepLabel(label);
   };
+  const loadContract = useCallback(async () => {
+    const nextContract = await loadContractorOnboardingContract(token);
+    setContract(nextContract);
+    setContractReady(true);
+  }, [token]);
 
   async function submit() {
     if (!form) return;
@@ -713,13 +784,33 @@ function PublicContractorOnboarding({ token }: { token: string }) {
       };
       setProgress(70, "Procesando datos");
       await submitContractorOnboardingForm(token, payload);
-      setProgress(100, "Formulario enviado");
-      setSubmitted(true);
+      setProgress(88, "Generando contrato");
+      await loadContract();
+      setProgress(100, "Contrato listo");
     } catch (cause) {
       setProgress(0, "");
       Alert.alert("No fue posible enviar", errorMessage(cause));
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function signContract(signatureBase64: string) {
+    setSigning(true);
+    setProgress(0, "Preparando firma");
+    try {
+      setProgress(25, "Solicitando ubicación");
+      const evidence = await collectSignatureEvidence();
+      setProgress(55, "Firmando contrato");
+      await signContractorOnboardingContract(token, signatureBase64, evidence);
+      setProgress(100, "Contrato firmado");
+      setSignatureOpen(false);
+      setSubmitted(true);
+    } catch (cause) {
+      setProgress(0, "");
+      Alert.alert("No fue posible firmar", errorMessage(cause));
+    } finally {
+      setSigning(false);
     }
   }
 
@@ -729,8 +820,8 @@ function PublicContractorOnboarding({ token }: { token: string }) {
       <SafeAreaProvider>
         <SafeAreaView style={styles.center}>
           <Ionicons name="checkmark-circle-outline" size={54} color={C.green} />
-          <Text style={styles.errorTitle}>Formulario enviado</Text>
-          <Text style={styles.subtitle}>Gracias. Support Colombia recibió tu información correctamente.</Text>
+          <Text style={styles.errorTitle}>Contrato firmado</Text>
+          <Text style={styles.subtitle}>Gracias. Support Colombia recibió tu información y contrato firmado correctamente.</Text>
         </SafeAreaView>
       </SafeAreaProvider>
     );
@@ -743,6 +834,31 @@ function PublicContractorOnboarding({ token }: { token: string }) {
           <Text style={styles.errorTitle}>No pudimos abrir el formulario</Text>
           <Text style={styles.subtitle}>{error || "El enlace no está disponible."}</Text>
           <PrimaryButton label="Reintentar" icon="refresh-outline" onPress={load} />
+        </SafeAreaView>
+      </SafeAreaProvider>
+    );
+  }
+  if (contractReady && contract) {
+    return (
+      <SafeAreaProvider>
+        <SafeAreaView style={styles.safe}>
+          <StatusBar barStyle="dark-content" backgroundColor={C.bg} />
+          <ContractReviewScreen
+            contractorName={form.contractor.name}
+            contract={contract}
+            saving={signing}
+            progress={onboardingProgress}
+            progressLabel={onboardingStepLabel}
+            onRefresh={loadContract}
+            onSign={() => setSignatureOpen(true)}
+          />
+          <SignatureModal
+            visible={signatureOpen}
+            saving={signing}
+            acceptanceText={contract.acceptanceText}
+            onClose={() => setSignatureOpen(false)}
+            onConfirm={signContract}
+          />
         </SafeAreaView>
       </SafeAreaProvider>
     );
@@ -940,6 +1056,187 @@ function PublicContractorOnboarding({ token }: { token: string }) {
         />
       </SafeAreaView>
     </SafeAreaProvider>
+  );
+}
+
+function ContractReviewScreen({
+  contractorName,
+  contract,
+  saving,
+  progress,
+  progressLabel,
+  onRefresh,
+  onSign,
+}: {
+  contractorName: string;
+  contract: ContractorOnboardingContract;
+  saving: boolean;
+  progress: number;
+  progressLabel: string;
+  onRefresh: () => void;
+  onSign: () => void;
+}) {
+  const pdfUri = `${contract.contractUrl}#toolbar=0&navpanes=0&scrollbar=1`;
+  return (
+    <View style={styles.contractPage}>
+      <View style={styles.publicHero}>
+        <Image source={require("../assets/support-icon.png")} style={styles.headerLogo} resizeMode="contain" />
+        <View style={styles.flex}>
+          <Text style={styles.eyebrow}>CONTRATO DIGITAL</Text>
+          <Text style={styles.greeting}>Revisa tu contrato</Text>
+          <Text style={styles.subtitle}>{contractorName}</Text>
+        </View>
+      </View>
+      <View style={styles.contractViewerCard}>
+        {Platform.OS === "web" ? (
+          React.createElement("iframe", {
+            src: pdfUri,
+            style: { width: "100%", height: "100%", border: "0", borderRadius: 18 },
+            title: "Contrato para firma",
+          } as any)
+        ) : (
+          <PdfViewer uri={contract.contractUrl} onError={(message) => Alert.alert("PDF", message)} />
+        )}
+      </View>
+      <Notice icon="information-circle-outline" text="Lee todo el contrato antes de firmar. La URL del documento es temporal y privada." />
+      <View style={styles.rowActions}>
+        <SecondaryButton label="Recargar contrato" icon="refresh-outline" onPress={onRefresh} />
+        <PrimaryButton label={saving ? `${progressLabel || "Firmando"}... ${progress}%` : "Firmar contrato"} icon="create-outline" disabled={saving} onPress={onSign} />
+      </View>
+      {saving ? (
+        <View style={styles.activationProgressWrap}>
+          <View style={[styles.activationProgressFill, { width: `${progress}%` }]} />
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function SignatureModal({
+  visible,
+  saving,
+  acceptanceText,
+  onClose,
+  onConfirm,
+}: {
+  visible: boolean;
+  saving: boolean;
+  acceptanceText: string;
+  onClose: () => void;
+  onConfirm: (signatureBase64: string) => void;
+}) {
+  const canvasRef = useRef<any>(null);
+  const drawingRef = useRef(false);
+  const hasSignatureRef = useRef(false);
+  const [hasSignature, setHasSignature] = useState(false);
+
+  const pointFromEvent = (event: any) => {
+    const canvas = canvasRef.current;
+    const rect = canvas?.getBoundingClientRect?.();
+    const source = event?.touches?.[0] ?? event;
+    return { x: source.clientX - rect.left, y: source.clientY - rect.top };
+  };
+  const canvasContext = () => canvasRef.current?.getContext?.("2d");
+  const clear = () => {
+    const canvas = canvasRef.current;
+    const context = canvasContext();
+    if (!canvas || !context) return;
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = "#FFFFFF";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    hasSignatureRef.current = false;
+    setHasSignature(false);
+  };
+  const begin = (event: any) => {
+    if (Platform.OS !== "web") return;
+    event.preventDefault?.();
+    const context = canvasContext();
+    if (!context) return;
+    const point = pointFromEvent(event);
+    drawingRef.current = true;
+    context.beginPath();
+    context.moveTo(point.x, point.y);
+  };
+  const move = (event: any) => {
+    if (!drawingRef.current || Platform.OS !== "web") return;
+    event.preventDefault?.();
+    const context = canvasContext();
+    if (!context) return;
+    const point = pointFromEvent(event);
+    context.lineTo(point.x, point.y);
+    context.strokeStyle = "#15285A";
+    context.lineWidth = 3;
+    context.lineCap = "round";
+    context.lineJoin = "round";
+    context.stroke();
+    hasSignatureRef.current = true;
+    setHasSignature(true);
+  };
+  const end = () => {
+    drawingRef.current = false;
+  };
+  const confirm = () => {
+    const canvas = canvasRef.current;
+    if (!canvas || !hasSignatureRef.current) {
+      Alert.alert("Firma requerida", "Dibuja tu firma antes de confirmar.");
+      return;
+    }
+    onConfirm(canvas.toDataURL("image/png"));
+  };
+
+  useEffect(() => {
+    if (!visible || Platform.OS !== "web") return;
+    const timer = setTimeout(clear, 80);
+    return () => clearTimeout(timer);
+  }, [visible]);
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.signatureCard}>
+          <View style={styles.modalHeader}>
+            <View>
+              <Text style={styles.modalTitle}>Firma del contrato</Text>
+              <Text style={styles.cardMeta}>Firma dentro del recuadro con tu dedo o mouse.</Text>
+            </View>
+            <Pressable style={styles.closeButton} onPress={onClose} disabled={saving}>
+              <Ionicons name="close" size={24} color={C.navy} />
+            </Pressable>
+          </View>
+          {Platform.OS === "web" ? (
+            React.createElement("canvas", {
+              ref: canvasRef,
+              width: 760,
+              height: 250,
+              onMouseDown: begin,
+              onMouseMove: move,
+              onMouseUp: end,
+              onMouseLeave: end,
+              onTouchStart: begin,
+              onTouchMove: move,
+              onTouchEnd: end,
+              style: {
+                width: "100%",
+                height: 230,
+                border: "1px solid #DDE3EF",
+                borderRadius: 18,
+                background: "#FFFFFF",
+                touchAction: "none",
+              },
+            } as any)
+          ) : (
+            <Notice icon="desktop-outline" text="La firma digital del contrato debe realizarse desde el formulario web." />
+          )}
+          <Notice icon="shield-checkmark-outline" text={acceptanceText} />
+          <Text style={styles.cardMeta}>Al confirmar se solicitará tu ubicación para adjuntarla como evidencia de firma.</Text>
+          <View style={styles.rowActions}>
+            <SecondaryButton label="Limpiar firma" icon="trash-outline" onPress={clear} disabled={saving || Platform.OS !== "web"} />
+            <SecondaryButton label="Cancelar" icon="close-outline" onPress={onClose} disabled={saving} />
+            <PrimaryButton label={saving ? "Firmando..." : "Confirmar firma"} icon="checkmark-circle-outline" disabled={saving || !hasSignature || Platform.OS !== "web"} onPress={confirm} />
+          </View>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -4516,15 +4813,17 @@ function SecondaryButton({
   icon,
   onPress,
   destructive,
+  disabled,
 }: {
   label: string;
   icon?: IconName;
   onPress: () => void;
   destructive?: boolean;
+  disabled?: boolean;
 }) {
   const color = destructive ? C.red : C.navy;
   return (
-    <Pressable style={[styles.secondaryButton, destructive && styles.destructiveButton]} onPress={onPress}>
+    <Pressable style={[styles.secondaryButton, destructive && styles.destructiveButton, disabled && styles.buttonDisabled]} onPress={onPress} disabled={disabled}>
       {icon && <Ionicons name={icon} size={19} color={color} />}
       <Text style={[styles.secondaryButtonText, destructive && { color: C.red }]}>{label}</Text>
     </Pressable>
@@ -4711,6 +5010,7 @@ const styles = StyleSheet.create({
   destructiveButton: { borderColor: C.red },
   buttonDisabled: { opacity: 0.45 },
   actionRow: { flexDirection: "row", gap: 10 },
+  rowActions: { flexDirection: "row", gap: 10 },
   kpiRow: { flexDirection: "row", gap: 10 },
   kpi: { flex: 1, minHeight: 105, borderRadius: 17, padding: 13, backgroundColor: C.white, borderWidth: 1, borderColor: C.line, gap: 5 },
   kpiValue: { color: C.ink, fontSize: 22, fontWeight: "900" },
@@ -4805,6 +5105,12 @@ const styles = StyleSheet.create({
   documentPreviewHeader: { minHeight: 74, paddingHorizontal: 16, paddingVertical: 12, flexDirection: "row", alignItems: "center", gap: 11, backgroundColor: C.white, borderBottomWidth: 1, borderBottomColor: C.line },
   documentPreviewState: { flex: 1, alignItems: "center", justifyContent: "center", gap: 14, padding: 28 },
   previewRetryButton: { width: "100%", maxWidth: 280, flexDirection: "row" },
+  contractPage: { flex: 1, padding: 18, gap: 12, backgroundColor: C.bg },
+  contractViewerCard: { flex: 1, minHeight: 420, borderRadius: 20, overflow: "hidden", backgroundColor: C.white, borderWidth: 1, borderColor: C.line },
+  signatureCard: { width: "100%", maxWidth: 760, maxHeight: "92%", borderRadius: 22, padding: 18, backgroundColor: C.white, gap: 14 },
+  modalHeader: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 12 },
+  modalTitle: { color: C.ink, fontSize: 20, fontWeight: "900" },
+  closeButton: { width: 44, height: 44, borderRadius: 15, backgroundColor: C.white, borderWidth: 1, borderColor: C.line, alignItems: "center", justifyContent: "center" },
   adminActions: { gap: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: C.line },
   adminRoleButton: { flexDirection: "row", alignItems: "center", gap: 7 },
   adminRoleText: { color: C.navy, fontSize: 11, fontWeight: "800" },
