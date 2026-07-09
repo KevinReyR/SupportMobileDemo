@@ -394,11 +394,13 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       id: reason.id,
       name: cleanText(reason.name),
     })),
-    contractorDocumentTypes: (common[10].data ?? []).map((documentType: any) => ({
-      id: documentType.id,
-      name: cleanText(documentType.name),
-      code: documentType.code,
-    })),
+    contractorDocumentTypes: (common[10].data ?? [])
+      .filter((documentType: any) => documentType.code !== "CONTRATO_FIRMADO")
+      .map((documentType: any) => ({
+        id: documentType.id,
+        name: cleanText(documentType.name),
+        code: documentType.code,
+      })),
     contractTypes: (common[11].data ?? []).map((contractType: any) => ({
       id: contractType.id,
       name: cleanText(contractType.name),
