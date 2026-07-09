@@ -14,7 +14,10 @@ import {
 
 const MAX_SELFIE_BYTES = 2_097_152;
 const CONTRACT_BUCKET = "contractor-contracts";
-const CONTRACT_TEMPLATE_PATH = "templates/plantilla_contrato_contratistas_supportV1.docx";
+const CONTRACTOR_DOCUMENT_BUCKET = "contractor-documents";
+const PENDING_CONTRACT_DOCUMENT_CODE = "CONTRATO_PENDIENTE";
+const SIGNED_CONTRACT_DOCUMENT_CODE = "CONTRATO_FIRMADO";
+const CONTRACT_TEMPLATE_PATH = "templates/plantilla_contrato_contratistas_supportV2_acroform.pdf";
 const CONTRACT_ACCEPTANCE_TEXT =
   "El firmante declaró haber leído, entendido y aceptado el contenido del documento antes de firmar";
 const ACCEPTANCE_TEXT =
@@ -125,6 +128,23 @@ function todayColombiaDate() {
 
 function monthDurationText() {
   return { text: "un mes", number: "1 mes" };
+}
+
+function yearTextSpanish(year: number) {
+  const map: Record<number, string> = {
+    2025: "dos mil veinticinco",
+    2026: "dos mil veintiséis",
+    2027: "dos mil veintisiete",
+    2028: "dos mil veintiocho",
+    2029: "dos mil veintinueve",
+    2030: "dos mil treinta",
+    2031: "dos mil treinta y uno",
+    2032: "dos mil treinta y dos",
+    2033: "dos mil treinta y tres",
+    2034: "dos mil treinta y cuatro",
+    2035: "dos mil treinta y cinco",
+  };
+  return map[year] ?? String(year);
 }
 
 async function registerAppFile(
@@ -362,103 +382,99 @@ function wrapText(text: string, font: any, fontSize: number, maxWidth: number) {
   return lines;
 }
 
-async function createContractPdf(contract: Record<string, string>, signature?: {
-  bytes: Uint8Array;
-  evidenceLines: string[];
-}) {
-  const pdf = await PDFDocument.create();
+async function createContractPdf(
+  serviceClient: any,
+  contract: Record<string, string>,
+  signature?: {
+    bytes: Uint8Array;
+    evidenceLines: string[];
+  },
+) {
+  const { data, error } = await serviceClient.storage.from(POLICY_BUCKET).download(CONTRACT_TEMPLATE_PATH);
+  if (error || !data) {
+    throw new Error(`No fue posible cargar la plantilla PDF del contrato: ${error?.message ?? "archivo no disponible"}`);
+  }
+
+  const pdf = await PDFDocument.load(new Uint8Array(await data.arrayBuffer()));
   const regular = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
-  const pageWidth = 612;
-  const pageHeight = 792;
-  const margin = 52;
-  const fontSize = 10.2;
-  const lineHeight = 14;
-  let page = pdf.addPage([pageWidth, pageHeight]);
-  let y = pageHeight - margin;
+  const form = pdf.getForm();
+  const pages = pdf.getPages();
+  const contractFieldFontSize = 19;
 
-  const newPage = () => {
-    page = pdf.addPage([pageWidth, pageHeight]);
-    y = pageHeight - margin;
-  };
-  const drawWrapped = (text: string, options: { font?: any; size?: number; gap?: number } = {}) => {
-    const activeFont = options.font ?? regular;
-    const activeSize = options.size ?? fontSize;
-    const lines = wrapText(text, activeFont, activeSize, pageWidth - margin * 2);
-    for (const line of lines) {
-      if (y < margin + 34) newPage();
-      page.drawText(line, { x: margin, y, size: activeSize, font: activeFont, color: rgb(0.08, 0.13, 0.22) });
-      y -= lineHeight;
+  const setTextField = (name: string, value: string) => {
+    try {
+      const field = form.getTextField(name);
+      field.setText(value ?? "");
+      field.setFontSize(contractFieldFontSize);
+      const widgets = (field as any).acroField?.getWidgets?.() ?? [];
+      for (const widget of widgets) {
+        const appearance = widget.getAppearanceCharacteristics?.();
+        appearance?.setBackgroundColor?.([1, 1, 1]);
+        appearance?.setBorderColor?.([1, 1, 1]);
+        widget.getBorderStyle?.()?.setWidth?.(0);
+      }
+    } catch (error) {
+      throw new Error(`El campo ${name} no existe en la plantilla AcroForm.`);
     }
-    y -= options.gap ?? 8;
   };
 
-  page.drawText("CONTRATO DE PRESTACION DE SERVICIOS PROFESIONALES INDEPENDIENTES", {
-    x: margin,
-    y,
-    size: 12,
-    font: bold,
-    color: rgb(0.08, 0.16, 0.35),
-  });
-  y -= 28;
+  const fieldNames = [
+    "nombrecontratista",
+    "tipodocumentocontratista",
+    "numerodocumentocontratista",
+    "serviciocontratista",
+    "duracioncontrato",
+    "duracioncontratonro",
+    "iniciocontratodia",
+    "iniciocontratodianro",
+    "mesiniciocontrato",
+    "mesiniciocontratonro",
+    "iniciocontratoanio",
+    "fincontratodia",
+    "fincontratodianro",
+    "fincontratomes",
+    "fincontratomesnro",
+    "fincontratoanio",
+    "direccioncontratista",
+    "telefonocontratista",
+    "correoelectronicocontratista",
+    "ciudadcontrato",
+    "diacontrato",
+    "diacontratonro",
+    "mescontrato",
+    "aniocontratotexto",
+    "aniocontratonro",
+    "nombrecontratista_firma",
+    "numerodocumentocontratista_firma",
+  ];
 
-  drawWrapped(
-    `Entre los suscritos a saber, JEFERSON ARLEY PALACIO HERRERA, mayor de edad, vecino y con domicilio en la ciudad de Bucaramanga, identificado con cedula de ciudadania numero 1075677084, actuando en nombre y representacion de SUPPORT COLOMBIA SAS, sociedad comercial identificada con NIT No. 901482879-2, quien en adelante se denominara EL CONTRATANTE, por una parte, y por el otro extremo ${contract.nombrecontratista}, mayor de edad, identificado(a) con ${contract.tipodocumentocontratista} No. ${contract.numerodocumentocontratista}, actuando en nombre propio, quien para los efectos del presente documento se denominara EL CONTRATISTA, acuerdan celebrar el presente contrato.`,
-  );
-  drawWrapped(
-    `PRIMERA. OBJETO. EL CONTRATISTA es un trabajador independiente, experto en proporcionar servicios de ${contract.serviciocontratista}, respecto de los cuales manifiesta contar con amplia experiencia y capacidad para ejecutarlos de manera autonoma.`,
-    { font: regular },
-  );
-  drawWrapped(
-    "SEGUNDA. AUTONOMIA. EL CONTRATISTA ejecutara las actividades contratadas con autonomia tecnica y administrativa, sin subordinacion laboral, y respondera por la correcta prestacion del servicio contratado.",
-  );
-  drawWrapped(
-    "TERCERA. OBLIGACIONES. EL CONTRATISTA se obliga a prestar el servicio con responsabilidad, diligencia, oportunidad y calidad; cumplir las instrucciones operativas razonables del servicio; conservar la confidencialidad de la informacion; y cumplir la normatividad aplicable.",
-  );
-  drawWrapped(
-    `CUARTA. DURACION O PLAZO. El presente contrato tendra una duracion de ${contract.duracioncontrato} (${contract.duracioncontratonro}), contados a partir del dia ${contract.iniciocontratodia} del mes ${contract.mesiniciocontrato} del ano ${contract.iniciocontratoanio} hasta el dia ${contract.fincontratodia} del mes ${contract.fincontratomes} (${contract.fincontratomesnro}) del ano ${contract.fincontratoanio}. Cualquiera de las partes podra darlo por terminado conforme a las condiciones pactadas entre las partes.`,
-  );
-  drawWrapped(
-    "QUINTA. NATURALEZA. Las partes declaran que el presente contrato es de naturaleza civil/comercial de prestacion de servicios independientes y no constituye relacion laboral.",
-  );
-  drawWrapped(
-    "SEXTA. SEGURIDAD SOCIAL. EL CONTRATISTA declara conocer y asumir las obligaciones que le correspondan en materia de seguridad social, de acuerdo con el tipo de vinculacion y los acuerdos operativos aplicables.",
-  );
-  drawWrapped(
-    "SEPTIMA. CONFIDENCIALIDAD Y DATOS PERSONALES. EL CONTRATISTA autoriza el tratamiento de sus datos personales para fines contractuales, administrativos, operativos y legales, conforme a la politica de tratamiento de datos personales informada por SUPPORT COLOMBIA SAS.",
-  );
-  drawWrapped(
-    `OCTAVA. NOTIFICACIONES. Por EL CONTRATISTA en la direccion ${contract.direccioncontratista}; Telefono: ${contract.telefonocontratista}; Correo electronico: ${contract.correoelectronicocontratista}.`,
-  );
-  drawWrapped(
-    `Las partes suscriben el presente documento en la ciudad de ${contract.ciudadcontrato} el dia ${contract.diacontrato} (${contract.diacontratonro}) del mes de ${contract.mescontrato}, del ano ${contract.aniocontrato}.`,
-  );
+  for (const name of fieldNames) {
+    setTextField(name, String(contract[name] ?? ""));
+  }
+  setTextField("firma_contratista", "");
 
-  if (y < 220) newPage();
-  y -= 18;
-  page.drawText("EL CONTRATISTA", { x: margin, y, size: 10, font: bold, color: rgb(0.08, 0.13, 0.22) });
-  y -= 88;
+  form.updateFieldAppearances(regular);
+  form.flatten();
 
   if (signature) {
+    const page = pages[4];
+    if (!page) throw new Error("La pagina de firma no esta disponible en la plantilla.");
     const embeddedSignature = await pdf.embedPng(signature.bytes);
-    page.drawImage(embeddedSignature, { x: margin, y: y + 12, width: 178, height: 62 });
-    let evidenceY = y + 68;
-    page.drawText("Evidencia de firma", { x: margin + 230, y: evidenceY, size: 8.7, font: bold, color: rgb(0.08, 0.16, 0.35) });
-    evidenceY -= 12;
+    const signatureY = 126;
+    page.drawImage(embeddedSignature, { x: 153.9, y: signatureY, width: 250, height: 82 });
+    let evidenceY = 200;
+    page.drawText("Evidencia de firma", { x: 520, y: evidenceY, size: 13, font: bold, color: rgb(0.08, 0.16, 0.35) });
+    evidenceY -= 16;
     for (const line of signature.evidenceLines) {
-      const evidenceWrapped = wrapText(line, regular, 7.2, pageWidth - margin - (margin + 230));
+      const evidenceWrapped = wrapText(line, regular, 10, 390);
       for (const evidenceLine of evidenceWrapped) {
-        page.drawText(evidenceLine, { x: margin + 230, y: evidenceY, size: 7.2, font: regular, color: rgb(0.18, 0.22, 0.32) });
-        evidenceY -= 9;
+        if (evidenceY < 40) break;
+        page.drawText(evidenceLine, { x: 520, y: evidenceY, size: 10, font: regular, color: rgb(0.08, 0.13, 0.22) });
+        evidenceY -= 12;
       }
     }
-  } else {
-    page.drawLine({ start: { x: margin, y: y + 36 }, end: { x: margin + 190, y: y + 36 }, thickness: 0.8, color: rgb(0.3, 0.35, 0.45) });
   }
-  y -= 8;
-  page.drawText(`Nombre: ${contract.nombrecontratista}`, { x: margin, y, size: 9, font: regular, color: rgb(0.08, 0.13, 0.22) });
-  y -= 14;
-  page.drawText(`C.C. ${contract.numerodocumentocontratista}`, { x: margin, y, size: 9, font: regular, color: rgb(0.08, 0.13, 0.22) });
 
   return await pdf.save();
 }
@@ -487,11 +503,12 @@ async function getContractValues(serviceClient: any, contractorId: number, invit
   const end = dateParts(endDate);
   const signed = dateParts(todayColombiaDate());
   const duration = monthDurationText();
+  const contractorFullName = `${contractor.name ?? ""} ${contractor.last_name ?? ""}`.trim();
 
   return {
     contractorContractId: currentContract?.id ?? null,
     values: {
-      nombrecontratista: `${contractor.name ?? ""} ${contractor.last_name ?? ""}`.trim(),
+      nombrecontratista: contractorFullName,
       tipodocumentocontratista: firstRelation<{ name?: string }>(contractor.document_type)?.name ?? "cedula de ciudadania",
       numerodocumentocontratista: contractor.document_number ?? "",
       direccioncontratista: contractor.address ?? "",
@@ -502,9 +519,12 @@ async function getContractValues(serviceClient: any, contractorId: number, invit
       duracioncontrato: duration.text,
       duracioncontratonro: duration.number,
       iniciocontratodia: String(start.day),
+      iniciocontratodianro: String(start.day),
       mesiniciocontrato: start.monthText,
+      mesiniciocontratonro: String(start.month),
       iniciocontratoanio: String(start.year),
       fincontratodia: String(end.day),
+      fincontratodianro: String(end.day),
       fincontratomes: end.monthText,
       fincontratomesnro: String(end.month),
       fincontratoanio: String(end.year),
@@ -512,6 +532,10 @@ async function getContractValues(serviceClient: any, contractorId: number, invit
       diacontratonro: String(signed.day),
       mescontrato: signed.monthText,
       aniocontrato: String(signed.year),
+      aniocontratotexto: yearTextSpanish(signed.year),
+      aniocontratonro: String(signed.year),
+      nombrecontratista_firma: contractorFullName,
+      numerodocumentocontratista_firma: contractor.document_number ?? "",
     },
   };
 }
@@ -534,16 +558,54 @@ async function uploadContractArtifact(
   return await registerAppFile(serviceClient, CONTRACT_BUCKET, path, originalName, mimeType, bytes.byteLength);
 }
 
+async function uploadContractPdfArtifact(
+  serviceClient: any,
+  contractorId: number,
+  documentCode: string,
+  bytes: Uint8Array,
+  originalName: string,
+) {
+  const path = `contractor/${contractorId}/${documentCode}/${crypto.randomUUID()}.pdf`;
+  const upload = await serviceClient.storage.from(CONTRACTOR_DOCUMENT_BUCKET).upload(path, bytes, {
+    contentType: "application/pdf",
+    upsert: false,
+  });
+  if (upload.error) throw new Error(upload.error.message);
+  return await registerAppFile(serviceClient, CONTRACTOR_DOCUMENT_BUCKET, path, originalName, "application/pdf", bytes.byteLength);
+}
+
+async function registerSignedContractDocument(
+  serviceClient: any,
+  contractorId: number,
+  fileId: string,
+) {
+  const { data: documentType, error: typeError } = await serviceClient
+    .from("contractor_document_types")
+    .select("id")
+    .eq("code", SIGNED_CONTRACT_DOCUMENT_CODE)
+    .eq("is_active", true)
+    .single();
+  if (typeError) throw new Error(typeError.message);
+
+  const { error } = await serviceClient
+    .from("contractor_documents")
+    .upsert({
+      contractor_id: contractorId,
+      document_type_id: documentType.id,
+      file_id: fileId,
+    }, { onConflict: "file_id" });
+  if (error) throw new Error(error.message);
+}
+
 async function createPendingContract(serviceClient: any, invite: InviteRow) {
   const contract = await getContractValues(serviceClient, invite.contractor_id, invite.email);
-  const pdfBytes = await createContractPdf(contract.values);
-  const fileId = await uploadContractArtifact(
+  const pdfBytes = await createContractPdf(serviceClient, contract.values);
+  const fileId = await uploadContractPdfArtifact(
     serviceClient,
     invite.contractor_id,
-    "unsigned",
+    PENDING_CONTRACT_DOCUMENT_CODE,
     pdfBytes,
     "contrato-pendiente-firma.pdf",
-    "application/pdf",
   );
 
   const { error } = await serviceClient
@@ -694,7 +756,7 @@ Deno.serve(async (req) => {
         `Precision: ${Number.isFinite(Number(evidence.location?.accuracy)) ? `${evidence.location?.accuracy} m` : "No disponible"}`,
         CONTRACT_ACCEPTANCE_TEXT,
       ];
-      const signedPdfBytes = await createContractPdf(contract.values, { bytes: signatureBytes, evidenceLines });
+      const signedPdfBytes = await createContractPdf(serviceClient, contract.values, { bytes: signatureBytes, evidenceLines });
       const signatureFileId = await uploadContractArtifact(
         serviceClient,
         invite.contractor_id,
@@ -703,14 +765,14 @@ Deno.serve(async (req) => {
         "firma-contratista.png",
         "image/png",
       );
-      const signedContractFileId = await uploadContractArtifact(
+      const signedContractFileId = await uploadContractPdfArtifact(
         serviceClient,
         invite.contractor_id,
-        "signed",
+        SIGNED_CONTRACT_DOCUMENT_CODE,
         signedPdfBytes,
         "contrato-firmado.pdf",
-        "application/pdf",
       );
+      await registerSignedContractDocument(serviceClient, invite.contractor_id, signedContractFileId);
 
       const { error: signatureError } = await serviceClient
         .from("contractor_contract_signatures")
