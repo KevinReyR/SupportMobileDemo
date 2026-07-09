@@ -130,6 +130,43 @@ function monthDurationText() {
   return { text: "un mes", number: "1 mes" };
 }
 
+function dayTextSpanish(day: number) {
+  const map: Record<number, string> = {
+    1: "uno",
+    2: "dos",
+    3: "tres",
+    4: "cuatro",
+    5: "cinco",
+    6: "seis",
+    7: "siete",
+    8: "ocho",
+    9: "nueve",
+    10: "diez",
+    11: "once",
+    12: "doce",
+    13: "trece",
+    14: "catorce",
+    15: "quince",
+    16: "dieciséis",
+    17: "diecisiete",
+    18: "dieciocho",
+    19: "diecinueve",
+    20: "veinte",
+    21: "veintiuno",
+    22: "veintidós",
+    23: "veintitrés",
+    24: "veinticuatro",
+    25: "veinticinco",
+    26: "veintiséis",
+    27: "veintisiete",
+    28: "veintiocho",
+    29: "veintinueve",
+    30: "treinta",
+    31: "treinta y uno",
+  };
+  return map[day] ?? String(day);
+}
+
 function yearTextSpanish(year: number) {
   const map: Record<number, string> = {
     2025: "dos mil veinticinco",
@@ -464,13 +501,15 @@ async function createContractPdf(
     const signatureY = 126;
     page.drawImage(embeddedSignature, { x: 153.9, y: signatureY, width: 250, height: 82 });
     let evidenceY = 200;
-    page.drawText("Evidencia de firma", { x: 520, y: evidenceY, size: 13, font: bold, color: rgb(0.08, 0.16, 0.35) });
+    const evidenceX = Math.min(page.getWidth() - 170, 650);
+    const evidenceWidth = Math.max(120, page.getWidth() - evidenceX - 24);
+    page.drawText("Evidencia de firma", { x: evidenceX, y: evidenceY, size: 13, font: bold, color: rgb(0.08, 0.16, 0.35) });
     evidenceY -= 16;
     for (const line of signature.evidenceLines) {
-      const evidenceWrapped = wrapText(line, regular, 10, 390);
+      const evidenceWrapped = wrapText(line, regular, 10, evidenceWidth);
       for (const evidenceLine of evidenceWrapped) {
         if (evidenceY < 40) break;
-        page.drawText(evidenceLine, { x: 520, y: evidenceY, size: 10, font: regular, color: rgb(0.08, 0.13, 0.22) });
+        page.drawText(evidenceLine, { x: evidenceX, y: evidenceY, size: 10, font: regular, color: rgb(0.08, 0.13, 0.22) });
         evidenceY -= 12;
       }
     }
@@ -518,17 +557,17 @@ async function getContractValues(serviceClient: any, contractorId: number, invit
       ciudadcontrato: "Bucaramanga",
       duracioncontrato: duration.text,
       duracioncontratonro: duration.number,
-      iniciocontratodia: String(start.day),
+      iniciocontratodia: dayTextSpanish(start.day),
       iniciocontratodianro: String(start.day),
       mesiniciocontrato: start.monthText,
       mesiniciocontratonro: String(start.month),
       iniciocontratoanio: String(start.year),
-      fincontratodia: String(end.day),
+      fincontratodia: dayTextSpanish(end.day),
       fincontratodianro: String(end.day),
       fincontratomes: end.monthText,
       fincontratomesnro: String(end.month),
       fincontratoanio: String(end.year),
-      diacontrato: String(signed.day),
+      diacontrato: dayTextSpanish(signed.day),
       diacontratonro: String(signed.day),
       mescontrato: signed.monthText,
       aniocontrato: String(signed.year),
