@@ -166,12 +166,107 @@ export interface ClientContractor {
 
 export interface AdminUser {
   id: string;
+  firstName: string;
+  lastName: string;
   name: string;
   email: string;
+  phone: string | null;
   active: boolean;
   role: string;
   clients: string[];
   clientIds: number[];
+}
+
+export interface AdminClient extends NamedRecord {
+  documentNumber: string | null;
+  isActive: boolean;
+}
+
+export interface AdminArea extends NamedRecord {
+  clientId: number;
+  clientName: string;
+  isActive: boolean;
+}
+
+export interface AdminShift extends NamedRecord {
+  areaId: number;
+  areaName: string;
+  clientName: string;
+  isActive: boolean;
+}
+
+export interface AdminServiceRate {
+  id: number;
+  shiftId: number;
+  shiftName: string;
+  areaName: string;
+  clientName: string;
+  salePrice: number;
+  costPrice: number;
+  validFrom: string;
+  validTo: string | null;
+}
+
+export interface AdminExtraHourRate {
+  id: number;
+  areaId: number;
+  areaName: string;
+  clientName: string;
+  salePrice: number;
+  validFrom: string;
+  validTo: string | null;
+}
+
+export interface AdminCostConcept {
+  id: number;
+  code: string;
+  name: string;
+  description: string | null;
+  category: string;
+  status: "ACTIVO" | "INACTIVO";
+}
+
+export interface AdminCostRule {
+  id: number;
+  contractTypeId: number;
+  contractTypeName: string;
+  costConceptId: number;
+  costConceptName: string;
+  calculationType: "FIXED_AMOUNT" | "PERCENTAGE_OF_SALE" | "PERCENTAGE_OF_BASE_COST";
+  value: number;
+  validFrom: string;
+  validTo: string | null;
+  status: "ACTIVO" | "INACTIVO";
+}
+
+export interface AdminWorkwearType extends NamedRecord {
+  description: string | null;
+  isActive: boolean;
+}
+
+export interface AdminContractRecord {
+  id: number;
+  contractorId: number;
+  contractorName: string;
+  contractTypeId: number | null;
+  contractTypeName: string;
+  statusId: number | null;
+  statusName: ContractStatus;
+  startDate: string;
+  endDate: string | null;
+  observations: string | null;
+}
+
+export interface AdminData {
+  clients: AdminClient[];
+  areas: AdminArea[];
+  shifts: AdminShift[];
+  serviceRates: AdminServiceRate[];
+  extraHourRates: AdminExtraHourRate[];
+  costConcepts: AdminCostConcept[];
+  costRules: AdminCostRule[];
+  workwearTypes: AdminWorkwearType[];
+  contracts: AdminContractRecord[];
 }
 
 export interface StatisticsContractorOption extends NamedRecord {

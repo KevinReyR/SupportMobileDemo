@@ -35,12 +35,14 @@ import { buildCedulaPdfFromPhotos } from "./lib/cedula-pdf";
 import { supabase } from "./lib/supabase";
 import {
   cancelPersonnelRequest,
+  createAdminUser,
   createContractorDraft,
   createContractorDocumentSignedUrl,
   createContractorProfilePhotoSignedUrl,
   createOperation,
   createPersonnelRequest,
   finalizeOperation,
+  loadAdminData,
   loadAppData,
   loadClientContractorHistory,
   loadContractorDocuments,
@@ -55,6 +57,15 @@ import {
   loadContractorOnboardingContract,
   registerContractorWorkwearMovement,
   reviewOperation,
+  saveAdminArea,
+  saveAdminClient,
+  saveAdminContract,
+  saveAdminCostConcept,
+  saveAdminCostRule,
+  saveAdminExtraHourRate,
+  saveAdminServiceRate,
+  saveAdminShift,
+  saveAdminWorkwearType,
   sendContractorOnboardingEmail,
   selectContractorContractType,
   setUserActive,
@@ -63,11 +74,14 @@ import {
   submitContractorOnboardingForm,
   terminateContractor,
   toggleUserClient,
+  updateAdminContractor,
+  updateAdminUserProfile,
   uploadContractorActivationDocument,
   uploadContractorDocument,
 } from "./services/data";
 import type { ContractorActivationDocumentType, ContractorDocumentTypeOption, ContractorPdfFile } from "./services/data";
 import type {
+  AdminData,
   AppData,
   Assignment,
   ClientContractor,
@@ -82,6 +96,7 @@ import type {
   OperationStatus,
   PersonnelRequest,
   Role,
+  RoleCode,
   StatisticsSummary,
   UserContext,
   WorkwearMovement,
@@ -90,6 +105,9 @@ import type {
 } from "./types";
 
 type Screen =
+  | "admin-home"
+  | "admin-contractors"
+  | "admin-catalogs"
   | "operations"
   | "operation-detail"
   | "initial"
@@ -196,7 +214,10 @@ const tabsByRole: Record<Role, { label: string; icon: IconName; screen: Screen }
     { label: "Estadísticas", icon: "bar-chart-outline", screen: "statistics" },
   ],
   Administrador: [
+    { label: "Inicio", icon: "grid-outline", screen: "admin-home" },
     { label: "Usuarios", icon: "people-outline", screen: "users" },
+    { label: "Contratistas", icon: "id-card-outline", screen: "admin-contractors" },
+    { label: "Catálogos", icon: "albums-outline", screen: "admin-catalogs" },
   ],
 };
 
@@ -392,7 +413,7 @@ export default function SupportApp() {
         "La carga inicial tardó demasiado. Puedes reintentar desde la aplicación.",
       );
       if (!mountedRef.current || hydrationId !== hydrationIdRef.current) return;
-      const home: Screen = nextContext.roleCode === "ADMIN" ? "users" : "operations";
+      const home: Screen = nextContext.roleCode === "ADMIN" ? "admin-home" : "operations";
       setContext(nextContext);
       setData(nextData);
       setScreen(home);
@@ -488,6 +509,24 @@ export default function SupportApp() {
   const selectedClientContractor =
     data.clientContractors.find((item) => item.id === selectedContractorId) ?? null;
 
+  if (context.roleCode === "ADMIN" && Platform.OS === "web") {
+    return (
+      <SafeAreaProvider>
+        <SafeAreaView style={styles.safe} edges={["top"]}>
+          <StatusBar barStyle="dark-content" backgroundColor={C.bg} />
+          <AdminWebPortal
+            context={context}
+            data={data}
+            loading={loading}
+            error={error}
+            onLogout={() => supabase.auth.signOut()}
+            onRefresh={refresh}
+          />
+        </SafeAreaView>
+      </SafeAreaProvider>
+    );
+  }
+
   return (
     <SafeAreaProvider>
       <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -503,6 +542,23 @@ export default function SupportApp() {
           <ErrorState message={error} onRetry={refresh} />
         ) : (
           <View style={styles.body}>
+            {screen === "admin-home" && (
+              <AdminMobileHome
+                data={data}
+                onNavigate={navigate}
+              />
+            )}
+            {screen === "admin-contractors" && (
+              <AdminContractorsMobile
+                contractors={data.contractors}
+                onRefresh={refresh}
+              />
+            )}
+            {screen === "admin-catalogs" && (
+              <AdminCatalogsMobile
+                onRefresh={refresh}
+              />
+            )}
             {screen === "operations" && (
               <Operations
                 context={context}
@@ -1370,6 +1426,9 @@ function Header({
   onLogout: () => void;
 }) {
   const titles: Record<Screen, string> = {
+    "admin-home": "Administración",
+    "admin-contractors": "Contratistas",
+    "admin-catalogs": "Catálogos",
     operations: "Operaciones",
     "operation-detail": context.role === "Director" ? "Revisión de operación" : "Detalle de operación",
     initial: "Registro inicial",
@@ -4581,14 +4640,1157 @@ function Statistics({ context, data }: { context: UserContext; data: AppData }) 
   );
 }
 
+type AdminModule =
+  | "dashboard"
+  | "users"
+  | "contractors"
+  | "contracts"
+  | "catalogs"
+  | "rates"
+  | "costs"
+  | "rules"
+  | "workwear";
+
+const adminModules: { id: AdminModule; title: string; icon: IconName; mobile?: boolean }[] = [
+  { id: "dashboard", title: "Dashboard", icon: "grid-outline" },
+  { id: "users", title: "Usuarios", icon: "people-outline", mobile: true },
+  { id: "contractors", title: "Contratistas", icon: "id-card-outline", mobile: true },
+  { id: "contracts", title: "Contratos", icon: "document-text-outline" },
+  { id: "catalogs", title: "Clientes / Áreas / Turnos", icon: "business-outline", mobile: true },
+  { id: "rates", title: "Tarifas", icon: "cash-outline" },
+  { id: "costs", title: "Conceptos de costos", icon: "receipt-outline" },
+  { id: "rules", title: "Reglas de costos", icon: "calculator-outline" },
+  { id: "workwear", title: "Dotación", icon: "shirt-outline", mobile: true },
+];
+
+function AdminMobileHome({
+  data,
+  onNavigate,
+}: {
+  data: AppData;
+  onNavigate: (screen: Screen) => void;
+}) {
+  return (
+    <Page>
+      <View>
+        <Text style={styles.eyebrow}>ADMINISTRACIÓN</Text>
+        <Text style={styles.greeting}>Acciones rápidas</Text>
+        <Text style={styles.subtitle}>La administración pesada estará disponible en el portal web.</Text>
+      </View>
+      <View style={styles.statsGrid}>
+        <Stat value={String(data.users.length)} label="Usuarios" icon="people-outline" />
+        <Stat value={String(data.contractors.length)} label="Contratistas" icon="id-card-outline" />
+        <Stat value={String(data.clients.length)} label="Clientes activos" icon="business-outline" />
+        <Stat value={String(data.shifts.length)} label="Turnos activos" icon="time-outline" />
+      </View>
+      <AdminMobileAction title="Usuarios" text="Activar, desactivar, roles y clientes." icon="people-outline" onPress={() => onNavigate("users")} />
+      <AdminMobileAction title="Contratistas" text="Consulta y edición básica de datos." icon="id-card-outline" onPress={() => onNavigate("admin-contractors")} />
+      <AdminMobileAction title="Catálogos" text="Activación rápida de clientes, áreas, turnos y dotación." icon="albums-outline" onPress={() => onNavigate("admin-catalogs")} />
+      <Notice icon="desktop-outline" text="Para tarifas, costos, reglas y edición contractual completa usa el portal web administrativo." />
+    </Page>
+  );
+}
+
+function AdminMobileAction({ title, text, icon, onPress }: { title: string; text: string; icon: IconName; onPress: () => void }) {
+  return (
+    <Pressable style={styles.card} onPress={onPress}>
+      <View style={styles.cardTop}>
+        <View style={styles.statIcon}><Ionicons name={icon} size={21} color={C.navy} /></View>
+        <View style={styles.flex}>
+          <Text style={styles.cardTitle}>{title}</Text>
+          <Text style={styles.subtitle}>{text}</Text>
+        </View>
+        <Ionicons name="chevron-forward" size={20} color={C.muted} />
+      </View>
+    </Pressable>
+  );
+}
+
+function AdminContractorsMobile({ contractors, onRefresh }: { contractors: Contractor[]; onRefresh: () => void }) {
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<Contractor | null>(null);
+  const visible = contractors.filter((contractor) =>
+    `${contractor.fullName} ${contractor.document}`.toLowerCase().includes(query.toLowerCase()),
+  );
+  return (
+    <Page onRefresh={onRefresh}>
+      <View>
+        <Text style={styles.eyebrow}>ADMIN RÁPIDO</Text>
+        <Text style={styles.greeting}>Contratistas</Text>
+        <Text style={styles.subtitle}>Edición básica desde móvil. Usa web para contratos e históricos.</Text>
+      </View>
+      <Input icon="search-outline" value={query} onChangeText={setQuery} placeholder="Buscar por nombre o documento" />
+      {visible.map((contractor) => (
+        <Pressable key={contractor.id} style={styles.card} onPress={() => setSelected(contractor)}>
+          <View style={styles.cardTop}>
+            <Initials name={contractor.fullName} />
+            <View style={styles.flex}>
+              <Text style={styles.cardTitle}>{contractor.fullName}</Text>
+              <Text style={styles.caption}>CC {contractor.document}</Text>
+              <Text style={styles.cardMeta}>{contractor.contractStatus} ⋅ {contractor.contractTypeName}</Text>
+            </View>
+            <Ionicons name="create-outline" size={20} color={C.navy} />
+          </View>
+        </Pressable>
+      ))}
+      <AdminContractorEditModal
+        contractor={selected}
+        onClose={() => setSelected(null)}
+        onSaved={async () => {
+          setSelected(null);
+          await onRefresh();
+        }}
+      />
+    </Page>
+  );
+}
+
+function AdminCatalogsMobile({ onRefresh }: { onRefresh: () => void }) {
+  const [adminData, setAdminData] = useState<AdminData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      setAdminData(await loadAdminData());
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const reloadAll = async () => {
+    await load();
+    await onRefresh();
+  };
+
+  return (
+    <Page loading={loading} onRefresh={reloadAll}>
+      <View>
+        <Text style={styles.eyebrow}>ADMIN RÁPIDO</Text>
+        <Text style={styles.greeting}>Catálogos</Text>
+        <Text style={styles.subtitle}>Activa o inactiva registros usados en nuevas operaciones.</Text>
+      </View>
+      {error ? <Notice icon="alert-circle-outline" text={error} tone="error" /> : null}
+      {!adminData || loading ? <ActivityIndicator color={C.navy} /> : (
+        <>
+          <AdminToggleSection title="Clientes" rows={adminData.clients.map((item) => ({
+            id: item.id,
+            title: item.name,
+            subtitle: item.documentNumber ?? "Sin documento",
+            active: item.isActive,
+            onToggle: async (active) => {
+              await saveAdminClient({ id: item.id, name: item.name, documentNumber: item.documentNumber ?? "", isActive: active });
+              await reloadAll();
+            },
+          }))} />
+          <AdminToggleSection title="Áreas" rows={adminData.areas.map((item) => ({
+            id: item.id,
+            title: item.name,
+            subtitle: item.clientName,
+            active: item.isActive,
+            onToggle: async (active) => {
+              await saveAdminArea({ id: item.id, clientId: item.clientId, name: item.name, isActive: active });
+              await reloadAll();
+            },
+          }))} />
+          <AdminToggleSection title="Turnos" rows={adminData.shifts.map((item) => ({
+            id: item.id,
+            title: item.name,
+            subtitle: `${item.clientName} ⋅ ${item.areaName}`,
+            active: item.isActive,
+            onToggle: async (active) => {
+              await saveAdminShift({ id: item.id, areaId: item.areaId, name: item.name, isActive: active });
+              await reloadAll();
+            },
+          }))} />
+          <AdminToggleSection title="Dotación" rows={adminData.workwearTypes.map((item) => ({
+            id: item.id,
+            title: item.name,
+            subtitle: item.description ?? "Sin descripción",
+            active: item.isActive,
+            onToggle: async (active) => {
+              await saveAdminWorkwearType({ id: item.id, name: item.name, description: item.description ?? "", isActive: active });
+              await reloadAll();
+            },
+          }))} />
+        </>
+      )}
+    </Page>
+  );
+}
+
+function AdminToggleSection({
+  title,
+  rows,
+}: {
+  title: string;
+  rows: { id: number; title: string; subtitle: string; active: boolean; onToggle: (active: boolean) => Promise<void> }[];
+}) {
+  return (
+    <FormCard title={title}>
+      {rows.map((row) => (
+        <View key={row.id} style={styles.personRowPlain}>
+          <View style={styles.flex}>
+            <Text style={styles.cardTitle}>{row.title}</Text>
+            <Text style={styles.caption}>{row.subtitle}</Text>
+          </View>
+          <Switch
+            value={row.active}
+            onValueChange={(active) => {
+              row.onToggle(active).catch((cause) => Alert.alert("No fue posible guardar", errorMessage(cause)));
+            }}
+            trackColor={{ false: "#EDB8B8", true: "#A9D8C4" }}
+            thumbColor={row.active ? C.green : C.red}
+          />
+        </View>
+      ))}
+    </FormCard>
+  );
+}
+
+function AdminWebPortal({
+  context,
+  data,
+  loading,
+  error,
+  onLogout,
+  onRefresh,
+}: {
+  context: UserContext;
+  data: AppData;
+  loading: boolean;
+  error: string;
+  onLogout: () => void;
+  onRefresh: () => void;
+}) {
+  const [module, setModule] = useState<AdminModule>("dashboard");
+  const [adminData, setAdminData] = useState<AdminData | null>(null);
+  const [adminLoading, setAdminLoading] = useState(true);
+  const [adminError, setAdminError] = useState("");
+
+  const load = useCallback(async () => {
+    setAdminLoading(true);
+    setAdminError("");
+    try {
+      setAdminData(await loadAdminData());
+    } catch (cause) {
+      setAdminError(errorMessage(cause));
+    } finally {
+      setAdminLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const refreshAll = async () => {
+    await Promise.all([load(), onRefresh()]);
+  };
+
+  const content = () => {
+    if (error || adminError) return <Notice icon="cloud-offline-outline" tone="error" text={error || adminError} />;
+    if (loading || adminLoading || !adminData) return <View style={styles.centerCard}><ActivityIndicator color={C.navy} /></View>;
+    if (module === "dashboard") return <AdminDashboard data={data} adminData={adminData} />;
+    if (module === "users") return <AdminUsersModule currentUserId={context.id} data={data} onChanged={refreshAll} />;
+    if (module === "contractors") return <AdminContractorsModule contractors={data.contractors} onChanged={refreshAll} />;
+    if (module === "contracts") return <AdminContractsModule adminData={adminData} contractTypes={data.contractTypes} onChanged={refreshAll} />;
+    if (module === "catalogs") return <AdminCatalogsModule adminData={adminData} onChanged={refreshAll} />;
+    if (module === "rates") return <AdminRatesModule adminData={adminData} onChanged={refreshAll} />;
+    if (module === "costs") return <AdminCostConceptsModule adminData={adminData} onChanged={refreshAll} />;
+    if (module === "rules") return <AdminCostRulesModule adminData={adminData} contractTypes={data.contractTypes} onChanged={refreshAll} />;
+    return <AdminWorkwearModule adminData={adminData} onChanged={refreshAll} />;
+  };
+
+  return (
+    <View style={styles.adminPortal}>
+      <View style={styles.adminSidebar}>
+        <View style={styles.adminBrand}>
+          <Image source={require("../assets/support-icon.png")} style={styles.headerLogo} resizeMode="contain" />
+          <View>
+            <Text style={styles.headerTitle}>Admin</Text>
+            <Text style={styles.caption}>{context.name} {context.lastName}</Text>
+          </View>
+        </View>
+        <ScrollView contentContainerStyle={styles.adminSidebarList}>
+          {adminModules.map((item) => {
+            const active = module === item.id;
+            return (
+              <Pressable key={item.id} style={[styles.adminNavItem, active && styles.adminNavItemActive]} onPress={() => setModule(item.id)}>
+                <Ionicons name={item.icon} size={18} color={active ? C.white : C.navy} />
+                <Text style={[styles.adminNavText, active && styles.adminNavTextActive]}>{item.title}</Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+        <SecondaryButton label="Cerrar sesión" icon="log-out-outline" onPress={onLogout} />
+      </View>
+      <View style={styles.adminMain}>
+        <View style={styles.adminTopbar}>
+          <View>
+            <Text style={styles.eyebrow}>PORTAL ADMINISTRATIVO</Text>
+            <Text style={styles.greeting}>{adminModules.find((item) => item.id === module)?.title}</Text>
+          </View>
+          <Pressable style={styles.smallActionButton} onPress={refreshAll}>
+            <Ionicons name="refresh-outline" size={16} color={C.navy} />
+            <Text style={styles.smallActionText}>Recargar</Text>
+          </Pressable>
+        </View>
+        <ScrollView contentContainerStyle={styles.adminContent}>
+          {content()}
+        </ScrollView>
+      </View>
+    </View>
+  );
+}
+
+function AdminDashboard({ data, adminData }: { data: AppData; adminData: AdminData }) {
+  return (
+    <>
+      <View style={styles.statsGrid}>
+        <Stat value={String(data.users.length)} label="Usuarios" icon="people-outline" />
+        <Stat value={String(data.contractors.length)} label="Contratistas" icon="id-card-outline" />
+        <Stat value={String(adminData.clients.length)} label="Clientes" icon="business-outline" />
+        <Stat value={String(adminData.serviceRates.length + adminData.extraHourRates.length)} label="Tarifas" icon="cash-outline" />
+        <Stat value={String(adminData.costConcepts.length)} label="Conceptos" icon="receipt-outline" />
+        <Stat value={String(adminData.costRules.length)} label="Reglas costo" icon="calculator-outline" />
+      </View>
+      <Notice icon="information-circle-outline" text="Este portal concentra la administración pesada. La app móvil conserva acciones rápidas y consultas operativas." />
+    </>
+  );
+}
+
+function AdminUsersModule({ currentUserId, data, onChanged }: { currentUserId: string; data: AppData; onChanged: () => void }) {
+  const [createVisible, setCreateVisible] = useState(false);
+  const [editing, setEditing] = useState<AppData["users"][number] | null>(null);
+  return (
+    <>
+      <View style={styles.between}>
+        <Text style={styles.sectionTitle}>Usuarios de plataforma</Text>
+        <Pressable style={styles.smallActionButton} onPress={() => setCreateVisible(true)}>
+          <Ionicons name="person-add-outline" size={16} color={C.navy} />
+          <Text style={styles.smallActionText}>Crear usuario</Text>
+        </Pressable>
+      </View>
+      <Users currentUserId={currentUserId} data={data} onChanged={onChanged} onEdit={setEditing} />
+      <AdminUserModal
+        visible={createVisible || Boolean(editing)}
+        user={editing}
+        clients={data.clients}
+        onClose={() => {
+          setCreateVisible(false);
+          setEditing(null);
+        }}
+        onSaved={async () => {
+          setCreateVisible(false);
+          setEditing(null);
+          await onChanged();
+        }}
+      />
+    </>
+  );
+}
+
+function AdminContractorsModule({ contractors, onChanged }: { contractors: Contractor[]; onChanged: () => void }) {
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<Contractor | null>(null);
+  const visible = contractors.filter((contractor) =>
+    `${contractor.fullName} ${contractor.document} ${contractor.contractStatus} ${contractor.contractTypeName}`.toLowerCase().includes(query.toLowerCase()),
+  );
+  return (
+    <>
+      <Input icon="search-outline" value={query} onChangeText={setQuery} placeholder="Buscar contratista, documento o estado" />
+      {visible.map((contractor) => (
+        <Pressable key={contractor.id} style={styles.adminTableRow} onPress={() => setSelected(contractor)}>
+          <Text style={styles.adminCellMain}>{contractor.fullName}</Text>
+          <Text style={styles.adminCell}>CC {contractor.document}</Text>
+          <Text style={styles.adminCell}>{contractor.contractStatus}</Text>
+          <Text style={styles.adminCell}>{contractor.contractTypeName}</Text>
+          <Ionicons name="create-outline" size={18} color={C.navy} />
+        </Pressable>
+      ))}
+      <AdminContractorEditModal contractor={selected} onClose={() => setSelected(null)} onSaved={async () => { setSelected(null); await onChanged(); }} />
+    </>
+  );
+}
+
+function AdminContractsModule({ adminData, contractTypes, onChanged }: { adminData: AdminData; contractTypes: AppData["contractTypes"]; onChanged: () => void }) {
+  const [selected, setSelected] = useState<AdminData["contracts"][number] | null>(null);
+  return (
+    <>
+      {adminData.contracts.map((contract) => (
+        <Pressable key={contract.id} style={styles.adminTableRow} onPress={() => setSelected(contract)}>
+          <Text style={styles.adminCellMain}>{contract.contractorName}</Text>
+          <Text style={styles.adminCell}>{contract.contractTypeName}</Text>
+          <Text style={styles.adminCell}>{contract.statusName}</Text>
+          <Text style={styles.adminCell}>{contract.startDate}</Text>
+          <Ionicons name="create-outline" size={18} color={C.navy} />
+        </Pressable>
+      ))}
+      <AdminContractModal contract={selected} contractTypes={contractTypes} onClose={() => setSelected(null)} onSaved={async () => { setSelected(null); await onChanged(); }} />
+    </>
+  );
+}
+
+function AdminCatalogsModule({ adminData, onChanged }: { adminData: AdminData; onChanged: () => void }) {
+  const [client, setClient] = useState<AdminData["clients"][number] | null | "new">(null);
+  const [area, setArea] = useState<AdminData["areas"][number] | null | "new">(null);
+  const [shift, setShift] = useState<AdminData["shifts"][number] | null | "new">(null);
+  return (
+    <>
+      <AdminCatalogList title="Clientes" rows={adminData.clients} onNew={() => setClient("new")} onEdit={setClient} subtitle={(item) => item.documentNumber ?? "Sin documento"} active={(item) => item.isActive} />
+      <AdminCatalogList title="Áreas" rows={adminData.areas} onNew={() => setArea("new")} onEdit={setArea} subtitle={(item) => item.clientName} active={(item) => item.isActive} />
+      <AdminCatalogList title="Turnos" rows={adminData.shifts} onNew={() => setShift("new")} onEdit={setShift} subtitle={(item) => `${item.clientName} ⋅ ${item.areaName}`} active={(item) => item.isActive} />
+      <AdminClientModal item={client === "new" ? null : client} visible={client !== null} onClose={() => setClient(null)} onSaved={async () => { setClient(null); await onChanged(); }} />
+      <AdminAreaModal item={area === "new" ? null : area} clients={adminData.clients} visible={area !== null} onClose={() => setArea(null)} onSaved={async () => { setArea(null); await onChanged(); }} />
+      <AdminShiftModal item={shift === "new" ? null : shift} areas={adminData.areas} visible={shift !== null} onClose={() => setShift(null)} onSaved={async () => { setShift(null); await onChanged(); }} />
+    </>
+  );
+}
+
+function AdminCatalogList<T extends { id: number; name: string }>({
+  title,
+  rows,
+  subtitle,
+  active,
+  onNew,
+  onEdit,
+}: {
+  title: string;
+  rows: T[];
+  subtitle: (item: T) => string;
+  active: (item: T) => boolean;
+  onNew: () => void;
+  onEdit: (item: T) => void;
+}) {
+  return (
+    <FormCard title={title}>
+      <View style={styles.between}>
+        <Text style={styles.caption}>{rows.length} registros</Text>
+        <Pressable style={styles.smallActionButton} onPress={onNew}>
+          <Ionicons name="add-circle-outline" size={16} color={C.navy} />
+          <Text style={styles.smallActionText}>Crear</Text>
+        </Pressable>
+      </View>
+      {rows.map((item) => (
+        <Pressable key={item.id} style={styles.adminTableRow} onPress={() => onEdit(item)}>
+          <Text style={styles.adminCellMain}>{item.name}</Text>
+          <Text style={styles.adminCell}>{subtitle(item)}</Text>
+          <StatusPill good={active(item)} text={active(item) ? "ACTIVO" : "INACTIVO"} />
+        </Pressable>
+      ))}
+    </FormCard>
+  );
+}
+
+function AdminRatesModule({ adminData, onChanged }: { adminData: AdminData; onChanged: () => void }) {
+  const [shiftRate, setShiftRate] = useState<AdminData["serviceRates"][number] | null | "new">(null);
+  const [extraRate, setExtraRate] = useState<AdminData["extraHourRates"][number] | null | "new">(null);
+  return (
+    <>
+      <AdminCatalogList title="Tarifas por turno" rows={adminData.serviceRates.map((rate) => ({ ...rate, name: `${rate.clientName} / ${rate.areaName} / ${rate.shiftName}` }))} onNew={() => setShiftRate("new")} onEdit={setShiftRate as any} subtitle={(item) => `${formatCurrency(item.salePrice)} venta ⋅ ${formatCurrency(item.costPrice)} costo ⋅ desde ${item.validFrom}`} active={(item) => !item.validTo} />
+      <AdminCatalogList title="Horas extra por área" rows={adminData.extraHourRates.map((rate) => ({ ...rate, name: `${rate.clientName} / ${rate.areaName}` }))} onNew={() => setExtraRate("new")} onEdit={setExtraRate as any} subtitle={(item) => `${formatCurrency(item.salePrice)} ⋅ desde ${item.validFrom}`} active={(item) => !item.validTo} />
+      <AdminServiceRateModal item={shiftRate === "new" ? null : shiftRate} shifts={adminData.shifts} visible={shiftRate !== null} onClose={() => setShiftRate(null)} onSaved={async () => { setShiftRate(null); await onChanged(); }} />
+      <AdminExtraRateModal item={extraRate === "new" ? null : extraRate} areas={adminData.areas} visible={extraRate !== null} onClose={() => setExtraRate(null)} onSaved={async () => { setExtraRate(null); await onChanged(); }} />
+    </>
+  );
+}
+
+function AdminCostConceptsModule({ adminData, onChanged }: { adminData: AdminData; onChanged: () => void }) {
+  const [selected, setSelected] = useState<AdminData["costConcepts"][number] | null | "new">(null);
+  return (
+    <>
+      <AdminCatalogList title="Conceptos de costos" rows={adminData.costConcepts.map((item) => ({ ...item, isActive: item.status === "ACTIVO" }))} onNew={() => setSelected("new")} onEdit={setSelected as any} subtitle={(item) => `${item.code} ⋅ ${item.category}`} active={(item) => item.status === "ACTIVO"} />
+      <AdminCostConceptModal item={selected === "new" ? null : selected} visible={selected !== null} onClose={() => setSelected(null)} onSaved={async () => { setSelected(null); await onChanged(); }} />
+    </>
+  );
+}
+
+function AdminCostRulesModule({ adminData, contractTypes, onChanged }: { adminData: AdminData; contractTypes: AppData["contractTypes"]; onChanged: () => void }) {
+  const [selected, setSelected] = useState<AdminData["costRules"][number] | null | "new">(null);
+  return (
+    <>
+      <AdminCatalogList title="Reglas de costos" rows={adminData.costRules.map((rule) => ({ ...rule, name: `${rule.contractTypeName} / ${rule.costConceptName}` }))} onNew={() => setSelected("new")} onEdit={setSelected as any} subtitle={(item) => `${item.calculationType} ${item.value} ⋅ desde ${item.validFrom}`} active={(item) => item.status === "ACTIVO"} />
+      <AdminCostRuleModal item={selected === "new" ? null : selected} contractTypes={contractTypes} concepts={adminData.costConcepts} visible={selected !== null} onClose={() => setSelected(null)} onSaved={async () => { setSelected(null); await onChanged(); }} />
+    </>
+  );
+}
+
+function AdminWorkwearModule({ adminData, onChanged }: { adminData: AdminData; onChanged: () => void }) {
+  const [selected, setSelected] = useState<AdminData["workwearTypes"][number] | null | "new">(null);
+  return (
+    <>
+      <AdminCatalogList title="Tipos de dotación" rows={adminData.workwearTypes} onNew={() => setSelected("new")} onEdit={setSelected} subtitle={(item) => item.description ?? "Sin descripción"} active={(item) => item.isActive} />
+      <AdminWorkwearModal item={selected === "new" ? null : selected} visible={selected !== null} onClose={() => setSelected(null)} onSaved={async () => { setSelected(null); await onChanged(); }} />
+    </>
+  );
+}
+
+function AdminModalShell({
+  visible,
+  title,
+  children,
+  saving,
+  onClose,
+  onSave,
+}: {
+  visible: boolean;
+  title: string;
+  children: React.ReactNode;
+  saving: boolean;
+  onClose: () => void;
+  onSave: () => void;
+}) {
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.adminModalCard}>
+          <View style={styles.between}>
+            <Text style={styles.formTitle}>{title}</Text>
+            <Pressable style={styles.iconButton} onPress={onClose}>
+              <Ionicons name="close" size={20} color={C.ink} />
+            </Pressable>
+          </View>
+          <ScrollView contentContainerStyle={styles.adminModalContent} keyboardShouldPersistTaps="handled">
+            {children}
+          </ScrollView>
+          <View style={styles.actionRow}>
+            <SecondaryButton label="Cancelar" icon="close" onPress={onClose} disabled={saving} />
+            <PrimaryButton label={saving ? "Guardando..." : "Guardar"} icon="save-outline" onPress={onSave} disabled={saving} />
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function AdminField({
+  label,
+  value,
+  onChangeText,
+  icon = "create-outline",
+  keyboardType,
+  multiline,
+}: {
+  label: string;
+  value: string;
+  onChangeText: (value: string) => void;
+  icon?: IconName;
+  keyboardType?: React.ComponentProps<typeof TextInput>["keyboardType"];
+  multiline?: boolean;
+}) {
+  return (
+    <View>
+      <Label text={label} />
+      {multiline ? (
+        <TextInput
+          value={value}
+          onChangeText={onChangeText}
+          placeholderTextColor="#929BAD"
+          style={styles.textArea}
+          multiline
+        />
+      ) : (
+        <Input icon={icon} value={value} onChangeText={onChangeText} keyboardType={keyboardType} autoCapitalize="sentences" />
+      )}
+    </View>
+  );
+}
+
+function AdminSwitch({ label, value, onValueChange }: { label: string; value: boolean; onValueChange: (value: boolean) => void }) {
+  return (
+    <View style={styles.personRowPlain}>
+      <View style={styles.flex}>
+        <Text style={styles.cardTitle}>{label}</Text>
+        <Text style={styles.caption}>{value ? "Activo para nuevos procesos" : "Inactivo"}</Text>
+      </View>
+      <Switch
+        value={value}
+        onValueChange={onValueChange}
+        trackColor={{ false: "#EDB8B8", true: "#A9D8C4" }}
+        thumbColor={value ? C.green : C.red}
+      />
+    </View>
+  );
+}
+
+function AdminOptionChips<T extends string | number>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: T;
+  options: { id: T; name: string }[];
+  onChange: (value: T) => void;
+}) {
+  return (
+    <View>
+      <Label text={label} />
+      <View style={styles.clientChips}>
+        {options.map((option) => {
+          const selected = option.id === value;
+          return (
+            <Pressable key={String(option.id)} style={[styles.clientChip, selected && styles.clientChipActive]} onPress={() => onChange(option.id)}>
+              <Text style={[styles.clientChipText, selected && styles.clientChipTextActive]}>{option.name}</Text>
+            </Pressable>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
+function AdminUserModal({
+  visible,
+  user,
+  clients,
+  onClose,
+  onSaved,
+}: {
+  visible: boolean;
+  user: AppData["users"][number] | null;
+  clients: AppData["clients"];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
+  const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
+  const [roleCode, setRoleCode] = useState<RoleCode>("COORDINATOR");
+  const [clientIds, setClientIds] = useState<number[]>([]);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!visible) return;
+    setFirstName(user?.firstName ?? "");
+    setLastName(user?.lastName ?? "");
+    setEmail(user?.email ?? "");
+    setPhone(user?.phone ?? "");
+    setRoleCode(roleCodeFromLabel(user?.role) ?? "COORDINATOR");
+    setClientIds(user?.clientIds ?? []);
+  }, [user, visible]);
+
+  const save = async () => {
+    if (!firstName.trim() || !lastName.trim() || !email.trim()) {
+      Alert.alert("Datos incompletos", "Nombre, apellido y correo son obligatorios.");
+      return;
+    }
+    setSaving(true);
+    try {
+      if (user) {
+        await updateAdminUserProfile({ userId: user.id, name: firstName, lastName, email, phone });
+        await setUserRole(user.id, roleLabelFromCode(roleCode));
+        const current = new Set(user.clientIds);
+        const next = new Set(clientIds);
+        await Promise.all([
+          ...user.clientIds.filter((id) => !next.has(id)).map((id) => toggleUserClient(user.id, id, false)),
+          ...clientIds.filter((id) => !current.has(id)).map((id) => toggleUserClient(user.id, id, true)),
+        ]);
+      } else {
+        await createAdminUser({ name: firstName, lastName, email, phone, roleCode, clientIds });
+      }
+      await onSaved();
+    } catch (cause) {
+      Alert.alert("No fue posible guardar", errorMessage(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <AdminModalShell visible={visible} title={user ? "Editar usuario" : "Crear usuario"} saving={saving} onClose={onClose} onSave={save}>
+      <AdminField label="Nombre" value={firstName} onChangeText={setFirstName} icon="person-outline" />
+      <AdminField label="Apellido" value={lastName} onChangeText={setLastName} icon="person-outline" />
+      <AdminField label="Correo" value={email} onChangeText={setEmail} icon="mail-outline" keyboardType="email-address" />
+      <AdminField label="Teléfono" value={phone} onChangeText={setPhone} icon="call-outline" keyboardType="phone-pad" />
+      <AdminOptionChips
+        label="Perfil"
+        value={roleCode}
+        options={[
+          { id: "ADMIN", name: "Administrador" },
+          { id: "DIRECTOR", name: "Director" },
+          { id: "COORDINATOR", name: "Coordinador" },
+          { id: "CLIENT", name: "Cliente" },
+        ]}
+        onChange={setRoleCode}
+      />
+      <View>
+        <Label text="Clientes asignados" />
+        <View style={styles.clientChips}>
+          {clients.map((client) => {
+            const selected = clientIds.includes(client.id);
+            return (
+              <Pressable
+                key={client.id}
+                style={[styles.clientChip, selected && styles.clientChipActive]}
+                onPress={() => setClientIds((current) => selected ? current.filter((id) => id !== client.id) : [...current, client.id])}
+              >
+                <Text style={[styles.clientChipText, selected && styles.clientChipTextActive]}>{client.name}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      </View>
+    </AdminModalShell>
+  );
+}
+
+function AdminContractorEditModal({
+  contractor,
+  onClose,
+  onSaved,
+}: {
+  contractor: Contractor | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [lastName, setLastName] = useState("");
+  const [birthDate, setBirthDate] = useState("");
+  const [phone, setPhone] = useState("");
+  const [email, setEmail] = useState("");
+  const [rh, setRh] = useState("");
+  const [eps, setEps] = useState("");
+  const [arl, setArl] = useState("");
+  const [shirtSize, setShirtSize] = useState("");
+  const [pantSize, setPantSize] = useState("");
+  const [shoeSize, setShoeSize] = useState("");
+  const [available, setAvailable] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!contractor) return;
+    setName(contractor.name);
+    setLastName(contractor.lastName);
+    setBirthDate(contractor.birthDate ?? "");
+    setPhone(contractor.phone ?? "");
+    setEmail(contractor.email ?? "");
+    setRh(contractor.rh ?? "");
+    setEps(contractor.eps ?? "");
+    setArl(contractor.arl ?? "");
+    setShirtSize(contractor.shirtSize ?? "");
+    setPantSize(contractor.pantSize ?? "");
+    setShoeSize(contractor.shoeSize ?? "");
+    setAvailable(contractor.available);
+  }, [contractor]);
+
+  const save = async () => {
+    if (!contractor) return;
+    setSaving(true);
+    try {
+      await updateAdminContractor({
+        id: contractor.id,
+        name,
+        lastName,
+        birthDate,
+        phone,
+        email,
+        rh,
+        eps,
+        arl,
+        shirtSize,
+        pantSize,
+        shoeSize,
+        available,
+      });
+      await onSaved();
+    } catch (cause) {
+      Alert.alert("No fue posible guardar", errorMessage(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <AdminModalShell visible={Boolean(contractor)} title="Editar contratista" saving={saving} onClose={onClose} onSave={save}>
+      <AdminField label="Nombres" value={name} onChangeText={setName} icon="person-outline" />
+      <AdminField label="Apellidos" value={lastName} onChangeText={setLastName} icon="person-outline" />
+      <AdminField label="Fecha de nacimiento" value={birthDate} onChangeText={setBirthDate} icon="calendar-outline" />
+      <AdminField label="Teléfono" value={phone} onChangeText={setPhone} icon="call-outline" />
+      <AdminField label="Correo" value={email} onChangeText={setEmail} icon="mail-outline" />
+      <AdminField label="RH" value={rh} onChangeText={setRh} icon="water-outline" />
+      <AdminField label="EPS" value={eps} onChangeText={setEps} icon="medkit-outline" />
+      <AdminField label="ARL" value={arl} onChangeText={setArl} icon="shield-checkmark-outline" />
+      <AdminField label="Talla camisa" value={shirtSize} onChangeText={setShirtSize} icon="shirt-outline" />
+      <AdminField label="Talla pantalón" value={pantSize} onChangeText={setPantSize} icon="resize-outline" />
+      <AdminField label="Talla zapatos" value={shoeSize} onChangeText={setShoeSize} icon="walk-outline" />
+      <AdminSwitch label="Disponibilidad" value={available} onValueChange={setAvailable} />
+    </AdminModalShell>
+  );
+}
+
+function AdminContractModal({
+  contract,
+  contractTypes,
+  onClose,
+  onSaved,
+}: {
+  contract: AdminData["contracts"][number] | null;
+  contractTypes: AppData["contractTypes"];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [contractTypeId, setContractTypeId] = useState(0);
+  const [statusId, setStatusId] = useState(1);
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [observations, setObservations] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!contract) return;
+    setContractTypeId(contract.contractTypeId ?? contractTypes[0]?.id ?? 0);
+    setStatusId(contract.statusId ?? 1);
+    setStartDate(contract.startDate ?? "");
+    setEndDate(contract.endDate ?? "");
+    setObservations(contract.observations ?? "");
+  }, [contract, contractTypes]);
+
+  const save = async () => {
+    if (!contract || !contractTypeId || !statusId || !startDate) return;
+    setSaving(true);
+    try {
+      await saveAdminContract({
+        id: contract.id,
+        contractorId: contract.contractorId,
+        contractTypeId,
+        statusId,
+        startDate,
+        endDate: endDate || null,
+        observations,
+      });
+      await onSaved();
+    } catch (cause) {
+      Alert.alert("No fue posible guardar", errorMessage(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <AdminModalShell visible={Boolean(contract)} title="Editar contrato" saving={saving} onClose={onClose} onSave={save}>
+      <Text style={styles.cardTitle}>{contract?.contractorName}</Text>
+      <AdminOptionChips label="Tipo de contrato" value={contractTypeId} options={contractTypes.map((type) => ({ id: type.id, name: type.name }))} onChange={setContractTypeId} />
+      <AdminField label="Estado ID" value={String(statusId)} onChangeText={(value) => setStatusId(Number(value) || 0)} icon="flag-outline" keyboardType="numeric" />
+      <AdminField label="Fecha inicio" value={startDate} onChangeText={setStartDate} icon="calendar-outline" />
+      <AdminField label="Fecha fin" value={endDate} onChangeText={setEndDate} icon="calendar-outline" />
+      <AdminField label="Observaciones" value={observations} onChangeText={setObservations} multiline />
+    </AdminModalShell>
+  );
+}
+
+function AdminClientModal({ visible, item, onClose, onSaved }: { visible: boolean; item: AdminData["clients"][number] | null; onClose: () => void; onSaved: () => void }) {
+  const [name, setName] = useState("");
+  const [documentNumber, setDocumentNumber] = useState("");
+  const [isActive, setIsActive] = useState(true);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (!visible) return;
+    setName(item?.name ?? "");
+    setDocumentNumber(item?.documentNumber ?? "");
+    setIsActive(item?.isActive ?? true);
+  }, [item, visible]);
+  return (
+    <AdminModalShell visible={visible} title={item ? "Editar cliente" : "Crear cliente"} saving={saving} onClose={onClose} onSave={async () => {
+      setSaving(true);
+      try {
+        await saveAdminClient({ id: item?.id, name, documentNumber, isActive });
+        await onSaved();
+      } catch (cause) {
+        Alert.alert("No fue posible guardar", errorMessage(cause));
+      } finally {
+        setSaving(false);
+      }
+    }}>
+      <AdminField label="Nombre" value={name} onChangeText={setName} icon="business-outline" />
+      <AdminField label="Documento" value={documentNumber} onChangeText={setDocumentNumber} icon="document-outline" />
+      <AdminSwitch label="Estado" value={isActive} onValueChange={setIsActive} />
+    </AdminModalShell>
+  );
+}
+
+function AdminAreaModal({ visible, item, clients, onClose, onSaved }: { visible: boolean; item: AdminData["areas"][number] | null; clients: AdminData["clients"]; onClose: () => void; onSaved: () => void }) {
+  const [name, setName] = useState("");
+  const [clientId, setClientId] = useState(0);
+  const [isActive, setIsActive] = useState(true);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (!visible) return;
+    setName(item?.name ?? "");
+    setClientId(item?.clientId ?? clients[0]?.id ?? 0);
+    setIsActive(item?.isActive ?? true);
+  }, [clients, item, visible]);
+  return (
+    <AdminModalShell visible={visible} title={item ? "Editar área" : "Crear área"} saving={saving} onClose={onClose} onSave={async () => {
+      setSaving(true);
+      try {
+        await saveAdminArea({ id: item?.id, clientId, name, isActive });
+        await onSaved();
+      } catch (cause) {
+        Alert.alert("No fue posible guardar", errorMessage(cause));
+      } finally {
+        setSaving(false);
+      }
+    }}>
+      <AdminField label="Nombre" value={name} onChangeText={setName} icon="map-outline" />
+      <AdminOptionChips label="Cliente" value={clientId} options={clients.map((client) => ({ id: client.id, name: client.name }))} onChange={setClientId} />
+      <AdminSwitch label="Estado" value={isActive} onValueChange={setIsActive} />
+    </AdminModalShell>
+  );
+}
+
+function AdminShiftModal({ visible, item, areas, onClose, onSaved }: { visible: boolean; item: AdminData["shifts"][number] | null; areas: AdminData["areas"]; onClose: () => void; onSaved: () => void }) {
+  const [name, setName] = useState("");
+  const [areaId, setAreaId] = useState(0);
+  const [isActive, setIsActive] = useState(true);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (!visible) return;
+    setName(item?.name ?? "");
+    setAreaId(item?.areaId ?? areas[0]?.id ?? 0);
+    setIsActive(item?.isActive ?? true);
+  }, [areas, item, visible]);
+  return (
+    <AdminModalShell visible={visible} title={item ? "Editar turno" : "Crear turno"} saving={saving} onClose={onClose} onSave={async () => {
+      setSaving(true);
+      try {
+        await saveAdminShift({ id: item?.id, areaId, name, isActive });
+        await onSaved();
+      } catch (cause) {
+        Alert.alert("No fue posible guardar", errorMessage(cause));
+      } finally {
+        setSaving(false);
+      }
+    }}>
+      <AdminField label="Nombre" value={name} onChangeText={setName} icon="time-outline" />
+      <AdminOptionChips label="Área" value={areaId} options={areas.map((area) => ({ id: area.id, name: `${area.clientName} / ${area.name}` }))} onChange={setAreaId} />
+      <AdminSwitch label="Estado" value={isActive} onValueChange={setIsActive} />
+    </AdminModalShell>
+  );
+}
+
+function AdminServiceRateModal({ visible, item, shifts, onClose, onSaved }: { visible: boolean; item: AdminData["serviceRates"][number] | null; shifts: AdminData["shifts"]; onClose: () => void; onSaved: () => void }) {
+  const [shiftId, setShiftId] = useState(0);
+  const [salePrice, setSalePrice] = useState("");
+  const [costPrice, setCostPrice] = useState("");
+  const [validFrom, setValidFrom] = useState(todayIso());
+  const [validTo, setValidTo] = useState("");
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (!visible) return;
+    setShiftId(item?.shiftId ?? shifts[0]?.id ?? 0);
+    setSalePrice(String(item?.salePrice ?? ""));
+    setCostPrice(String(item?.costPrice ?? ""));
+    setValidFrom(item?.validFrom ?? todayIso());
+    setValidTo(item?.validTo ?? "");
+  }, [item, shifts, visible]);
+  return (
+    <AdminModalShell visible={visible} title={item ? "Editar tarifa" : "Crear tarifa"} saving={saving} onClose={onClose} onSave={async () => {
+      setSaving(true);
+      try {
+        await saveAdminServiceRate({ id: item?.id, shiftId, salePrice: Number(salePrice), costPrice: Number(costPrice), validFrom, validTo: validTo || null });
+        await onSaved();
+      } catch (cause) {
+        Alert.alert("No fue posible guardar", errorMessage(cause));
+      } finally {
+        setSaving(false);
+      }
+    }}>
+      <AdminOptionChips label="Turno" value={shiftId} options={shifts.map((shift) => ({ id: shift.id, name: `${shift.clientName} / ${shift.areaName} / ${shift.name}` }))} onChange={setShiftId} />
+      <AdminField label="Precio venta" value={salePrice} onChangeText={setSalePrice} icon="cash-outline" keyboardType="numeric" />
+      <AdminField label="Costo" value={costPrice} onChangeText={setCostPrice} icon="receipt-outline" keyboardType="numeric" />
+      <AdminField label="Válido desde" value={validFrom} onChangeText={setValidFrom} icon="calendar-outline" />
+      <AdminField label="Válido hasta" value={validTo} onChangeText={setValidTo} icon="calendar-outline" />
+    </AdminModalShell>
+  );
+}
+
+function AdminExtraRateModal({ visible, item, areas, onClose, onSaved }: { visible: boolean; item: AdminData["extraHourRates"][number] | null; areas: AdminData["areas"]; onClose: () => void; onSaved: () => void }) {
+  const [areaId, setAreaId] = useState(0);
+  const [salePrice, setSalePrice] = useState("");
+  const [validFrom, setValidFrom] = useState(todayIso());
+  const [validTo, setValidTo] = useState("");
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (!visible) return;
+    setAreaId(item?.areaId ?? areas[0]?.id ?? 0);
+    setSalePrice(String(item?.salePrice ?? ""));
+    setValidFrom(item?.validFrom ?? todayIso());
+    setValidTo(item?.validTo ?? "");
+  }, [areas, item, visible]);
+  return (
+    <AdminModalShell visible={visible} title={item ? "Editar hora extra" : "Crear hora extra"} saving={saving} onClose={onClose} onSave={async () => {
+      setSaving(true);
+      try {
+        await saveAdminExtraHourRate({ id: item?.id, areaId, salePrice: Number(salePrice), validFrom, validTo: validTo || null });
+        await onSaved();
+      } catch (cause) {
+        Alert.alert("No fue posible guardar", errorMessage(cause));
+      } finally {
+        setSaving(false);
+      }
+    }}>
+      <AdminOptionChips label="Área" value={areaId} options={areas.map((area) => ({ id: area.id, name: `${area.clientName} / ${area.name}` }))} onChange={setAreaId} />
+      <AdminField label="Precio venta hora extra" value={salePrice} onChangeText={setSalePrice} icon="cash-outline" keyboardType="numeric" />
+      <AdminField label="Válido desde" value={validFrom} onChangeText={setValidFrom} icon="calendar-outline" />
+      <AdminField label="Válido hasta" value={validTo} onChangeText={setValidTo} icon="calendar-outline" />
+    </AdminModalShell>
+  );
+}
+
+function AdminCostConceptModal({ visible, item, onClose, onSaved }: { visible: boolean; item: AdminData["costConcepts"][number] | null; onClose: () => void; onSaved: () => void }) {
+  const [code, setCode] = useState("");
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [category, setCategory] = useState("");
+  const [status, setStatus] = useState<"ACTIVO" | "INACTIVO">("ACTIVO");
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (!visible) return;
+    setCode(item?.code ?? "");
+    setName(item?.name ?? "");
+    setDescription(item?.description ?? "");
+    setCategory(item?.category ?? "");
+    setStatus(item?.status ?? "ACTIVO");
+  }, [item, visible]);
+  return (
+    <AdminModalShell visible={visible} title={item ? "Editar concepto" : "Crear concepto"} saving={saving} onClose={onClose} onSave={async () => {
+      setSaving(true);
+      try {
+        await saveAdminCostConcept({ id: item?.id, code, name, description, category, status });
+        await onSaved();
+      } catch (cause) {
+        Alert.alert("No fue posible guardar", errorMessage(cause));
+      } finally {
+        setSaving(false);
+      }
+    }}>
+      <AdminField label="Código" value={code} onChangeText={setCode} icon="barcode-outline" />
+      <AdminField label="Nombre" value={name} onChangeText={setName} icon="receipt-outline" />
+      <AdminField label="Categoría" value={category} onChangeText={setCategory} icon="pricetags-outline" />
+      <AdminField label="Descripción" value={description} onChangeText={setDescription} multiline />
+      <AdminOptionChips label="Estado" value={status} options={[{ id: "ACTIVO", name: "Activo" }, { id: "INACTIVO", name: "Inactivo" }]} onChange={setStatus} />
+    </AdminModalShell>
+  );
+}
+
+function AdminCostRuleModal({ visible, item, contractTypes, concepts, onClose, onSaved }: { visible: boolean; item: AdminData["costRules"][number] | null; contractTypes: AppData["contractTypes"]; concepts: AdminData["costConcepts"]; onClose: () => void; onSaved: () => void }) {
+  const [contractTypeId, setContractTypeId] = useState(0);
+  const [costConceptId, setCostConceptId] = useState(0);
+  const [calculationType, setCalculationType] = useState("FIXED_AMOUNT");
+  const [value, setValue] = useState("");
+  const [validFrom, setValidFrom] = useState(todayIso());
+  const [validTo, setValidTo] = useState("");
+  const [status, setStatus] = useState<"ACTIVO" | "INACTIVO">("ACTIVO");
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (!visible) return;
+    setContractTypeId(item?.contractTypeId ?? contractTypes[0]?.id ?? 0);
+    setCostConceptId(item?.costConceptId ?? concepts[0]?.id ?? 0);
+    setCalculationType(item?.calculationType ?? "FIXED_AMOUNT");
+    setValue(String(item?.value ?? ""));
+    setValidFrom(item?.validFrom ?? todayIso());
+    setValidTo(item?.validTo ?? "");
+    setStatus(item?.status ?? "ACTIVO");
+  }, [concepts, contractTypes, item, visible]);
+  return (
+    <AdminModalShell visible={visible} title={item ? "Editar regla" : "Crear regla"} saving={saving} onClose={onClose} onSave={async () => {
+      setSaving(true);
+      try {
+        await saveAdminCostRule({ id: item?.id, contractTypeId, costConceptId, calculationType, value: Number(value), validFrom, validTo: validTo || null, status });
+        await onSaved();
+      } catch (cause) {
+        Alert.alert("No fue posible guardar", errorMessage(cause));
+      } finally {
+        setSaving(false);
+      }
+    }}>
+      <AdminOptionChips label="Tipo de contrato" value={contractTypeId} options={contractTypes.map((type) => ({ id: type.id, name: type.name }))} onChange={setContractTypeId} />
+      <AdminOptionChips label="Concepto" value={costConceptId} options={concepts.map((concept) => ({ id: concept.id, name: concept.name }))} onChange={setCostConceptId} />
+      <AdminOptionChips
+        label="Tipo de cálculo"
+        value={calculationType}
+        options={[
+          { id: "FIXED_AMOUNT", name: "Valor fijo" },
+          { id: "PERCENTAGE_OF_SALE", name: "% de venta" },
+          { id: "PERCENTAGE_OF_BASE_COST", name: "% costo base" },
+        ]}
+        onChange={setCalculationType}
+      />
+      <AdminField label="Valor" value={value} onChangeText={setValue} icon="calculator-outline" keyboardType="numeric" />
+      <AdminField label="Válido desde" value={validFrom} onChangeText={setValidFrom} icon="calendar-outline" />
+      <AdminField label="Válido hasta" value={validTo} onChangeText={setValidTo} icon="calendar-outline" />
+      <AdminOptionChips label="Estado" value={status} options={[{ id: "ACTIVO", name: "Activo" }, { id: "INACTIVO", name: "Inactivo" }]} onChange={setStatus} />
+    </AdminModalShell>
+  );
+}
+
+function AdminWorkwearModal({ visible, item, onClose, onSaved }: { visible: boolean; item: AdminData["workwearTypes"][number] | null; onClose: () => void; onSaved: () => void }) {
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [isActive, setIsActive] = useState(true);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (!visible) return;
+    setName(item?.name ?? "");
+    setDescription(item?.description ?? "");
+    setIsActive(item?.isActive ?? true);
+  }, [item, visible]);
+  return (
+    <AdminModalShell visible={visible} title={item ? "Editar dotación" : "Crear dotación"} saving={saving} onClose={onClose} onSave={async () => {
+      setSaving(true);
+      try {
+        await saveAdminWorkwearType({ id: item?.id, name, description, isActive });
+        await onSaved();
+      } catch (cause) {
+        Alert.alert("No fue posible guardar", errorMessage(cause));
+      } finally {
+        setSaving(false);
+      }
+    }}>
+      <AdminField label="Nombre" value={name} onChangeText={setName} icon="shirt-outline" />
+      <AdminField label="Descripción" value={description} onChangeText={setDescription} multiline />
+      <AdminSwitch label="Estado" value={isActive} onValueChange={setIsActive} />
+    </AdminModalShell>
+  );
+}
+
+function roleCodeFromLabel(label?: string): RoleCode | null {
+  if (label === "Administrador") return "ADMIN";
+  if (label === "Director/Gerente") return "DIRECTOR";
+  if (label === "Coordinador") return "COORDINATOR";
+  if (label === "Cliente") return "CLIENT";
+  return null;
+}
+
+function roleLabelFromCode(code: RoleCode) {
+  if (code === "ADMIN") return "Administrador";
+  if (code === "DIRECTOR") return "Director/Gerente";
+  if (code === "COORDINATOR") return "Coordinador";
+  return "Cliente";
+}
+
 function Users({
   currentUserId,
   data,
   onChanged,
+  onEdit,
 }: {
   currentUserId: string;
   data: AppData;
   onChanged: () => void;
+  onEdit?: (user: AppData["users"][number]) => void;
 }) {
   return (
     <Page>
@@ -4622,6 +5824,12 @@ function Users({
             />
           </View>
           <View style={styles.adminActions}>
+            {onEdit ? (
+              <Pressable style={styles.adminRoleButton} onPress={() => onEdit(user)}>
+                <Ionicons name="create-outline" size={17} color={C.navy} />
+                <Text style={styles.adminRoleText}>Editar usuario</Text>
+              </Pressable>
+            ) : null}
             <Pressable
               disabled={user.id === currentUserId}
               style={[styles.adminRoleButton, user.id === currentUserId && styles.buttonDisabled]}
@@ -5146,6 +6354,22 @@ const styles = StyleSheet.create({
   modalHeader: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 12 },
   modalTitle: { color: C.ink, fontSize: 20, fontWeight: "900" },
   closeButton: { width: 44, height: 44, borderRadius: 15, backgroundColor: C.white, borderWidth: 1, borderColor: C.line, alignItems: "center", justifyContent: "center" },
+  adminPortal: { flex: 1, flexDirection: "row", backgroundColor: C.bg },
+  adminSidebar: { width: 270, padding: 18, gap: 18, backgroundColor: C.white, borderRightWidth: 1, borderRightColor: C.line },
+  adminBrand: { flexDirection: "row", alignItems: "center", gap: 12, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: C.line },
+  adminSidebarList: { gap: 8, paddingBottom: 12 },
+  adminNavItem: { minHeight: 42, borderRadius: 13, paddingHorizontal: 12, flexDirection: "row", alignItems: "center", gap: 10 },
+  adminNavItemActive: { backgroundColor: C.navy },
+  adminNavText: { flex: 1, color: C.navy, fontSize: 12, fontWeight: "800" },
+  adminNavTextActive: { color: C.white },
+  adminMain: { flex: 1 },
+  adminTopbar: { minHeight: 84, paddingHorizontal: 24, paddingVertical: 14, backgroundColor: C.bg, borderBottomWidth: 1, borderBottomColor: C.line, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },
+  adminContent: { padding: 24, gap: 14, paddingBottom: 48 },
+  adminTableRow: { minHeight: 58, paddingHorizontal: 14, paddingVertical: 11, borderRadius: 15, backgroundColor: C.white, borderWidth: 1, borderColor: C.line, flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 8 },
+  adminCellMain: { flex: 1.3, color: C.ink, fontSize: 13, fontWeight: "900" },
+  adminCell: { flex: 1, color: C.muted, fontSize: 11, fontWeight: "700" },
+  adminModalCard: { width: "100%", maxWidth: 620, maxHeight: "88%", borderRadius: 22, padding: 18, backgroundColor: C.white, gap: 14 },
+  adminModalContent: { gap: 12, paddingBottom: 4 },
   adminActions: { gap: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: C.line },
   adminRoleButton: { flexDirection: "row", alignItems: "center", gap: 7 },
   adminRoleText: { color: C.navy, fontSize: 11, fontWeight: "800" },

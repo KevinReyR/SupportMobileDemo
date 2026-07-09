@@ -1,6 +1,7 @@
 import { supabase } from "../lib/supabase";
 import type {
   AdminUser,
+  AdminData,
   AppData,
   Assignment,
   ClientContractor,
@@ -326,7 +327,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
   let users: AdminUser[] = [];
   if (context.roleCode === "ADMIN") {
     const [profilesResult, rolesResult, clientsResult] = await Promise.all([
-      supabase.from("user_profiles").select("id,name,last_name,email,is_active").order("name"),
+      supabase.from("user_profiles").select("id,name,last_name,email,phone_number,is_active").order("name"),
       supabase.from("user_roles").select("user_id,roles(name)"),
       supabase.from("user_clients").select("user_id,clients(id,name)"),
     ]);
@@ -335,8 +336,11 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
     fail(clientsResult.error);
     users = (profilesResult.data ?? []).map((profile: any) => ({
       id: profile.id,
+      firstName: cleanText(profile.name),
+      lastName: cleanText(profile.last_name),
       name: `${cleanText(profile.name)} ${cleanText(profile.last_name)}`.trim(),
       email: profile.email,
+      phone: profile.phone_number,
       active: profile.is_active,
       role:
         firstRelation<any>(
@@ -891,5 +895,395 @@ export async function toggleUserClient(
         .delete()
         .eq("user_id", userId)
         .eq("client_id", clientId);
+  fail(result.error);
+}
+
+export async function createAdminUser(input: {
+  name: string;
+  lastName: string;
+  email: string;
+  phone: string;
+  roleCode: RoleCode;
+  clientIds: number[];
+}) {
+  const result = await supabase.functions.invoke("admin-create-user", {
+    body: input,
+  });
+  fail(result.error);
+  if ((result.data as any)?.error) throw new Error((result.data as any).error);
+  return result.data as { userId: string; email: string };
+}
+
+export async function updateAdminUserProfile(input: {
+  userId: string;
+  name: string;
+  lastName: string;
+  email: string;
+  phone: string;
+}) {
+  const result = await supabase
+    .from("user_profiles")
+    .update({
+      name: input.name.trim(),
+      last_name: input.lastName.trim(),
+      email: input.email.trim().toLowerCase(),
+      phone_number: input.phone.trim() || null,
+    })
+    .eq("id", input.userId);
+  fail(result.error);
+}
+
+export async function loadAdminData(): Promise<AdminData> {
+  const [
+    clientsResult,
+    areasResult,
+    shiftsResult,
+    serviceRatesResult,
+    extraRatesResult,
+    costConceptsResult,
+    costRulesResult,
+    workwearResult,
+    contractsResult,
+  ] = await Promise.all([
+    supabase.from("clients").select("id,name,document_number,is_active").order("name"),
+    supabase.from("area").select("id,name,client_id,is_active,clients(name)").order("name"),
+    supabase.from("shift").select("id,name,area_id,is_active,area(name,clients(name))").order("name"),
+    supabase
+      .from("service_rates")
+      .select("id,shift_id,sale_price,cost_price,valid_from,valid_to,shift(name,area(name,clients(name)))")
+      .order("valid_from", { ascending: false }),
+    supabase
+      .from("area_extra_hour_rates")
+      .select("id,area_id,sale_price,valid_from,valid_to,area(name,clients(name))")
+      .order("valid_from", { ascending: false }),
+    supabase.from("cost_concepts").select("id,code,name,description,category,status").order("category").order("code"),
+    supabase
+      .from("contract_type_cost_rules")
+      .select("id,contract_type_id,cost_concept_id,calculation_type,value,valid_from,valid_to,status,contract_type(name),cost_concepts(name)")
+      .order("valid_from", { ascending: false }),
+    supabase.from("workwear_type").select("id,name,description,is_active").order("name"),
+    supabase
+      .from("contractor_contract")
+      .select("id,contractor_id,contract_type,status_id,start_date,end_date,observations,contractor(name,last_name),contract_status(name),contract_type_ref:contract_type(name)")
+      .order("start_date", { ascending: false }),
+  ]);
+
+  [
+    clientsResult,
+    areasResult,
+    shiftsResult,
+    serviceRatesResult,
+    extraRatesResult,
+    costConceptsResult,
+    costRulesResult,
+    workwearResult,
+    contractsResult,
+  ].forEach((result) => fail(result.error));
+
+  return {
+    clients: (clientsResult.data ?? []).map((row: any) => ({
+      id: row.id,
+      name: cleanText(row.name),
+      documentNumber: row.document_number,
+      isActive: Boolean(row.is_active),
+    })),
+    areas: (areasResult.data ?? []).map((row: any) => ({
+      id: row.id,
+      name: cleanText(row.name),
+      clientId: row.client_id,
+      clientName: cleanText(firstRelation<any>(row.clients)?.name),
+      isActive: Boolean(row.is_active),
+    })),
+    shifts: (shiftsResult.data ?? []).map((row: any) => {
+      const area = firstRelation<any>(row.area);
+      return {
+        id: row.id,
+        name: cleanText(row.name),
+        areaId: row.area_id,
+        areaName: cleanText(area?.name),
+        clientName: cleanText(firstRelation<any>(area?.clients)?.name),
+        isActive: Boolean(row.is_active),
+      };
+    }),
+    serviceRates: (serviceRatesResult.data ?? []).map((row: any) => {
+      const shift = firstRelation<any>(row.shift);
+      const area = firstRelation<any>(shift?.area);
+      return {
+        id: row.id,
+        shiftId: row.shift_id,
+        shiftName: cleanText(shift?.name),
+        areaName: cleanText(area?.name),
+        clientName: cleanText(firstRelation<any>(area?.clients)?.name),
+        salePrice: Number(row.sale_price ?? 0),
+        costPrice: Number(row.cost_price ?? 0),
+        validFrom: row.valid_from,
+        validTo: row.valid_to,
+      };
+    }),
+    extraHourRates: (extraRatesResult.data ?? []).map((row: any) => {
+      const area = firstRelation<any>(row.area);
+      return {
+        id: row.id,
+        areaId: row.area_id,
+        areaName: cleanText(area?.name),
+        clientName: cleanText(firstRelation<any>(area?.clients)?.name),
+        salePrice: Number(row.sale_price ?? 0),
+        validFrom: row.valid_from,
+        validTo: row.valid_to,
+      };
+    }),
+    costConcepts: (costConceptsResult.data ?? []).map((row: any) => ({
+      id: row.id,
+      code: row.code,
+      name: cleanText(row.name),
+      description: cleanText(row.description) || null,
+      category: row.category,
+      status: row.status ?? "ACTIVO",
+    })),
+    costRules: (costRulesResult.data ?? []).map((row: any) => ({
+      id: row.id,
+      contractTypeId: row.contract_type_id,
+      contractTypeName: cleanText(firstRelation<any>(row.contract_type)?.name),
+      costConceptId: row.cost_concept_id,
+      costConceptName: cleanText(firstRelation<any>(row.cost_concepts)?.name),
+      calculationType: row.calculation_type,
+      value: Number(row.value ?? 0),
+      validFrom: row.valid_from,
+      validTo: row.valid_to,
+      status: row.status ?? "ACTIVO",
+    })),
+    workwearTypes: (workwearResult.data ?? []).map((row: any) => ({
+      id: row.id,
+      name: cleanText(row.name),
+      description: cleanText(row.description) || null,
+      isActive: row.is_active !== false,
+    })),
+    contracts: (contractsResult.data ?? []).map((row: any) => {
+      const contractor = firstRelation<any>(row.contractor);
+      return {
+        id: row.id,
+        contractorId: row.contractor_id,
+        contractorName: `${cleanText(contractor?.name)} ${cleanText(contractor?.last_name)}`.trim(),
+        contractTypeId: row.contract_type ?? null,
+        contractTypeName: cleanText(firstRelation<any>(row.contract_type_ref)?.name) || "Sin tipo",
+        statusId: row.status_id ?? null,
+        statusName: normalizeContractStatus(firstRelation<any>(row.contract_status)?.name),
+        startDate: row.start_date,
+        endDate: row.end_date,
+        observations: cleanText(row.observations) || null,
+      };
+    }),
+  };
+}
+
+export async function saveAdminClient(input: {
+  id?: number;
+  name: string;
+  documentNumber: string;
+  isActive: boolean;
+}) {
+  const payload = {
+    name: input.name.trim(),
+    document_number: input.documentNumber.trim() || null,
+    is_active: input.isActive,
+  };
+  const result = input.id
+    ? await supabase.from("clients").update(payload).eq("id", input.id)
+    : await supabase.from("clients").insert(payload);
+  fail(result.error);
+}
+
+export async function saveAdminArea(input: {
+  id?: number;
+  clientId: number;
+  name: string;
+  isActive: boolean;
+}) {
+  const payload = {
+    client_id: input.clientId,
+    name: input.name.trim(),
+    is_active: input.isActive,
+  };
+  const result = input.id
+    ? await supabase.from("area").update(payload).eq("id", input.id)
+    : await supabase.from("area").insert(payload);
+  fail(result.error);
+}
+
+export async function saveAdminShift(input: {
+  id?: number;
+  areaId: number;
+  name: string;
+  isActive: boolean;
+}) {
+  const payload = {
+    area_id: input.areaId,
+    name: input.name.trim(),
+    is_active: input.isActive,
+  };
+  const result = input.id
+    ? await supabase.from("shift").update(payload).eq("id", input.id)
+    : await supabase.from("shift").insert(payload);
+  fail(result.error);
+}
+
+export async function saveAdminServiceRate(input: {
+  id?: number;
+  shiftId: number;
+  salePrice: number;
+  costPrice: number;
+  validFrom: string;
+  validTo: string | null;
+}) {
+  const payload = {
+    shift_id: input.shiftId,
+    sale_price: input.salePrice,
+    cost_price: input.costPrice,
+    valid_from: input.validFrom,
+    valid_to: input.validTo || null,
+  };
+  const result = input.id
+    ? await supabase.from("service_rates").update(payload).eq("id", input.id)
+    : await supabase.from("service_rates").insert(payload);
+  fail(result.error);
+}
+
+export async function saveAdminExtraHourRate(input: {
+  id?: number;
+  areaId: number;
+  salePrice: number;
+  validFrom: string;
+  validTo: string | null;
+}) {
+  const payload = {
+    area_id: input.areaId,
+    sale_price: input.salePrice,
+    valid_from: input.validFrom,
+    valid_to: input.validTo || null,
+  };
+  const result = input.id
+    ? await supabase.from("area_extra_hour_rates").update(payload).eq("id", input.id)
+    : await supabase.from("area_extra_hour_rates").insert(payload);
+  fail(result.error);
+}
+
+export async function saveAdminCostConcept(input: {
+  id?: number;
+  code: string;
+  name: string;
+  description: string;
+  category: string;
+  status: "ACTIVO" | "INACTIVO";
+}) {
+  const payload = {
+    code: input.code.trim().toUpperCase().replace(/\s+/g, "_"),
+    name: input.name.trim(),
+    description: input.description.trim() || null,
+    category: input.category.trim().toUpperCase().replace(/\s+/g, "_"),
+    status: input.status,
+  };
+  const result = input.id
+    ? await supabase.from("cost_concepts").update(payload).eq("id", input.id)
+    : await supabase.from("cost_concepts").insert(payload);
+  fail(result.error);
+}
+
+export async function saveAdminCostRule(input: {
+  id?: number;
+  contractTypeId: number;
+  costConceptId: number;
+  calculationType: string;
+  value: number;
+  validFrom: string;
+  validTo: string | null;
+  status: "ACTIVO" | "INACTIVO";
+}) {
+  const payload = {
+    contract_type_id: input.contractTypeId,
+    cost_concept_id: input.costConceptId,
+    calculation_type: input.calculationType,
+    value: input.value,
+    valid_from: input.validFrom,
+    valid_to: input.validTo || null,
+    status: input.status,
+  };
+  const result = input.id
+    ? await supabase.from("contract_type_cost_rules").update(payload).eq("id", input.id)
+    : await supabase.from("contract_type_cost_rules").insert(payload);
+  fail(result.error);
+}
+
+export async function saveAdminWorkwearType(input: {
+  id?: number;
+  name: string;
+  description: string;
+  isActive: boolean;
+}) {
+  const payload = {
+    name: input.name.trim(),
+    description: input.description.trim() || null,
+    is_active: input.isActive,
+  };
+  const result = input.id
+    ? await supabase.from("workwear_type").update(payload).eq("id", input.id)
+    : await supabase.from("workwear_type").insert(payload);
+  fail(result.error);
+}
+
+export async function updateAdminContractor(input: {
+  id: number;
+  name: string;
+  lastName: string;
+  birthDate: string;
+  phone: string;
+  email: string;
+  rh: string;
+  eps: string;
+  arl: string;
+  shirtSize: string;
+  pantSize: string;
+  shoeSize: string;
+  available: boolean;
+}) {
+  const result = await supabase
+    .from("contractor")
+    .update({
+      name: input.name.trim(),
+      last_name: input.lastName.trim(),
+      birth_date: input.birthDate,
+      phone_number: input.phone.trim() || null,
+      email: input.email.trim().toLowerCase() || null,
+      rh: input.rh.trim() || null,
+      eps: input.eps.trim() || null,
+      arl: input.arl.trim() || null,
+      shirt_size: input.shirtSize.trim() || null,
+      pant_size: input.pantSize.trim() || null,
+      shoe_size: input.shoeSize.trim() || null,
+      disponibility: input.available,
+    })
+    .eq("id", input.id);
+  fail(result.error);
+}
+
+export async function saveAdminContract(input: {
+  id?: number;
+  contractorId: number;
+  contractTypeId: number;
+  statusId: number;
+  startDate: string;
+  endDate: string | null;
+  observations: string;
+}) {
+  const payload = {
+    contractor_id: input.contractorId,
+    contract_type: input.contractTypeId,
+    status_id: input.statusId,
+    start_date: input.startDate,
+    end_date: input.endDate || null,
+    observations: input.observations.trim() || null,
+  };
+  const result = input.id
+    ? await supabase.from("contractor_contract").update(payload).eq("id", input.id)
+    : await supabase.from("contractor_contract").insert(payload);
   fail(result.error);
 }
