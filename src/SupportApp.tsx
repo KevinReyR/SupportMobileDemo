@@ -1077,6 +1077,13 @@ function ContractReviewScreen({
   onSign: () => void;
 }) {
   const pdfUri = `${contract.contractUrl}#toolbar=0&navpanes=0&scrollbar=1`;
+  const openFullContract = async () => {
+    try {
+      await Linking.openURL(pdfUri);
+    } catch (cause) {
+      Alert.alert("No fue posible abrir el contrato", errorMessage(cause));
+    }
+  };
   return (
     <View style={styles.contractPage}>
       <View style={styles.publicHero}>
@@ -1089,11 +1096,17 @@ function ContractReviewScreen({
       </View>
       <View style={styles.contractViewerCard}>
         {Platform.OS === "web" ? (
-          React.createElement("iframe", {
-            src: pdfUri,
-            style: { width: "100%", height: "100%", border: "0", borderRadius: 18 },
-            title: "Contrato para firma",
-          } as any)
+          <View style={styles.contractWebViewer}>
+            <Ionicons name="document-text-outline" size={42} color={C.orange} />
+            <Text style={styles.errorTitle}>Contrato completo listo para revisar</Text>
+            <Text style={styles.subtitle}>
+              Ábrelo en una pestaña segura para leer todas las páginas antes de firmar.
+            </Text>
+            <Pressable style={styles.contractOpenButton} onPress={openFullContract}>
+              <Ionicons name="open-outline" size={18} color={C.white} />
+              <Text style={styles.primaryButtonText}>Abrir contrato completo</Text>
+            </Pressable>
+          </View>
         ) : (
           <PdfViewer uri={contract.contractUrl} onError={(message) => Alert.alert("PDF", message)} />
         )}
@@ -1128,37 +1141,57 @@ function SignatureModal({
   const canvasRef = useRef<any>(null);
   const drawingRef = useRef(false);
   const hasSignatureRef = useRef(false);
+  const activePointerIdRef = useRef<number | null>(null);
   const [hasSignature, setHasSignature] = useState(false);
 
+  const prepareCanvas = () => {
+    const canvas = canvasRef.current;
+    const rect = canvas?.getBoundingClientRect?.();
+    const context = canvas?.getContext?.("2d");
+    if (!canvas || !rect || !context) return null;
+    const pixelRatio = Math.max(1, Math.min(3, Number((globalThis as any).devicePixelRatio ?? 1)));
+    const nextWidth = Math.max(1, Math.round(rect.width * pixelRatio));
+    const nextHeight = Math.max(1, Math.round(rect.height * pixelRatio));
+    if (canvas.width !== nextWidth || canvas.height !== nextHeight) {
+      canvas.width = nextWidth;
+      canvas.height = nextHeight;
+    }
+    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    return { canvas, context, rect };
+  };
   const pointFromEvent = (event: any) => {
     const canvas = canvasRef.current;
     const rect = canvas?.getBoundingClientRect?.();
-    const source = event?.touches?.[0] ?? event;
-    return { x: source.clientX - rect.left, y: source.clientY - rect.top };
+    if (!rect) return { x: 0, y: 0 };
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
   };
   const canvasContext = () => canvasRef.current?.getContext?.("2d");
   const clear = () => {
-    const canvas = canvasRef.current;
-    const context = canvasContext();
-    if (!canvas || !context) return;
-    context.clearRect(0, 0, canvas.width, canvas.height);
+    const prepared = prepareCanvas();
+    if (!prepared) return;
+    const { context, rect } = prepared;
+    context.clearRect(0, 0, rect.width, rect.height);
     context.fillStyle = "#FFFFFF";
-    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.fillRect(0, 0, rect.width, rect.height);
     hasSignatureRef.current = false;
     setHasSignature(false);
   };
   const begin = (event: any) => {
     if (Platform.OS !== "web") return;
     event.preventDefault?.();
+    const prepared = prepareCanvas();
     const context = canvasContext();
-    if (!context) return;
+    if (!context || !prepared) return;
     const point = pointFromEvent(event);
+    activePointerIdRef.current = typeof event.pointerId === "number" ? event.pointerId : null;
+    prepared.canvas.setPointerCapture?.(event.pointerId);
     drawingRef.current = true;
     context.beginPath();
     context.moveTo(point.x, point.y);
   };
   const move = (event: any) => {
     if (!drawingRef.current || Platform.OS !== "web") return;
+    if (activePointerIdRef.current !== null && event.pointerId !== activePointerIdRef.current) return;
     event.preventDefault?.();
     const context = canvasContext();
     if (!context) return;
@@ -1172,7 +1205,10 @@ function SignatureModal({
     hasSignatureRef.current = true;
     setHasSignature(true);
   };
-  const end = () => {
+  const end = (event?: any) => {
+    if (activePointerIdRef.current !== null && event?.pointerId !== activePointerIdRef.current) return;
+    canvasRef.current?.releasePointerCapture?.(event?.pointerId);
+    activePointerIdRef.current = null;
     drawingRef.current = false;
   };
   const confirm = () => {
@@ -1207,14 +1243,11 @@ function SignatureModal({
             React.createElement("canvas", {
               ref: canvasRef,
               width: 760,
-              height: 250,
-              onMouseDown: begin,
-              onMouseMove: move,
-              onMouseUp: end,
-              onMouseLeave: end,
-              onTouchStart: begin,
-              onTouchMove: move,
-              onTouchEnd: end,
+              height: 230,
+              onPointerDown: begin,
+              onPointerMove: move,
+              onPointerUp: end,
+              onPointerCancel: end,
               style: {
                 width: "100%",
                 height: 230,
@@ -5107,6 +5140,8 @@ const styles = StyleSheet.create({
   previewRetryButton: { width: "100%", maxWidth: 280, flexDirection: "row" },
   contractPage: { flex: 1, padding: 18, gap: 12, backgroundColor: C.bg },
   contractViewerCard: { flex: 1, minHeight: 420, borderRadius: 20, overflow: "hidden", backgroundColor: C.white, borderWidth: 1, borderColor: C.line },
+  contractWebViewer: { flex: 1, alignItems: "center", justifyContent: "center", gap: 14, padding: 26, backgroundColor: C.white },
+  contractOpenButton: { minHeight: 52, borderRadius: 15, paddingHorizontal: 18, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, backgroundColor: C.navy },
   signatureCard: { width: "100%", maxWidth: 760, maxHeight: "92%", borderRadius: 22, padding: 18, backgroundColor: C.white, gap: 14 },
   modalHeader: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 12 },
   modalTitle: { color: C.ink, fontSize: 20, fontWeight: "900" },
