@@ -5461,6 +5461,7 @@ function AdminUserModal({
   const [roleCode, setRoleCode] = useState<RoleCode>("COORDINATOR");
   const [clientIds, setClientIds] = useState<number[]>([]);
   const [saving, setSaving] = useState(false);
+  const [modalError, setModalError] = useState("");
 
   useEffect(() => {
     if (!visible) return;
@@ -5470,14 +5471,16 @@ function AdminUserModal({
     setPhone(user?.phone ?? "");
     setRoleCode(roleCodeFromLabel(user?.role) ?? "COORDINATOR");
     setClientIds(user?.clientIds ?? []);
+    setModalError("");
   }, [user, visible]);
 
   const save = async () => {
     if (!firstName.trim() || !lastName.trim() || !email.trim()) {
-      Alert.alert("Datos incompletos", "Nombre, apellido y correo son obligatorios.");
+      setModalError("Nombre, apellido y correo son obligatorios.");
       return;
     }
     setSaving(true);
+    setModalError("");
     try {
       if (user) {
         await updateAdminUserProfile({ userId: user.id, name: firstName, lastName, email, phone });
@@ -5491,9 +5494,13 @@ function AdminUserModal({
       } else {
         await createAdminUser({ name: firstName, lastName, email, phone, roleCode, clientIds });
       }
+      Alert.alert(
+        user ? "Usuario actualizado" : "Invitación enviada",
+        user ? "Los datos del usuario fueron guardados." : "El usuario fue creado y recibirá la invitación por correo.",
+      );
       await onSaved();
     } catch (cause) {
-      Alert.alert("No fue posible guardar", errorMessage(cause));
+      setModalError(errorMessage(cause));
     } finally {
       setSaving(false);
     }
@@ -5505,6 +5512,7 @@ function AdminUserModal({
       <AdminField label="Apellido" value={lastName} onChangeText={setLastName} icon="person-outline" />
       <AdminField label="Correo" value={email} onChangeText={setEmail} icon="mail-outline" keyboardType="email-address" />
       <AdminField label="Teléfono" value={phone} onChangeText={setPhone} icon="call-outline" keyboardType="phone-pad" />
+      {modalError ? <Notice icon="alert-circle-outline" tone="error" text={modalError} /> : null}
       <AdminOptionChips
         label="Perfil"
         value={roleCode}

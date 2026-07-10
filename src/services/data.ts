@@ -909,7 +909,14 @@ export async function createAdminUser(input: {
   const result = await supabase.functions.invoke("admin-create-user", {
     body: input,
   });
-  fail(result.error);
+  if (result.error) {
+    const context = (result.error as any).context;
+    if (context?.json) {
+      const body = await context.json().catch(() => null);
+      if (body?.error) throw new Error(body.error);
+    }
+    throw result.error;
+  }
   if ((result.data as any)?.error) throw new Error((result.data as any).error);
   return result.data as { userId: string; email: string };
 }

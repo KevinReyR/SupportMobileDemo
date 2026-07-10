@@ -1,13 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 
-const roleIds: Record<string, number> = {
-  ADMIN: 1,
-  COORDINATOR: 2,
-  CLIENT: 3,
-  DIRECTOR: 4,
-};
-
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return jsonResponse({ error: "Method not allowed" }, 405);
@@ -45,13 +38,24 @@ Deno.serve(async (req) => {
 
   if (!email || !email.includes("@")) return jsonResponse({ error: "Correo no válido." }, 400);
   if (!name || !lastName) return jsonResponse({ error: "Nombre y apellido son obligatorios." }, 400);
-  if (!roleIds[roleCode]) return jsonResponse({ error: "Rol no válido." }, 400);
+
+  const { data: role, error: roleLookupError } = await serviceClient
+    .from("roles")
+    .select("id")
+    .eq("code", roleCode)
+    .eq("is_active", true)
+    .single();
+  if (roleLookupError || !role) return jsonResponse({ error: "Rol no válido." }, 400);
 
   const { data: created, error: inviteError } = await serviceClient.auth.admin.inviteUserByEmail(email, {
     data: { name, last_name: lastName, phone_number: phone },
     redirectTo,
   });
-  if (inviteError) return jsonResponse({ error: inviteError.message }, 400);
+  if (inviteError) {
+    return jsonResponse({
+      error: `No fue posible enviar la invitación. Verifica el SMTP de Supabase/Resend. Detalle: ${inviteError.message}`,
+    }, 400);
+  }
 
   const userId = created.user?.id;
   if (!userId) return jsonResponse({ error: "No fue posible crear el usuario." }, 500);
@@ -69,7 +73,7 @@ Deno.serve(async (req) => {
   await serviceClient.from("user_roles").delete().eq("user_id", userId);
   const { error: userRoleError } = await serviceClient.from("user_roles").insert({
     user_id: userId,
-    role_id: roleIds[roleCode],
+    role_id: role.id,
   });
   if (userRoleError) return jsonResponse({ error: userRoleError.message }, 400);
 
