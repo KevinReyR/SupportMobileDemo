@@ -906,8 +906,16 @@ export async function createAdminUser(input: {
   roleCode: RoleCode;
   clientIds: number[];
 }) {
+  const sessionResult = await supabase.auth.getSession();
+  const accessToken = sessionResult.data.session?.access_token;
+  if (!accessToken) {
+    throw new Error("No hay una sesión activa de Administrador. Cierra sesión e ingresa nuevamente.");
+  }
   const result = await supabase.functions.invoke("admin-create-user", {
     body: input,
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
   });
   if (result.error) {
     const context = (result.error as any).context;
