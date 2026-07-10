@@ -5286,15 +5286,155 @@ function AdminCatalogList<T extends { id: number; name: string }>({
 }
 
 function AdminRatesModule({ adminData, onChanged }: { adminData: AdminData; onChanged: () => void }) {
+  const [rateTab, setRateTab] = useState<"SHIFT" | "EXTRA">("SHIFT");
+  const [clientId, setClientId] = useState(0);
+  const [areaId, setAreaId] = useState(0);
+  const [shiftId, setShiftId] = useState(0);
+  const [rateStatus, setRateStatus] = useState<"ALL" | "ACTIVE" | "HISTORICAL">("ACTIVE");
   const [shiftRate, setShiftRate] = useState<AdminData["serviceRates"][number] | null | "new">(null);
   const [extraRate, setExtraRate] = useState<AdminData["extraHourRates"][number] | null | "new">(null);
+
+  const areaOptions = clientId ? adminData.areas.filter((area) => area.clientId === clientId) : [];
+  const shiftOptions = areaId ? adminData.shifts.filter((shift) => shift.areaId === areaId) : [];
+  const matchesStatus = (validTo: string | null) => rateStatus === "ALL" || (rateStatus === "ACTIVE" ? !validTo : Boolean(validTo));
+  const visibleShiftRates = adminData.serviceRates.filter((rate) =>
+    (!clientId || rate.clientId === clientId)
+    && (!areaId || rate.areaId === areaId)
+    && (!shiftId || rate.shiftId === shiftId)
+    && matchesStatus(rate.validTo),
+  );
+  const visibleExtraRates = adminData.extraHourRates.filter((rate) =>
+    (!clientId || rate.clientId === clientId)
+    && (!areaId || rate.areaId === areaId)
+    && matchesStatus(rate.validTo),
+  );
+  const visibleRates = rateTab === "SHIFT" ? visibleShiftRates : visibleExtraRates;
+
+  const resetFilters = () => {
+    setClientId(0);
+    setAreaId(0);
+    setShiftId(0);
+    setRateStatus("ACTIVE");
+  };
+
   return (
     <>
-      <AdminCatalogList title="Tarifas por turno" rows={adminData.serviceRates.map((rate) => ({ ...rate, name: `${rate.clientName} / ${rate.areaName} / ${rate.shiftName}` }))} onNew={() => setShiftRate("new")} onEdit={setShiftRate as any} subtitle={(item) => `${formatCurrency(item.salePrice)} venta ⋅ ${formatCurrency(item.costPrice)} costo ⋅ desde ${item.validFrom}`} active={(item) => !item.validTo} />
-      <AdminCatalogList title="Horas extra por área" rows={adminData.extraHourRates.map((rate) => ({ ...rate, name: `${rate.clientName} / ${rate.areaName}` }))} onNew={() => setExtraRate("new")} onEdit={setExtraRate as any} subtitle={(item) => `${formatCurrency(item.salePrice)} ⋅ desde ${item.validFrom}`} active={(item) => !item.validTo} />
-      <AdminServiceRateModal item={shiftRate === "new" ? null : shiftRate} shifts={adminData.shifts} visible={shiftRate !== null} onClose={() => setShiftRate(null)} onSaved={async () => { setShiftRate(null); await onChanged(); }} />
-      <AdminExtraRateModal item={extraRate === "new" ? null : extraRate} areas={adminData.areas} visible={extraRate !== null} onClose={() => setExtraRate(null)} onSaved={async () => { setExtraRate(null); await onChanged(); }} />
+      <View style={styles.adminRateTabs}>
+        <AdminRateTab label="Tarifas por turno" icon="time-outline" selected={rateTab === "SHIFT"} onPress={() => setRateTab("SHIFT")} />
+        <AdminRateTab label="Horas extra por área" icon="timer-outline" selected={rateTab === "EXTRA"} onPress={() => { setRateTab("EXTRA"); setShiftId(0); }} />
+      </View>
+
+      <FormCard title="Filtros">
+        <View style={styles.adminRateFilterGrid}>
+          <AdminSelectField
+            label="Empresa"
+            icon="business-outline"
+            value={clientId}
+            options={[{ id: 0, name: "Todas las empresas" }, ...adminData.clients.map((client) => ({ id: client.id, name: client.name }))]}
+            onChange={(next) => { setClientId(next); setAreaId(0); setShiftId(0); }}
+          />
+          <AdminSelectField
+            label="Área"
+            icon="location-outline"
+            value={areaId}
+            disabled={!clientId}
+            options={[{ id: 0, name: "Todas las áreas" }, ...areaOptions.map((area) => ({ id: area.id, name: area.name }))]}
+            onChange={(next) => { setAreaId(next); setShiftId(0); }}
+          />
+          {rateTab === "SHIFT" && (
+            <AdminSelectField
+              label="Turno"
+              icon="time-outline"
+              value={shiftId}
+              disabled={!areaId}
+              disabledText="Selecciona un área primero"
+              options={[{ id: 0, name: "Todos los turnos" }, ...shiftOptions.map((shift) => ({ id: shift.id, name: shift.name }))]}
+              onChange={setShiftId}
+            />
+          )}
+          <AdminSelectField
+            label="Estado"
+            icon="options-outline"
+            value={rateStatus === "ALL" ? 0 : rateStatus === "ACTIVE" ? 1 : 2}
+            options={[{ id: 0, name: "Todas" }, { id: 1, name: "Vigentes" }, { id: 2, name: "Históricas" }]}
+            onChange={(next) => setRateStatus(next === 0 ? "ALL" : next === 1 ? "ACTIVE" : "HISTORICAL")}
+          />
+        </View>
+        <View style={styles.between}>
+          <Text style={styles.caption}>{visibleRates.length} resultados</Text>
+          <Pressable style={styles.smallActionButton} onPress={resetFilters}>
+            <Ionicons name="refresh-outline" size={16} color={C.navy} />
+            <Text style={styles.smallActionText}>Limpiar filtros</Text>
+          </Pressable>
+        </View>
+      </FormCard>
+
+      <FormCard title={rateTab === "SHIFT" ? "Tarifas por turno" : "Horas extra por área"}>
+        <View style={styles.between}>
+          <Text style={styles.caption}>{visibleRates.length} registros</Text>
+          <Pressable style={styles.smallActionButton} onPress={() => rateTab === "SHIFT" ? setShiftRate("new") : setExtraRate("new")}>
+            <Ionicons name="add-circle-outline" size={16} color={C.navy} />
+            <Text style={styles.smallActionText}>Crear tarifa</Text>
+          </Pressable>
+        </View>
+        {visibleRates.length === 0 ? (
+          <EmptyState icon="cash-outline" text="No hay tarifas para los filtros seleccionados." />
+        ) : rateTab === "SHIFT" ? (
+          visibleShiftRates.map((rate) => (
+            <AdminRateCard key={rate.id} title={rate.shiftName} context={`${rate.clientName} ⋅ ${rate.areaName}`} salePrice={rate.salePrice} costPrice={rate.costPrice} validFrom={rate.validFrom} validTo={rate.validTo} onPress={() => setShiftRate(rate)} />
+          ))
+        ) : (
+          visibleExtraRates.map((rate) => (
+            <AdminRateCard key={rate.id} title={rate.areaName} context={rate.clientName} salePrice={rate.salePrice} validFrom={rate.validFrom} validTo={rate.validTo} onPress={() => setExtraRate(rate)} />
+          ))
+        )}
+      </FormCard>
+
+      <AdminServiceRateModal item={shiftRate === "new" ? null : shiftRate} clients={adminData.clients} areas={adminData.areas} shifts={adminData.shifts} initialClientId={clientId} initialAreaId={areaId} visible={shiftRate !== null} onClose={() => setShiftRate(null)} onSaved={async () => { setShiftRate(null); await onChanged(); }} />
+      <AdminExtraRateModal item={extraRate === "new" ? null : extraRate} clients={adminData.clients} areas={adminData.areas} initialClientId={clientId} initialAreaId={areaId} visible={extraRate !== null} onClose={() => setExtraRate(null)} onSaved={async () => { setExtraRate(null); await onChanged(); }} />
     </>
+  );
+}
+
+function AdminRateTab({ label, icon, selected, onPress }: { label: string; icon: IconName; selected: boolean; onPress: () => void }) {
+  return (
+    <Pressable style={[styles.adminRateTab, selected && styles.adminRateTabActive]} onPress={onPress}>
+      <Ionicons name={icon} size={18} color={selected ? C.white : C.navy} />
+      <Text style={[styles.adminRateTabText, selected && styles.adminRateTabTextActive]}>{label}</Text>
+    </Pressable>
+  );
+}
+
+function AdminSelectField({ label, icon, value, options, disabled, disabledText = "Selecciona una empresa primero", onChange }: { label: string; icon: IconName; value: number; options: { id: number; name: string }[]; disabled?: boolean; disabledText?: string; onChange: (value: number) => void }) {
+  const [visible, setVisible] = useState(false);
+  const selected = options.find((option) => option.id === value);
+  return (
+    <View style={styles.adminRateFilterField}>
+      <Choice label={label} icon={icon} value={disabled ? disabledText : selected?.name ?? "Seleccionar"} disabled={disabled} onPress={() => setVisible(true)} />
+      <DropdownModal visible={visible} title={`Selecciona ${label.toLocaleLowerCase("es")}`} options={options} selectedId={value} searchable={options.length > 8} onClose={() => setVisible(false)} onSelect={(next) => { onChange(next); setVisible(false); }} />
+    </View>
+  );
+}
+
+function AdminRateCard({ title, context, salePrice, costPrice, validFrom, validTo, onPress }: { title: string; context: string; salePrice: number; costPrice?: number; validFrom: string; validTo: string | null; onPress: () => void }) {
+  const active = !validTo;
+  return (
+    <Pressable style={styles.adminRateCard} onPress={onPress}>
+      <View style={styles.adminRateIcon}>
+        <Ionicons name="cash-outline" size={20} color={C.navy} />
+      </View>
+      <View style={styles.flex}>
+        <Text style={styles.adminCellMain}>{title}</Text>
+        <Text style={styles.caption}>{context}</Text>
+        <Text style={styles.adminRateValidity}>Desde {validFrom}{validTo ? ` hasta ${validTo}` : " ⋅ Sin fecha final"}</Text>
+      </View>
+      <View style={styles.adminRateAmounts}>
+        <Text style={styles.adminRateSale}>{formatCurrency(salePrice)}</Text>
+        <Text style={styles.caption}>{costPrice === undefined ? "Hora extra" : `${formatCurrency(costPrice)} costo`}</Text>
+        <StatusPill good={active} text={active ? "VIGENTE" : "HISTÓRICA"} />
+      </View>
+      <Ionicons name="chevron-forward" size={18} color={C.muted} />
+    </Pressable>
   );
 }
 
@@ -5782,7 +5922,9 @@ function AdminShiftModal({ visible, item, areas, onClose, onSaved }: { visible: 
   );
 }
 
-function AdminServiceRateModal({ visible, item, shifts, onClose, onSaved }: { visible: boolean; item: AdminData["serviceRates"][number] | null; shifts: AdminData["shifts"]; onClose: () => void; onSaved: () => void }) {
+function AdminServiceRateModal({ visible, item, clients, areas, shifts, initialClientId, initialAreaId, onClose, onSaved }: { visible: boolean; item: AdminData["serviceRates"][number] | null; clients: AdminData["clients"]; areas: AdminData["areas"]; shifts: AdminData["shifts"]; initialClientId: number; initialAreaId: number; onClose: () => void; onSaved: () => void }) {
+  const [clientId, setClientId] = useState(0);
+  const [areaId, setAreaId] = useState(0);
   const [shiftId, setShiftId] = useState(0);
   const [salePrice, setSalePrice] = useState("");
   const [costPrice, setCostPrice] = useState("");
@@ -5791,16 +5933,25 @@ function AdminServiceRateModal({ visible, item, shifts, onClose, onSaved }: { vi
   const [saving, setSaving] = useState(false);
   useEffect(() => {
     if (!visible) return;
-    setShiftId(item?.shiftId ?? shifts[0]?.id ?? 0);
+    const nextClientId = item?.clientId || initialClientId || clients[0]?.id || 0;
+    const availableAreas = areas.filter((area) => area.clientId === nextClientId);
+    const nextAreaId = item?.areaId ?? (initialAreaId && availableAreas.some((area) => area.id === initialAreaId) ? initialAreaId : availableAreas[0]?.id ?? 0);
+    const availableShifts = shifts.filter((shift) => shift.areaId === nextAreaId);
+    setClientId(nextClientId);
+    setAreaId(nextAreaId);
+    setShiftId(item?.shiftId ?? availableShifts[0]?.id ?? 0);
     setSalePrice(String(item?.salePrice ?? ""));
     setCostPrice(String(item?.costPrice ?? ""));
     setValidFrom(item?.validFrom ?? todayIso());
     setValidTo(item?.validTo ?? "");
-  }, [item, shifts, visible]);
+  }, [areas, clients, initialAreaId, initialClientId, item, shifts, visible]);
+  const availableAreas = areas.filter((area) => area.clientId === clientId);
+  const availableShifts = shifts.filter((shift) => shift.areaId === areaId);
   return (
     <AdminModalShell visible={visible} title={item ? "Editar tarifa" : "Crear tarifa"} saving={saving} onClose={onClose} onSave={async () => {
       setSaving(true);
       try {
+        if (!clientId || !areaId || !shiftId) throw new Error("Selecciona empresa, área y turno.");
         await saveAdminServiceRate({ id: item?.id, shiftId, salePrice: Number(salePrice), costPrice: Number(costPrice), validFrom, validTo: validTo || null });
         await onSaved();
       } catch (cause) {
@@ -5809,7 +5960,15 @@ function AdminServiceRateModal({ visible, item, shifts, onClose, onSaved }: { vi
         setSaving(false);
       }
     }}>
-      <AdminOptionChips label="Turno" value={shiftId} options={shifts.map((shift) => ({ id: shift.id, name: `${shift.clientName} / ${shift.areaName} / ${shift.name}` }))} onChange={setShiftId} />
+      <AdminSelectField label="Empresa" icon="business-outline" value={clientId} options={clients.map((client) => ({ id: client.id, name: client.name }))} onChange={(next) => {
+        const nextAreas = areas.filter((area) => area.clientId === next);
+        const nextArea = nextAreas[0]?.id ?? 0;
+        setClientId(next);
+        setAreaId(nextArea);
+        setShiftId(shifts.find((shift) => shift.areaId === nextArea)?.id ?? 0);
+      }} />
+      <AdminSelectField label="Área" icon="location-outline" value={areaId} disabled={!clientId} options={availableAreas.map((area) => ({ id: area.id, name: area.name }))} onChange={(next) => { setAreaId(next); setShiftId(shifts.find((shift) => shift.areaId === next)?.id ?? 0); }} />
+      <AdminSelectField label="Turno" icon="time-outline" value={shiftId} disabled={!areaId} disabledText="Selecciona un área primero" options={availableShifts.map((shift) => ({ id: shift.id, name: shift.name }))} onChange={setShiftId} />
       <AdminField label="Precio venta" value={salePrice} onChangeText={setSalePrice} icon="cash-outline" keyboardType="numeric" />
       <AdminField label="Costo" value={costPrice} onChangeText={setCostPrice} icon="receipt-outline" keyboardType="numeric" />
       <AdminField label="Válido desde" value={validFrom} onChangeText={setValidFrom} icon="calendar-outline" />
@@ -5818,7 +5977,8 @@ function AdminServiceRateModal({ visible, item, shifts, onClose, onSaved }: { vi
   );
 }
 
-function AdminExtraRateModal({ visible, item, areas, onClose, onSaved }: { visible: boolean; item: AdminData["extraHourRates"][number] | null; areas: AdminData["areas"]; onClose: () => void; onSaved: () => void }) {
+function AdminExtraRateModal({ visible, item, clients, areas, initialClientId, initialAreaId, onClose, onSaved }: { visible: boolean; item: AdminData["extraHourRates"][number] | null; clients: AdminData["clients"]; areas: AdminData["areas"]; initialClientId: number; initialAreaId: number; onClose: () => void; onSaved: () => void }) {
+  const [clientId, setClientId] = useState(0);
   const [areaId, setAreaId] = useState(0);
   const [salePrice, setSalePrice] = useState("");
   const [validFrom, setValidFrom] = useState(todayIso());
@@ -5826,15 +5986,20 @@ function AdminExtraRateModal({ visible, item, areas, onClose, onSaved }: { visib
   const [saving, setSaving] = useState(false);
   useEffect(() => {
     if (!visible) return;
-    setAreaId(item?.areaId ?? areas[0]?.id ?? 0);
+    const nextClientId = item?.clientId || initialClientId || clients[0]?.id || 0;
+    const availableAreas = areas.filter((area) => area.clientId === nextClientId);
+    setClientId(nextClientId);
+    setAreaId(item?.areaId ?? (initialAreaId && availableAreas.some((area) => area.id === initialAreaId) ? initialAreaId : availableAreas[0]?.id ?? 0));
     setSalePrice(String(item?.salePrice ?? ""));
     setValidFrom(item?.validFrom ?? todayIso());
     setValidTo(item?.validTo ?? "");
-  }, [areas, item, visible]);
+  }, [areas, clients, initialAreaId, initialClientId, item, visible]);
+  const availableAreas = areas.filter((area) => area.clientId === clientId);
   return (
     <AdminModalShell visible={visible} title={item ? "Editar hora extra" : "Crear hora extra"} saving={saving} onClose={onClose} onSave={async () => {
       setSaving(true);
       try {
+        if (!clientId || !areaId) throw new Error("Selecciona empresa y área.");
         await saveAdminExtraHourRate({ id: item?.id, areaId, salePrice: Number(salePrice), validFrom, validTo: validTo || null });
         await onSaved();
       } catch (cause) {
@@ -5843,7 +6008,8 @@ function AdminExtraRateModal({ visible, item, areas, onClose, onSaved }: { visib
         setSaving(false);
       }
     }}>
-      <AdminOptionChips label="Área" value={areaId} options={areas.map((area) => ({ id: area.id, name: `${area.clientName} / ${area.name}` }))} onChange={setAreaId} />
+      <AdminSelectField label="Empresa" icon="business-outline" value={clientId} options={clients.map((client) => ({ id: client.id, name: client.name }))} onChange={(next) => { setClientId(next); setAreaId(areas.find((area) => area.clientId === next)?.id ?? 0); }} />
+      <AdminSelectField label="Área" icon="location-outline" value={areaId} disabled={!clientId} options={availableAreas.map((area) => ({ id: area.id, name: area.name }))} onChange={setAreaId} />
       <AdminField label="Precio venta hora extra" value={salePrice} onChangeText={setSalePrice} icon="cash-outline" keyboardType="numeric" />
       <AdminField label="Válido desde" value={validFrom} onChangeText={setValidFrom} icon="calendar-outline" />
       <AdminField label="Válido hasta" value={validTo} onChangeText={setValidTo} icon="calendar-outline" />
@@ -6567,6 +6733,18 @@ const styles = StyleSheet.create({
   adminMain: { flex: 1 },
   adminTopbar: { minHeight: 84, paddingHorizontal: 24, paddingVertical: 14, backgroundColor: C.bg, borderBottomWidth: 1, borderBottomColor: C.line, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },
   adminContent: { padding: 24, gap: 14, paddingBottom: 48 },
+  adminRateTabs: { flexDirection: "row", gap: 10, padding: 5, borderRadius: 17, backgroundColor: C.white, borderWidth: 1, borderColor: C.line },
+  adminRateTab: { flex: 1, minHeight: 44, borderRadius: 13, paddingHorizontal: 14, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
+  adminRateTabActive: { backgroundColor: C.navy },
+  adminRateTabText: { color: C.navy, fontSize: 11, fontWeight: "800" },
+  adminRateTabTextActive: { color: C.white },
+  adminRateFilterGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  adminRateFilterField: { flex: 1, minWidth: 210 },
+  adminRateCard: { minHeight: 82, padding: 14, borderRadius: 16, backgroundColor: "#FBFCFE", borderWidth: 1, borderColor: C.line, flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 8 },
+  adminRateIcon: { width: 42, height: 42, borderRadius: 13, backgroundColor: C.blueBg, alignItems: "center", justifyContent: "center" },
+  adminRateValidity: { color: C.muted, fontSize: 9, fontWeight: "600", marginTop: 4 },
+  adminRateAmounts: { minWidth: 138, alignItems: "flex-end", gap: 4 },
+  adminRateSale: { color: C.navy, fontSize: 14, fontWeight: "900" },
   adminTableRow: { minHeight: 58, paddingHorizontal: 14, paddingVertical: 11, borderRadius: 15, backgroundColor: C.white, borderWidth: 1, borderColor: C.line, flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 8 },
   adminCellMain: { flex: 1.3, color: C.ink, fontSize: 13, fontWeight: "900" },
   adminCell: { flex: 1, color: C.muted, fontSize: 11, fontWeight: "700" },

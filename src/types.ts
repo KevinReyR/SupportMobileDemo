@@ -189,6 +189,7 @@ export interface AdminArea extends NamedRecord {
 }
 
 export interface AdminShift extends NamedRecord {
+  clientId: number;
   areaId: number;
   areaName: string;
   clientName: string;
@@ -197,6 +198,8 @@ export interface AdminShift extends NamedRecord {
 
 export interface AdminServiceRate {
   id: number;
+  clientId: number;
+  areaId: number;
   shiftId: number;
   shiftName: string;
   areaName: string;
@@ -209,6 +212,7 @@ export interface AdminServiceRate {
 
 export interface AdminExtraHourRate {
   id: number;
+  clientId: number;
   areaId: number;
   areaName: string;
   clientName: string;

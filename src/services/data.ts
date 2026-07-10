@@ -964,14 +964,14 @@ export async function loadAdminData(): Promise<AdminData> {
   ] = await Promise.all([
     supabase.from("clients").select("id,name,document_number,is_active").order("name"),
     supabase.from("area").select("id,name,client_id,is_active,clients(name)").order("name"),
-    supabase.from("shift").select("id,name,area_id,is_active,area(name,clients(name))").order("name"),
+    supabase.from("shift").select("id,name,area_id,is_active,area(name,client_id,clients(name))").order("name"),
     supabase
       .from("service_rates")
-      .select("id,shift_id,sale_price,cost_price,valid_from,valid_to,shift(name,area(name,clients(name)))")
+      .select("id,shift_id,sale_price,cost_price,valid_from,valid_to,shift(name,area_id,area(name,client_id,clients(name)))")
       .order("valid_from", { ascending: false }),
     supabase
       .from("area_extra_hour_rates")
-      .select("id,area_id,sale_price,valid_from,valid_to,area(name,clients(name))")
+      .select("id,area_id,sale_price,valid_from,valid_to,area(name,client_id,clients(name))")
       .order("valid_from", { ascending: false }),
     supabase.from("cost_concepts").select("id,code,name,description,category,status").order("category").order("code"),
     supabase
@@ -1016,6 +1016,7 @@ export async function loadAdminData(): Promise<AdminData> {
       return {
         id: row.id,
         name: cleanText(row.name),
+        clientId: area?.client_id,
         areaId: row.area_id,
         areaName: cleanText(area?.name),
         clientName: cleanText(firstRelation<any>(area?.clients)?.name),
@@ -1027,6 +1028,8 @@ export async function loadAdminData(): Promise<AdminData> {
       const area = firstRelation<any>(shift?.area);
       return {
         id: row.id,
+        clientId: area?.client_id,
+        areaId: shift?.area_id,
         shiftId: row.shift_id,
         shiftName: cleanText(shift?.name),
         areaName: cleanText(area?.name),
@@ -1041,6 +1044,7 @@ export async function loadAdminData(): Promise<AdminData> {
       const area = firstRelation<any>(row.area);
       return {
         id: row.id,
+        clientId: area?.client_id,
         areaId: row.area_id,
         areaName: cleanText(area?.name),
         clientName: cleanText(firstRelation<any>(area?.clients)?.name),
