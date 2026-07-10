@@ -321,6 +321,34 @@ function onboardingTokenFromUrl() {
   return new URLSearchParams(hashQuery).get("token") ?? "";
 }
 
+function resetPasswordParamsFromUrl() {
+  if (Platform.OS !== "web") return { active: false, code: "", accessToken: "", refreshToken: "", error: "" };
+  const location = (globalThis as any).location;
+  if (!location) return { active: false, code: "", accessToken: "", refreshToken: "", error: "" };
+  const pathname = String(location.pathname ?? "");
+  const hash = String(location.hash ?? "");
+  const active = pathname.includes("reset-password") || hash.includes("reset-password");
+  if (!active) return { active: false, code: "", accessToken: "", refreshToken: "", error: "" };
+  const search = new URLSearchParams(location.search ?? "");
+  const hashParams = new URLSearchParams(hash.startsWith("#") ? hash.slice(1) : hash);
+  return {
+    active: true,
+    code: search.get("code") ?? hashParams.get("code") ?? "",
+    accessToken: hashParams.get("access_token") ?? "",
+    refreshToken: hashParams.get("refresh_token") ?? "",
+    error: search.get("error_description") ?? hashParams.get("error_description") ?? search.get("error") ?? hashParams.get("error") ?? "",
+  };
+}
+
+function resetPasswordRedirectUrl() {
+  const configured = process.env.EXPO_PUBLIC_WEB_URL;
+  if (configured) return `${configured.replace(/\/$/, "")}/reset-password`;
+  if (Platform.OS === "web" && typeof window !== "undefined") {
+    return `${window.location.origin}/reset-password`;
+  }
+  return Linking.createURL("/reset-password");
+}
+
 function detectBrowser(userAgent: string) {
   if (/Edg\//i.test(userAgent)) return "Microsoft Edge";
   if (/Chrome\//i.test(userAgent)) return "Chrome";
@@ -375,6 +403,7 @@ async function collectSignatureEvidence(): Promise<ContractorContractSignatureEv
 
 export default function SupportApp() {
   const onboardingToken = onboardingTokenFromUrl();
+  const resetPasswordParams = resetPasswordParamsFromUrl();
   const [booting, setBooting] = useState(true);
   const [session, setSession] = useState<Session | null>(null);
   const [context, setContext] = useState<UserContext | null>(null);
@@ -497,6 +526,7 @@ export default function SupportApp() {
   };
 
   if (onboardingToken) return <PublicContractorOnboarding token={onboardingToken} />;
+  if (resetPasswordParams.active) return <ResetPassword params={resetPasswordParams} />;
   if (booting) return <CenteredState label="Cargando Support Colombia..." />;
   if (!session || !context) {
     return <Login initialError={error} busy={loading} />;
@@ -1353,9 +1383,17 @@ function Login({ initialError, busy }: { initialError: string; busy: boolean }) 
       setMessage("Ingresa tu correo para recuperar el acceso.");
       return;
     }
-    const result = await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase());
-    if (result.error) setMessage(result.error.message);
-    else Alert.alert("Correo enviado", "Revisa tu bandeja para restablecer la contraseña.");
+    setSubmitting(true);
+    setMessage("");
+    const result = await supabase.auth.resetPasswordForEmail(email.trim().toLowerCase(), {
+      redirectTo: resetPasswordRedirectUrl(),
+    });
+    setSubmitting(false);
+    if (result.error) {
+      setMessage("No fue posible enviar el correo de recuperación. Intenta nuevamente.");
+    } else {
+      Alert.alert("Correo enviado", "Te enviamos un correo para restablecer tu contraseña.");
+    }
   };
 
   return (
@@ -1404,6 +1442,159 @@ function Login({ initialError, busy }: { initialError: string; busy: boolean }) 
               disabled={submitting || busy}
               onPress={signIn}
             />
+          </View>
+          <Text style={styles.loginFooter}>Acceso seguro ⋅ Support Colombia 2026</Text>
+        </ScrollView>
+      </LinearGradient>
+    </SafeAreaProvider>
+  );
+}
+
+function ResetPassword({
+  params,
+}: {
+  params: ReturnType<typeof resetPasswordParamsFromUrl>;
+}) {
+  const [ready, setReady] = useState(false);
+  const [recoverySessionReady, setRecoverySessionReady] = useState(false);
+  const [completed, setCompleted] = useState(false);
+  const [message, setMessage] = useState(params.error ? decodeURIComponent(params.error) : "");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [secure, setSecure] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    const establishRecoverySession = async () => {
+      if (params.error) {
+        setRecoverySessionReady(false);
+        setReady(true);
+        return;
+      }
+      try {
+        if (params.code) {
+          const { error } = await supabase.auth.exchangeCodeForSession(params.code);
+          if (error) throw error;
+        } else if (params.accessToken && params.refreshToken) {
+          const { error } = await supabase.auth.setSession({
+            access_token: params.accessToken,
+            refresh_token: params.refreshToken,
+          });
+          if (error) throw error;
+        } else {
+          throw new Error("El enlace de recuperación no contiene un código válido.");
+        }
+        if (active) {
+          setMessage("");
+          setRecoverySessionReady(true);
+          setReady(true);
+        }
+      } catch (cause) {
+        if (active) {
+          setMessage(errorMessage(cause));
+          setRecoverySessionReady(false);
+          setReady(true);
+        }
+      }
+    };
+    void establishRecoverySession();
+    return () => {
+      active = false;
+    };
+  }, [params.accessToken, params.code, params.error, params.refreshToken]);
+
+  const goToLogin = async () => {
+    await supabase.auth.signOut();
+    if (Platform.OS === "web" && typeof window !== "undefined") {
+      window.history.replaceState({}, "", "/");
+      window.location.reload();
+    }
+  };
+
+  const savePassword = async () => {
+    if (newPassword.length < 8) {
+      setMessage("La nueva contraseña debe tener al menos 8 caracteres.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setMessage("Las contraseñas no coinciden.");
+      return;
+    }
+    setSaving(true);
+    setMessage("");
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    if (error) {
+      setMessage("No fue posible actualizar la contraseña. Solicita un nuevo enlace e intenta nuevamente.");
+      setSaving(false);
+      return;
+    }
+    await supabase.auth.signOut();
+    setSaving(false);
+    setCompleted(true);
+  };
+
+  return (
+    <SafeAreaProvider>
+      <LinearGradient colors={["#F8FAFF", "#EEF2FA"]} style={styles.loginPage}>
+        <StatusBar barStyle="dark-content" backgroundColor="#F8FAFF" />
+        <ScrollView contentContainerStyle={styles.loginScroll} keyboardShouldPersistTaps="handled">
+          <Image source={require("../assets/login-logo.png")} style={styles.loginLogo} resizeMode="contain" />
+          <View style={styles.loginCard}>
+            <Text style={styles.loginTitle}>{completed ? "Contraseña actualizada" : "Restablecer contraseña"}</Text>
+            <Text style={styles.subtitle}>
+              {completed
+                ? "Ya puedes iniciar sesión con tu nueva contraseña."
+                : "Crea una nueva contraseña para recuperar tu acceso a Support Colombia."}
+            </Text>
+            {!ready ? (
+              <View style={styles.centerCard}>
+                <ActivityIndicator color={C.navy} />
+                <Text style={styles.subtitle}>Validando enlace seguro...</Text>
+              </View>
+            ) : completed ? (
+              <PrimaryButton label="Ir al login" icon="arrow-forward" onPress={goToLogin} />
+            ) : !recoverySessionReady ? (
+              <>
+                <Notice icon="alert-circle-outline" tone="error" text={message || "El enlace de recuperación no es válido o ya expiró."} />
+                <PrimaryButton label="Volver al login" icon="arrow-back-outline" onPress={goToLogin} />
+              </>
+            ) : (
+              <>
+                <Label text="Nueva contraseña" />
+                <View style={styles.inputWrap}>
+                  <Ionicons name="lock-closed-outline" size={20} color={C.muted} />
+                  <TextInput
+                    value={newPassword}
+                    onChangeText={setNewPassword}
+                    secureTextEntry={secure}
+                    style={styles.input}
+                    autoCapitalize="none"
+                  />
+                  <Pressable onPress={() => setSecure((value) => !value)}>
+                    <Ionicons name={secure ? "eye-outline" : "eye-off-outline"} size={20} color={C.muted} />
+                  </Pressable>
+                </View>
+                <Label text="Confirmar contraseña" />
+                <View style={styles.inputWrap}>
+                  <Ionicons name="lock-closed-outline" size={20} color={C.muted} />
+                  <TextInput
+                    value={confirmPassword}
+                    onChangeText={setConfirmPassword}
+                    secureTextEntry={secure}
+                    style={styles.input}
+                    autoCapitalize="none"
+                  />
+                </View>
+                {message ? <Text style={styles.errorText}>{message}</Text> : null}
+                <PrimaryButton
+                  label={saving ? "Actualizando..." : "Actualizar contraseña"}
+                  icon="shield-checkmark-outline"
+                  disabled={saving}
+                  onPress={savePassword}
+                />
+              </>
+            )}
           </View>
           <Text style={styles.loginFooter}>Acceso seguro ⋅ Support Colombia 2026</Text>
         </ScrollView>
