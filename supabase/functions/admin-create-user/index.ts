@@ -6,27 +6,33 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") return jsonResponse({ error: "Method not allowed" }, 405);
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
-  const anonKey = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
   const redirectTo = Deno.env.get("ONBOARDING_WEB_URL") ?? Deno.env.get("EXPO_PUBLIC_WEB_URL") ?? undefined;
 
-  if (!supabaseUrl || !anonKey || !serviceRoleKey) {
+  if (!supabaseUrl || !serviceRoleKey) {
     return jsonResponse({ error: "Supabase Edge Function environment is incomplete" }, 500);
   }
 
-  const authorization = req.headers.get("Authorization") ?? "";
-  const userClient = createClient(supabaseUrl, anonKey, {
-    global: { headers: { Authorization: authorization } },
-  });
-  const serviceClient = createClient(supabaseUrl, serviceRoleKey);
+  const body = await req.json().catch(() => ({}));
+  const headerToken = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
+  const accessToken = String(body.accessToken ?? headerToken).trim();
 
-  const { data: userData, error: userError } = await userClient.auth.getUser();
+  if (!accessToken) return jsonResponse({ error: "No autorizado" }, 401);
+
+  const serviceClient = createClient(supabaseUrl, serviceRoleKey);
+  const { data: userData, error: userError } = await serviceClient.auth.getUser(accessToken);
   if (userError || !userData.user) return jsonResponse({ error: "No autorizado" }, 401);
 
-  const { data: isAdmin, error: roleError } = await userClient.rpc("has_role", { role_code: "ADMIN" });
-  if (roleError || !isAdmin) return jsonResponse({ error: "Solo el Administrador puede crear usuarios." }, 403);
+  const { data: adminRole, error: adminRoleError } = await serviceClient
+    .from("user_roles")
+    .select("roles!inner(code)")
+    .eq("user_id", userData.user.id)
+    .eq("roles.code", "ADMIN")
+    .maybeSingle();
+  if (adminRoleError || !adminRole) {
+    return jsonResponse({ error: "Solo el Administrador puede crear usuarios." }, 403);
+  }
 
-  const body = await req.json().catch(() => ({}));
   const email = String(body.email ?? "").trim().toLowerCase();
   const name = String(body.name ?? "").trim();
   const lastName = String(body.lastName ?? "").trim();

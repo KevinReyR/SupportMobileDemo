@@ -912,7 +912,7 @@ export async function createAdminUser(input: {
     throw new Error("No hay una sesión activa de Administrador. Cierra sesión e ingresa nuevamente.");
   }
   const result = await supabase.functions.invoke("admin-create-user", {
-    body: input,
+    body: { ...input, accessToken },
     headers: {
       Authorization: `Bearer ${accessToken}`,
     },
