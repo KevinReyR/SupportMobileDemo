@@ -911,8 +911,10 @@ export async function createAdminUser(input: {
   if (!accessToken) {
     throw new Error("No hay una sesión activa de Administrador. Cierra sesión e ingresa nuevamente.");
   }
+  const configuredWebUrl = process.env.EXPO_PUBLIC_WEB_URL?.replace(/\/$/, "");
+  const redirectTo = configuredWebUrl ? `${configuredWebUrl}/reset-password` : undefined;
   const result = await supabase.functions.invoke("admin-create-user", {
-    body: { ...input, accessToken },
+    body: { ...input, accessToken, redirectTo },
     headers: {
       Authorization: `Bearer ${accessToken}`,
     },

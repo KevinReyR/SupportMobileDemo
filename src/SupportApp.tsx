@@ -327,10 +327,13 @@ function resetPasswordParamsFromUrl() {
   if (!location) return { active: false, code: "", accessToken: "", refreshToken: "", error: "" };
   const pathname = String(location.pathname ?? "");
   const hash = String(location.hash ?? "");
-  const active = pathname.includes("reset-password") || hash.includes("reset-password");
-  if (!active) return { active: false, code: "", accessToken: "", refreshToken: "", error: "" };
   const search = new URLSearchParams(location.search ?? "");
   const hashParams = new URLSearchParams(hash.startsWith("#") ? hash.slice(1) : hash);
+  const hashType = hashParams.get("type") ?? "";
+  const active = pathname.includes("reset-password")
+    || hash.includes("reset-password")
+    || (!!hashParams.get("access_token") && ["recovery", "invite"].includes(hashType));
+  if (!active) return { active: false, code: "", accessToken: "", refreshToken: "", error: "" };
   return {
     active: true,
     code: search.get("code") ?? hashParams.get("code") ?? "",

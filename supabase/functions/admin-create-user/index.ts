@@ -1,19 +1,28 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 
+function resetPasswordRedirect(value: unknown) {
+  const base = String(value ?? "").trim();
+  if (!base) return undefined;
+  if (/\/reset-password(?:[?#]|$)/.test(base)) return base;
+  return `${base.replace(/\/$/, "")}/reset-password`;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return jsonResponse({ error: "Method not allowed" }, 405);
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
-  const redirectTo = Deno.env.get("ONBOARDING_WEB_URL") ?? Deno.env.get("EXPO_PUBLIC_WEB_URL") ?? undefined;
 
   if (!supabaseUrl || !serviceRoleKey) {
     return jsonResponse({ error: "Supabase Edge Function environment is incomplete" }, 500);
   }
 
   const body = await req.json().catch(() => ({}));
+  const redirectTo = resetPasswordRedirect(
+    body.redirectTo ?? Deno.env.get("ONBOARDING_WEB_URL") ?? Deno.env.get("EXPO_PUBLIC_WEB_URL"),
+  );
   const headerToken = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
   const accessToken = String(body.accessToken ?? headerToken).trim();
 
