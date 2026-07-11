@@ -301,6 +301,52 @@ export interface StatisticsSummary {
   contractorOptions: StatisticsContractorOption[];
 }
 
+export interface DirectorReportSeries {
+  label: string;
+  date?: string;
+  saleTotal?: number;
+  contractors?: number;
+  workedShifts?: number;
+  extraHours?: number;
+  closedOperations?: number;
+}
+
+export interface DirectorReportRankingItem extends NamedRecord {
+  document?: string;
+  clientName?: string;
+  saleTotal?: number;
+  costTotal?: number;
+  payrollTotal?: number;
+  contractors?: number;
+  workedShifts?: number;
+  extraHours?: number;
+  absences?: number;
+}
+
+export interface DirectorReportsSummary {
+  saleTotal: number;
+  costTotal: number;
+  payrollTotal: number;
+  contractorsWorked: number;
+  payrollContractors: number;
+  operationsClosed: number;
+  operationsPending: number;
+  assignedOperations: number;
+  workedShifts: number;
+  plannedShifts: number;
+  extraHours: number;
+  absences: number;
+  clientsCount: number;
+  coveragePercent: number;
+  weeklySeries: DirectorReportSeries[];
+  dailySeries: DirectorReportSeries[];
+  clientRanking: DirectorReportRankingItem[];
+  contractorRanking: DirectorReportRankingItem[];
+  payrollByClient: DirectorReportRankingItem[];
+  payrollByContractor: DirectorReportRankingItem[];
+  contractorOptions: StatisticsContractorOption[];
+}
+
 export interface OnboardingOption {
   id: number;
   name: string;

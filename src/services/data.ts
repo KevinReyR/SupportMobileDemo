@@ -13,6 +13,8 @@ import type {
   ContractorOnboardingSubmission,
   ContractorDocument,
   ContractorHistory,
+  DirectorReportRankingItem,
+  DirectorReportsSummary,
   Operation,
   PersonnelRequest,
   Role,
@@ -798,6 +800,75 @@ export async function loadStatisticsSummary(input: {
     assignedOperations: Number(row?.assigned_operations ?? 0),
     workedShifts: Number(row?.worked_shifts ?? 0),
     extraHours: Number(row?.extra_hours ?? 0),
+    contractorOptions: (row?.contractor_options ?? []).map((contractor: any) => ({
+      id: Number(contractor.id),
+      name: cleanText(contractor.name),
+      document: cleanText(contractor.document),
+    })),
+  };
+}
+
+function mapDirectorSeries(items: any[] = []) {
+  return items.map((item) => ({
+    label: cleanText(item.label),
+    date: item.date,
+    saleTotal: Number(item.saleTotal ?? 0),
+    contractors: Number(item.contractors ?? 0),
+    workedShifts: Number(item.workedShifts ?? 0),
+    extraHours: Number(item.extraHours ?? 0),
+    closedOperations: Number(item.closedOperations ?? 0),
+  }));
+}
+
+function mapDirectorRanking(items: any[] = []): DirectorReportRankingItem[] {
+  return items.map((item) => ({
+    id: Number(item.id),
+    name: cleanText(item.name),
+    document: cleanText(item.document),
+    clientName: cleanText(item.clientName),
+    saleTotal: Number(item.saleTotal ?? 0),
+    costTotal: Number(item.costTotal ?? 0),
+    payrollTotal: Number(item.payrollTotal ?? 0),
+    contractors: Number(item.contractors ?? 0),
+    workedShifts: Number(item.workedShifts ?? 0),
+    extraHours: Number(item.extraHours ?? 0),
+    absences: Number(item.absences ?? 0),
+  }));
+}
+
+export async function loadDirectorReports(input: {
+  month: string;
+  clientId: number | null;
+  contractorId: number | null;
+}): Promise<DirectorReportsSummary> {
+  const result = await supabase.rpc("get_director_reports", {
+    p_month: input.month,
+    p_client_id: input.clientId || null,
+    p_contractor_id: input.contractorId || null,
+  });
+  fail(result.error);
+  const row = Array.isArray(result.data) ? result.data[0] : result.data;
+  return {
+    saleTotal: Number(row?.sale_total ?? 0),
+    costTotal: Number(row?.cost_total ?? 0),
+    payrollTotal: Number(row?.payroll_total ?? 0),
+    contractorsWorked: Number(row?.contractors_worked ?? 0),
+    payrollContractors: Number(row?.payroll_contractors ?? 0),
+    operationsClosed: Number(row?.operations_closed ?? 0),
+    operationsPending: Number(row?.operations_pending ?? 0),
+    assignedOperations: Number(row?.assigned_operations ?? 0),
+    workedShifts: Number(row?.worked_shifts ?? 0),
+    plannedShifts: Number(row?.planned_shifts ?? 0),
+    extraHours: Number(row?.extra_hours ?? 0),
+    absences: Number(row?.absences ?? 0),
+    clientsCount: Number(row?.clients_count ?? 0),
+    coveragePercent: Number(row?.coverage_percent ?? 0),
+    weeklySeries: mapDirectorSeries(row?.weekly_series ?? []),
+    dailySeries: mapDirectorSeries(row?.daily_series ?? []),
+    clientRanking: mapDirectorRanking(row?.client_ranking ?? []),
+    contractorRanking: mapDirectorRanking(row?.contractor_ranking ?? []),
+    payrollByClient: mapDirectorRanking(row?.payroll_by_client ?? []),
+    payrollByContractor: mapDirectorRanking(row?.payroll_by_contractor ?? []),
     contractorOptions: (row?.contractor_options ?? []).map((contractor: any) => ({
       id: Number(contractor.id),
       name: cleanText(contractor.name),

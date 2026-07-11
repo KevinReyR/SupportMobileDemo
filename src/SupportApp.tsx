@@ -27,6 +27,7 @@ import * as Linking from "expo-linking";
 import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
 import { LinearGradient } from "expo-linear-gradient";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import Svg, { Line, Polyline, Rect, Text as SvgText } from "react-native-svg";
 import type { Session } from "@supabase/supabase-js";
 
 import PdfViewer from "./components/pdf-viewer";
@@ -51,6 +52,7 @@ import {
   loadContractorWorkwearSummary,
   loadAvailableContractorIds,
   loadOperationAssignments,
+  loadDirectorReports,
   loadStatisticsSummary,
   loadUserContext,
   loadContractorOnboardingForm,
@@ -92,6 +94,9 @@ import type {
   ContractorOnboardingForm,
   ContractorOnboardingSubmission,
   ContractorContractSignatureEvidence,
+  DirectorReportRankingItem,
+  DirectorReportSeries,
+  DirectorReportsSummary,
   Operation,
   OperationStatus,
   PersonnelRequest,
@@ -200,18 +205,18 @@ const tabsByRole: Record<Role, { label: string; icon: IconName; screen: Screen }
     { label: "Operación", icon: "briefcase-outline", screen: "operations" },
     { label: "Solicitudes", icon: "document-text-outline", screen: "requests" },
     { label: "Personal", icon: "people-outline", screen: "staff" },
-    { label: "Estadísticas", icon: "bar-chart-outline", screen: "statistics" },
+    { label: "Informes", icon: "bar-chart-outline", screen: "statistics" },
   ],
   Cliente: [
     { label: "Operación", icon: "briefcase-outline", screen: "operations" },
     { label: "Solicitudes", icon: "document-text-outline", screen: "requests" },
     { label: "Personal", icon: "people-outline", screen: "staff" },
-    { label: "Estadísticas", icon: "bar-chart-outline", screen: "statistics" },
+    { label: "Informes", icon: "bar-chart-outline", screen: "statistics" },
   ],
   Director: [
     { label: "Operación", icon: "briefcase-outline", screen: "operations" },
     { label: "Personal", icon: "people-outline", screen: "staff" },
-    { label: "Estadísticas", icon: "bar-chart-outline", screen: "statistics" },
+    { label: "Informes", icon: "bar-chart-outline", screen: "statistics" },
   ],
   Administrador: [
     { label: "Inicio", icon: "grid-outline", screen: "admin-home" },
@@ -288,6 +293,22 @@ function formatCurrency(value: number) {
     currency: "COP",
     maximumFractionDigits: 0,
   }).format(value);
+}
+
+function formatNumber(value: number) {
+  return new Intl.NumberFormat("es-CO", {
+    maximumFractionDigits: value % 1 === 0 ? 0 : 1,
+  }).format(value);
+}
+
+function formatShortNumber(value: number) {
+  if (Math.abs(value) >= 1_000_000) return `${formatNumber(value / 1_000_000)} M`;
+  if (Math.abs(value) >= 1_000) return `${formatNumber(value / 1_000)} mil`;
+  return formatNumber(value);
+}
+
+function formatShortCurrency(value: number) {
+  return `$${formatShortNumber(value)}`;
 }
 
 function errorMessage(error: unknown) {
@@ -1634,7 +1655,7 @@ function Header({
     contractor: "Perfil del contratista",
     "document-preview": "Documento del contratista",
     "history-detail": "Detalle del turno",
-    statistics: "Estadísticas",
+    statistics: "Informes",
     users: "Administración de usuarios",
   };
   const initials = `${context.name[0] ?? ""}${context.lastName[0] ?? ""}`.toUpperCase();
@@ -4648,7 +4669,485 @@ function ClientHistoryDetail({ history }: { history: ContractorHistory }) {
   );
 }
 
+type DirectorReportTab = "operation" | "contractors" | "client" | "payroll";
+
+const directorReportTabs: { id: DirectorReportTab; title: string; icon: IconName }[] = [
+  { id: "operation", title: "Operación", icon: "briefcase-outline" },
+  { id: "contractors", title: "Contratistas", icon: "people-outline" },
+  { id: "client", title: "Cliente", icon: "business-outline" },
+  { id: "payroll", title: "Nómina", icon: "wallet-outline" },
+];
+
+function DirectorReports({ context, data }: { context: UserContext; data: AppData }) {
+  const defaultMonth = monthStartIso(todayIso());
+  const [month, setMonth] = useState(defaultMonth);
+  const [clientId, setClientId] = useState(0);
+  const [contractorId, setContractorId] = useState(0);
+  const [openFilter, setOpenFilter] = useState<"month" | "client" | "contractor" | null>(null);
+  const [activeTab, setActiveTab] = useState<DirectorReportTab>("operation");
+  const [report, setReport] = useState<DirectorReportsSummary | null>(null);
+  const [contractorOptions, setContractorOptions] = useState<DirectorReportsSummary["contractorOptions"]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const clientOptions = data.clients;
+  const selectedClientName =
+    clientId === 0
+      ? "Todas las empresas"
+      : clientOptions.find((client) => client.id === clientId)?.name ?? "Todas las empresas";
+  const selectedContractorName =
+    contractorId === 0
+      ? "Todos los contratistas"
+      : contractorOptions.find((contractor) => contractor.id === contractorId)?.name ?? "Todos los contratistas";
+
+  const refreshReports = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [reportResult, optionsResult] = await Promise.all([
+        loadDirectorReports({
+          month,
+          clientId: clientId || null,
+          contractorId: contractorId || null,
+        }),
+        loadDirectorReports({
+          month,
+          clientId: clientId || null,
+          contractorId: null,
+        }),
+      ]);
+      setReport(reportResult);
+      setContractorOptions(optionsResult.contractorOptions);
+    } catch (cause) {
+      setError(errorMessage(cause));
+      setReport(null);
+      setContractorOptions([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [clientId, contractorId, month]);
+
+  useEffect(() => {
+    refreshReports();
+  }, [refreshReports]);
+
+  const hasData = report
+    ? report.saleTotal > 0 ||
+      report.costTotal > 0 ||
+      report.contractorsWorked > 0 ||
+      report.operationsClosed > 0 ||
+      report.operationsPending > 0 ||
+      report.workedShifts > 0 ||
+      report.extraHours > 0
+    : false;
+
+  const selectMonth = (date: string) => {
+    setMonth(monthStartIso(date));
+    setContractorId(0);
+    setOpenFilter(null);
+  };
+
+  return (
+    <Page>
+      <View>
+        <Text style={styles.eyebrow}>INFORMES</Text>
+        <Text style={styles.greeting}>Panel gerencial</Text>
+        <Text style={styles.subtitle}>Operación, contratistas, clientes y nómina con datos de operaciones cerradas.</Text>
+      </View>
+      <FormCard title="Filtros">
+        <View style={styles.reportFilterGrid}>
+          <View style={styles.reportFilterField}>
+            <Choice label="Mes" value={formatMonth(month)} icon="calendar-outline" onPress={() => setOpenFilter("month")} />
+          </View>
+          <View style={styles.reportFilterField}>
+            <Choice label="Empresa" value={selectedClientName} icon="business-outline" onPress={() => setOpenFilter("client")} />
+          </View>
+          <View style={styles.reportFilterField}>
+            <Choice
+              label="Contratista"
+              value={selectedContractorName}
+              icon="person-outline"
+              disabled={contractorOptions.length === 0}
+              onPress={() => setOpenFilter("contractor")}
+            />
+          </View>
+        </View>
+      </FormCard>
+      <View style={styles.adminRateTabs}>
+        {directorReportTabs.map((tab) => (
+          <AdminRateTab
+            key={tab.id}
+            label={tab.title}
+            icon={tab.icon}
+            selected={activeTab === tab.id}
+            onPress={() => setActiveTab(tab.id)}
+          />
+        ))}
+      </View>
+      {loading ? (
+        <View style={styles.centerCard}><ActivityIndicator color={C.navy} /></View>
+      ) : error ? (
+        <Notice icon="cloud-offline-outline" tone="error" text={error} />
+      ) : !report || !hasData ? (
+        <EmptyState icon="bar-chart-outline" text="No hay informes para los filtros seleccionados." />
+      ) : (
+        <DirectorReportTabContent report={report} tab={activeTab} month={month} />
+      )}
+      <CalendarModal
+        visible={openFilter === "month"}
+        selectedDate={month}
+        title="Seleccionar mes"
+        subtitle="Elige cualquier día del mes que quieres visualizar."
+        onClose={() => setOpenFilter(null)}
+        onSelect={selectMonth}
+      />
+      <DropdownModal
+        visible={openFilter === "client"}
+        title="Seleccionar empresa"
+        options={[{ id: 0, name: "Todas las empresas" }, ...clientOptions]}
+        selectedId={clientId}
+        onClose={() => setOpenFilter(null)}
+        onSelect={(id) => {
+          setClientId(id);
+          setContractorId(0);
+          setOpenFilter(null);
+        }}
+      />
+      <DropdownModal
+        visible={openFilter === "contractor"}
+        title="Seleccionar contratista"
+        options={[
+          { id: 0, name: "Todos los contratistas" },
+          ...contractorOptions.map((contractor) => ({
+            id: contractor.id,
+            name: contractor.name,
+            detail: contractor.document,
+          })),
+        ]}
+        selectedId={contractorId}
+        searchable
+        searchPlaceholder="Buscar por nombre o documento"
+        onClose={() => setOpenFilter(null)}
+        onSelect={(id) => {
+          setContractorId(id);
+          setOpenFilter(null);
+        }}
+      />
+    </Page>
+  );
+}
+
+function DirectorReportTabContent({
+  report,
+  tab,
+  month,
+}: {
+  report: DirectorReportsSummary;
+  tab: DirectorReportTab;
+  month: string;
+}) {
+  const isWeb = Platform.OS === "web";
+  if (tab === "operation") {
+    return (
+      <>
+        <View style={styles.statsGrid}>
+          <Stat value={String(report.operationsClosed)} label="Operaciones cerradas" icon="checkmark-circle-outline" />
+          <Stat value={String(report.operationsPending)} label="Pendientes" icon="alert-circle-outline" />
+          <Stat value={formatNumber(report.workedShifts)} label="Turnos trabajados" icon="time-outline" />
+          <Stat value={`${formatNumber(report.coveragePercent)}%`} label="Cobertura" icon="analytics-outline" />
+        </View>
+        <View style={styles.reportGrid}>
+          <View style={styles.reportGridItem}>
+            <ReportBarChart
+              title="Operaciones cerradas por semana"
+              data={report.weeklySeries}
+              getValue={(item) => item.closedOperations ?? 0}
+              valueLabel={(value) => String(Math.round(value))}
+            />
+          </View>
+          {isWeb && (
+            <View style={styles.reportGridItem}>
+              <ReportLineChart
+                title="Tendencia de turnos trabajados"
+                data={report.dailySeries}
+                getValue={(item) => item.workedShifts ?? 0}
+              />
+            </View>
+          )}
+        </View>
+        <Notice icon="bulb-outline" text={`Cobertura calculada con personal trabajado frente a planeado durante ${formatMonth(month)}.`} />
+      </>
+    );
+  }
+
+  if (tab === "contractors") {
+    const average = report.contractorsWorked > 0 ? report.workedShifts / report.contractorsWorked : 0;
+    return (
+      <>
+        <View style={styles.statsGrid}>
+          <Stat value={String(report.contractorsWorked)} label="Contratistas trabajaron" icon="people-outline" />
+          <Stat value={formatNumber(average)} label="Promedio turnos" icon="speedometer-outline" />
+          <Stat value={`${formatNumber(report.extraHours)} h`} label="Horas extra" icon="time-outline" />
+          <Stat value={String(report.absences)} label="Ausencias" icon="close-circle-outline" />
+        </View>
+        <View style={styles.reportGrid}>
+          {isWeb && (
+            <View style={styles.reportGridItem}>
+              <ReportBarChart
+                title="Auxiliares por semana"
+                data={report.weeklySeries}
+                getValue={(item) => item.contractors ?? 0}
+                valueLabel={(value) => String(Math.round(value))}
+              />
+            </View>
+          )}
+          <View style={styles.reportGridItem}>
+            <ReportRankingList
+              title="Top contratistas por turnos"
+              rows={report.contractorRanking}
+              metric={(item) => formatNumber(item.workedShifts ?? 0)}
+              metricLabel="Turnos"
+              secondary={(item) => `${formatNumber(item.extraHours ?? 0)} h extra ⋅ ${item.absences ?? 0} ausencias`}
+              limit={isWeb ? 10 : 5}
+            />
+          </View>
+        </View>
+      </>
+    );
+  }
+
+  if (tab === "client") {
+    const averageSale = report.clientsCount > 0 ? report.saleTotal / report.clientsCount : 0;
+    return (
+      <>
+        <View style={styles.statsGrid}>
+          <Stat value={formatCurrency(report.saleTotal)} label="Venta total" icon="cash-outline" />
+          <Stat value={formatCurrency(report.costTotal)} label="Costos" icon="receipt-outline" />
+          <Stat value={String(report.clientsCount)} label="Clientes" icon="business-outline" />
+          <Stat value={formatCurrency(averageSale)} label="Promedio por cliente" icon="trending-up-outline" />
+        </View>
+        <View style={styles.reportGrid}>
+          <View style={styles.reportGridItem}>
+            <ReportBarChart
+              title="Ventas por cliente"
+              data={report.clientRanking}
+              getValue={(item) => item.saleTotal ?? 0}
+              valueLabel={formatShortCurrency}
+            />
+          </View>
+          {isWeb && (
+            <View style={styles.reportGridItem}>
+              <ReportBarChart
+                title="Ventas por semana"
+                data={report.weeklySeries}
+                getValue={(item) => item.saleTotal ?? 0}
+                valueLabel={formatShortCurrency}
+              />
+            </View>
+          )}
+          <View style={styles.reportGridItem}>
+            <ReportRankingList
+              title="Ranking de clientes"
+              rows={report.clientRanking}
+              metric={(item) => formatCurrency(item.saleTotal ?? 0)}
+              metricLabel="Venta"
+              secondary={(item) => `${item.contractors ?? 0} auxiliares ⋅ ${formatNumber(item.workedShifts ?? 0)} turnos`}
+              limit={isWeb ? 10 : 5}
+            />
+          </View>
+        </View>
+      </>
+    );
+  }
+
+  const averagePayroll = report.payrollContractors > 0 ? report.payrollTotal / report.payrollContractors : 0;
+  const hasPayroll = report.payrollTotal > 0 || report.payrollByClient.length > 0 || report.payrollByContractor.length > 0;
+  return (
+    <>
+      <View style={styles.statsGrid}>
+        <Stat value={formatCurrency(report.payrollTotal)} label="Total nómina" icon="wallet-outline" />
+        <Stat value={String(report.payrollContractors)} label="Contratistas con pago" icon="people-outline" />
+        <Stat value={formatCurrency(averagePayroll)} label="Promedio por contratista" icon="calculator-outline" />
+      </View>
+      {!hasPayroll ? (
+        <EmptyState icon="wallet-outline" text="No hay conceptos de costo categorizados como NOMINA para este periodo." />
+      ) : (
+        <View style={styles.reportGrid}>
+          <View style={styles.reportGridItem}>
+            <ReportBarChart
+              title="Nómina por cliente"
+              data={report.payrollByClient}
+              getValue={(item) => item.payrollTotal ?? 0}
+              valueLabel={formatShortCurrency}
+            />
+          </View>
+          <View style={styles.reportGridItem}>
+            <ReportRankingList
+              title="Nómina por contratista"
+              rows={report.payrollByContractor}
+              metric={(item) => formatCurrency(item.payrollTotal ?? 0)}
+              metricLabel="Nómina"
+              secondary={(item) => `${item.clientName || "Sin cliente"} ⋅ ${formatNumber(item.workedShifts ?? 0)} turnos`}
+              limit={isWeb ? 10 : 5}
+            />
+          </View>
+        </View>
+      )}
+    </>
+  );
+}
+
+function ReportBarChart<T>({
+  title,
+  data,
+  getValue,
+  getLabel,
+  valueLabel = formatShortNumber,
+}: {
+  title: string;
+  data: T[];
+  getValue: (item: T) => number;
+  getLabel?: (item: T) => string;
+  valueLabel?: (value: number) => string;
+}) {
+  const items = data.slice(0, Platform.OS === "web" ? 12 : 7);
+  const values = items.map(getValue);
+  const max = Math.max(...values, 1);
+  const width = 360;
+  const height = 210;
+  const chartTop = 24;
+  const chartHeight = 132;
+  const gap = 8;
+  const barWidth = items.length > 0 ? Math.max(12, (width - 34 - gap * (items.length - 1)) / items.length) : 26;
+  return (
+    <View style={styles.chartCard}>
+      <Text style={styles.sectionTitle}>{title}</Text>
+      {items.length === 0 ? (
+        <EmptyState icon="bar-chart-outline" text="No hay datos para graficar." />
+      ) : (
+        <Svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`}>
+          <Line x1={18} y1={chartTop + chartHeight} x2={width - 10} y2={chartTop + chartHeight} stroke="#E6EAF2" strokeWidth={1} />
+          {items.map((item, index) => {
+            const value = Math.max(0, getValue(item));
+            const barHeight = Math.max(4, (value / max) * chartHeight);
+            const x = 18 + index * (barWidth + gap);
+            const y = chartTop + chartHeight - barHeight;
+            const rawLabel = getLabel?.(item) ?? (item as any).label ?? (item as any).name ?? "";
+            const label = rawLabel.length > 10 ? `${rawLabel.slice(0, 9)}…` : rawLabel;
+            return (
+              <React.Fragment key={`${rawLabel}-${index}`}>
+                <Rect x={x} y={y} width={barWidth} height={barHeight} rx={6} fill={C.red} />
+                <SvgText x={x + barWidth / 2} y={Math.max(12, y - 6)} fill={C.red} fontSize="9" fontWeight="700" textAnchor="middle">
+                  {valueLabel(value)}
+                </SvgText>
+                <SvgText x={x + barWidth / 2} y={chartTop + chartHeight + 18} fill={C.muted} fontSize="8" textAnchor="middle">
+                  {label}
+                </SvgText>
+              </React.Fragment>
+            );
+          })}
+        </Svg>
+      )}
+    </View>
+  );
+}
+
+function ReportLineChart({
+  title,
+  data,
+  getValue,
+}: {
+  title: string;
+  data: DirectorReportSeries[];
+  getValue: (item: DirectorReportSeries) => number;
+}) {
+  const items = data.slice(-14);
+  const values = items.map(getValue);
+  const max = Math.max(...values, 1);
+  const width = 360;
+  const height = 210;
+  const top = 26;
+  const chartHeight = 126;
+  const step = items.length > 1 ? (width - 40) / (items.length - 1) : 0;
+  const points = items
+    .map((item, index) => {
+      const x = 20 + index * step;
+      const y = top + chartHeight - (Math.max(0, getValue(item)) / max) * chartHeight;
+      return `${x},${y}`;
+    })
+    .join(" ");
+  return (
+    <View style={styles.chartCard}>
+      <Text style={styles.sectionTitle}>{title}</Text>
+      {items.length === 0 ? (
+        <EmptyState icon="analytics-outline" text="No hay tendencia para este periodo." />
+      ) : (
+        <Svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`}>
+          <Line x1={18} y1={top + chartHeight} x2={width - 14} y2={top + chartHeight} stroke="#E6EAF2" strokeWidth={1} />
+          <Polyline points={points} fill="none" stroke={C.navy} strokeWidth={4} strokeLinecap="round" strokeLinejoin="round" />
+          {items.map((item, index) => {
+            const x = 20 + index * step;
+            const y = top + chartHeight - (Math.max(0, getValue(item)) / max) * chartHeight;
+            return <Rect key={`${item.label}-${index}`} x={x - 3} y={y - 3} width={6} height={6} rx={3} fill={C.orange} />;
+          })}
+          <SvgText x={20} y={top + chartHeight + 20} fill={C.muted} fontSize="8">
+            {items[0]?.label}
+          </SvgText>
+          <SvgText x={width - 14} y={top + chartHeight + 20} fill={C.muted} fontSize="8" textAnchor="end">
+            {items[items.length - 1]?.label}
+          </SvgText>
+        </Svg>
+      )}
+    </View>
+  );
+}
+
+function ReportRankingList({
+  title,
+  rows,
+  metric,
+  metricLabel,
+  secondary,
+  limit,
+}: {
+  title: string;
+  rows: DirectorReportRankingItem[];
+  metric: (item: DirectorReportRankingItem) => string;
+  metricLabel: string;
+  secondary: (item: DirectorReportRankingItem) => string;
+  limit: number;
+}) {
+  const visibleRows = rows.slice(0, limit);
+  return (
+    <FormCard title={title}>
+      {visibleRows.length === 0 ? (
+        <EmptyState icon="list-outline" text="No hay datos para esta lista." />
+      ) : (
+        visibleRows.map((item, index) => (
+          <View key={`${item.id}-${index}`} style={styles.reportRankingRow}>
+            <View style={styles.reportRankingIndex}>
+              <Text style={styles.reportRankingIndexText}>{index + 1}</Text>
+            </View>
+            <View style={styles.flex}>
+              <Text style={styles.personName}>{item.name}</Text>
+              <Text style={styles.cardMeta}>{secondary(item)}</Text>
+            </View>
+            <View style={styles.reportRankingMetric}>
+              <Text style={styles.extra}>{metric(item)}</Text>
+              <Text style={styles.caption}>{metricLabel}</Text>
+            </View>
+          </View>
+        ))
+      )}
+    </FormCard>
+  );
+}
+
 function Statistics({ context, data }: { context: UserContext; data: AppData }) {
+  if (context.role === "Director") {
+    return <DirectorReports context={context} data={data} />;
+  }
+
   const defaultMonth = monthStartIso(todayIso());
   const fixedClientId = context.role === "Cliente" ? context.clients[0]?.id ?? 0 : 0;
   const [month, setMonth] = useState(defaultMonth);
@@ -4660,7 +5159,7 @@ function Statistics({ context, data }: { context: UserContext; data: AppData }) 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const clientOptions = context.role === "Director" ? data.clients : context.clients;
+  const clientOptions = context.clients;
   const selectedClientName =
     clientId === 0
       ? "Todas las empresas"
@@ -4720,14 +5219,12 @@ function Statistics({ context, data }: { context: UserContext; data: AppData }) 
   return (
     <Page>
       <View>
-        <Text style={styles.eyebrow}>ESTADÍSTICAS</Text>
+        <Text style={styles.eyebrow}>INFORMES</Text>
         <Text style={styles.greeting}>
-          {context.role === "Director" ? "Resultados financieros" : "Resultados operativos"}
+          Resultados operativos
         </Text>
         <Text style={styles.subtitle}>
-          {context.role === "Director"
-            ? "Venta y costos de operaciones cerradas."
-            : "Operaciones, turnos, extras y contratistas visibles según tu perfil."}
+          Operaciones, turnos, extras y contratistas visibles según tu perfil.
         </Text>
       </View>
       <FormCard title="Filtros">
@@ -4762,31 +5259,17 @@ function Statistics({ context, data }: { context: UserContext; data: AppData }) 
       ) : (
         <>
           <View style={styles.statsGrid}>
-            {context.role === "Director" ? (
-              <>
-                <Stat value={formatCurrency(summary.saleTotal)} label="Venta" icon="cash-outline" />
-                <Stat value={formatCurrency(summary.costTotal)} label="Costos" icon="receipt-outline" />
-                <Stat value={String(summary.contractorsWorked)} label="Contratistas" icon="people" />
-              </>
-            ) : (
-              <>
-                <Stat value={String(summary.contractorsWorked)} label="Contratistas" icon="people" />
-                <Stat value={String(summary.assignedOperations)} label="Operaciones" icon="briefcase-outline" />
-                <Stat value={String(summary.workedShifts)} label="Turnos trabajados" icon="checkmark-circle-outline" />
-                <Stat value={`${summary.extraHours} h`} label="Horas extra" icon="time-outline" />
-                {context.role === "Coordinador" && (
-                  <Stat value={String(summary.activeContractors)} label="Contratistas activos" icon="shield-checkmark-outline" />
-                )}
-              </>
+            <Stat value={String(summary.contractorsWorked)} label="Contratistas" icon="people" />
+            <Stat value={String(summary.assignedOperations)} label="Operaciones" icon="briefcase-outline" />
+            <Stat value={String(summary.workedShifts)} label="Turnos trabajados" icon="checkmark-circle-outline" />
+            <Stat value={`${summary.extraHours} h`} label="Horas extra" icon="time-outline" />
+            {context.role === "Coordinador" && (
+              <Stat value={String(summary.activeContractors)} label="Contratistas activos" icon="shield-checkmark-outline" />
             )}
           </View>
           <Notice
             icon="bulb-outline"
-            text={
-              context.role === "Director"
-                ? `La venta y los costos corresponden a operaciones cerradas de ${formatMonth(month)}.`
-                : `Las métricas corresponden a operaciones visibles de ${formatMonth(month)}.`
-            }
+            text={`Las métricas corresponden a operaciones visibles de ${formatMonth(month)}.`}
           />
         </>
       )}
@@ -7047,6 +7530,14 @@ const styles = StyleSheet.create({
   statCard: { width: "48.4%", backgroundColor: C.white, borderRadius: 17, padding: 14, borderWidth: 1, borderColor: C.line },
   statIcon: { width: 34, height: 34, borderRadius: 11, backgroundColor: C.blueBg, alignItems: "center", justifyContent: "center", marginBottom: 10 },
   statValue: { color: C.ink, fontSize: 21, fontWeight: "900" },
+  reportFilterGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  reportFilterField: { flex: 1, minWidth: 210 },
+  reportGrid: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
+  reportGridItem: { flex: 1, minWidth: 290 },
+  reportRankingRow: { minHeight: 62, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: "#F0F2F6", flexDirection: "row", alignItems: "center", gap: 11 },
+  reportRankingIndex: { width: 32, height: 32, borderRadius: 11, backgroundColor: C.blueBg, alignItems: "center", justifyContent: "center" },
+  reportRankingIndexText: { color: C.navy, fontSize: 12, fontWeight: "900" },
+  reportRankingMetric: { minWidth: 96, alignItems: "flex-end" },
   chartCard: { backgroundColor: C.white, borderRadius: 19, padding: 16, borderWidth: 1, borderColor: C.line, gap: 8 },
   barChart: { minHeight: 150, flexDirection: "row", alignItems: "flex-end", justifyContent: "space-around", marginTop: 12 },
   barGroup: { alignItems: "center", gap: 5 },
