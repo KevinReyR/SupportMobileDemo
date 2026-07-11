@@ -5235,17 +5235,100 @@ function AdminContractsModule({ adminData, contractTypes, onChanged }: { adminDa
 }
 
 function AdminCatalogsModule({ adminData, onChanged }: { adminData: AdminData; onChanged: () => void }) {
+  const [catalogTab, setCatalogTab] = useState<"CLIENTS" | "AREAS" | "SHIFTS">("CLIENTS");
+  const [clientFilterId, setClientFilterId] = useState(0);
+  const [areaFilterId, setAreaFilterId] = useState(0);
   const [client, setClient] = useState<AdminData["clients"][number] | null | "new">(null);
   const [area, setArea] = useState<AdminData["areas"][number] | null | "new">(null);
   const [shift, setShift] = useState<AdminData["shifts"][number] | null | "new">(null);
+  const filteredAreas = adminData.areas.filter((item) => !clientFilterId || item.clientId === clientFilterId);
+  const areaOptions = clientFilterId ? adminData.areas.filter((item) => item.clientId === clientFilterId) : [];
+  const filteredShifts = adminData.shifts.filter((item) =>
+    (!clientFilterId || item.clientId === clientFilterId)
+    && (!areaFilterId || item.areaId === areaFilterId),
+  );
   return (
     <>
-      <AdminCatalogList title="Clientes" rows={adminData.clients} onNew={() => setClient("new")} onEdit={setClient} subtitle={(item) => item.documentNumber ?? "Sin documento"} active={(item) => item.isActive} />
-      <AdminCatalogList title="Áreas" rows={adminData.areas} onNew={() => setArea("new")} onEdit={setArea} subtitle={(item) => item.clientName} active={(item) => item.isActive} />
-      <AdminCatalogList title="Turnos" rows={adminData.shifts} onNew={() => setShift("new")} onEdit={setShift} subtitle={(item) => `${item.clientName} ⋅ ${item.areaName}`} active={(item) => item.isActive} />
+      <View style={styles.adminRateTabs}>
+        <AdminRateTab label="Clientes" icon="business-outline" selected={catalogTab === "CLIENTS"} onPress={() => setCatalogTab("CLIENTS")} />
+        <AdminRateTab label="Áreas" icon="location-outline" selected={catalogTab === "AREAS"} onPress={() => setCatalogTab("AREAS")} />
+        <AdminRateTab label="Turnos" icon="time-outline" selected={catalogTab === "SHIFTS"} onPress={() => setCatalogTab("SHIFTS")} />
+      </View>
+
+      {catalogTab === "CLIENTS" && (
+        <AdminCatalogList
+          title="Clientes"
+          rows={adminData.clients}
+          onNew={() => setClient("new")}
+          onEdit={setClient}
+          subtitle={(item) => item.documentNumber ?? "Sin documento"}
+          active={(item) => item.isActive}
+          emptyText="No hay clientes registrados."
+        />
+      )}
+
+      {catalogTab === "AREAS" && (
+        <>
+          <FormCard title="Filtros">
+            <View style={styles.adminRateFilterGrid}>
+              <AdminSelectField
+                label="Cliente"
+                icon="business-outline"
+                value={clientFilterId}
+                options={[{ id: 0, name: "Todos los clientes" }, ...adminData.clients.map((item) => ({ id: item.id, name: item.name }))]}
+                onChange={(next) => { setClientFilterId(next); setAreaFilterId(0); }}
+              />
+            </View>
+          </FormCard>
+          <AdminCatalogList
+            title="Áreas"
+            rows={filteredAreas}
+            onNew={() => setArea("new")}
+            onEdit={setArea}
+            subtitle={(item) => item.clientName}
+            active={(item) => item.isActive}
+            emptyText="No hay áreas para este cliente."
+          />
+        </>
+      )}
+
+      {catalogTab === "SHIFTS" && (
+        <>
+          <FormCard title="Filtros">
+            <View style={styles.adminRateFilterGrid}>
+              <AdminSelectField
+                label="Cliente"
+                icon="business-outline"
+                value={clientFilterId}
+                options={[{ id: 0, name: "Todos los clientes" }, ...adminData.clients.map((item) => ({ id: item.id, name: item.name }))]}
+                onChange={(next) => { setClientFilterId(next); setAreaFilterId(0); }}
+              />
+              <AdminSelectField
+                label="Área"
+                icon="location-outline"
+                value={areaFilterId}
+                disabled={!clientFilterId}
+                disabledText="Selecciona un cliente primero"
+                options={[{ id: 0, name: "Todas las áreas" }, ...areaOptions.map((item) => ({ id: item.id, name: item.name }))]}
+                onChange={setAreaFilterId}
+              />
+            </View>
+          </FormCard>
+          <AdminCatalogList
+            title="Turnos"
+            rows={filteredShifts}
+            onNew={() => setShift("new")}
+            onEdit={setShift}
+            subtitle={(item) => `${item.clientName} ⋅ ${item.areaName}`}
+            active={(item) => item.isActive}
+            emptyText="No hay turnos para los filtros seleccionados."
+          />
+        </>
+      )}
+
       <AdminClientModal item={client === "new" ? null : client} visible={client !== null} onClose={() => setClient(null)} onSaved={async () => { setClient(null); await onChanged(); }} />
-      <AdminAreaModal item={area === "new" ? null : area} clients={adminData.clients} visible={area !== null} onClose={() => setArea(null)} onSaved={async () => { setArea(null); await onChanged(); }} />
-      <AdminShiftModal item={shift === "new" ? null : shift} areas={adminData.areas} visible={shift !== null} onClose={() => setShift(null)} onSaved={async () => { setShift(null); await onChanged(); }} />
+      <AdminAreaModal item={area === "new" ? null : area} clients={adminData.clients} initialClientId={clientFilterId} visible={area !== null} onClose={() => setArea(null)} onSaved={async () => { setArea(null); await onChanged(); }} />
+      <AdminShiftModal item={shift === "new" ? null : shift} clients={adminData.clients} areas={adminData.areas} initialClientId={clientFilterId} initialAreaId={areaFilterId} visible={shift !== null} onClose={() => setShift(null)} onSaved={async () => { setShift(null); await onChanged(); }} />
     </>
   );
 }
@@ -5255,6 +5338,7 @@ function AdminCatalogList<T extends { id: number; name: string }>({
   rows,
   subtitle,
   active,
+  emptyText = "No hay registros para mostrar.",
   onNew,
   onEdit,
 }: {
@@ -5262,6 +5346,7 @@ function AdminCatalogList<T extends { id: number; name: string }>({
   rows: T[];
   subtitle: (item: T) => string;
   active: (item: T) => boolean;
+  emptyText?: string;
   onNew: () => void;
   onEdit: (item: T) => void;
 }) {
@@ -5274,13 +5359,17 @@ function AdminCatalogList<T extends { id: number; name: string }>({
           <Text style={styles.smallActionText}>Crear</Text>
         </Pressable>
       </View>
-      {rows.map((item) => (
-        <Pressable key={item.id} style={styles.adminTableRow} onPress={() => onEdit(item)}>
-          <Text style={styles.adminCellMain}>{item.name}</Text>
-          <Text style={styles.adminCell}>{subtitle(item)}</Text>
-          <StatusPill good={active(item)} text={active(item) ? "ACTIVO" : "INACTIVO"} />
-        </Pressable>
-      ))}
+      {rows.length === 0 ? (
+        <EmptyState icon="albums-outline" text={emptyText} />
+      ) : (
+        rows.map((item) => (
+          <Pressable key={item.id} style={styles.adminTableRow} onPress={() => onEdit(item)}>
+            <Text style={styles.adminCellMain}>{item.name}</Text>
+            <Text style={styles.adminCell}>{subtitle(item)}</Text>
+            <StatusPill good={active(item)} text={active(item) ? "ACTIVO" : "INACTIVO"} />
+          </Pressable>
+        ))
+      )}
     </FormCard>
   );
 }
@@ -5449,20 +5538,176 @@ function AdminCostConceptsModule({ adminData, onChanged }: { adminData: AdminDat
 }
 
 function AdminCostRulesModule({ adminData, contractTypes, onChanged }: { adminData: AdminData; contractTypes: AppData["contractTypes"]; onChanged: () => void }) {
+  const [contractTypeFilterId, setContractTypeFilterId] = useState(0);
   const [selected, setSelected] = useState<AdminData["costRules"][number] | null | "new">(null);
+  const visibleRules = adminData.costRules.filter((rule) => !contractTypeFilterId || rule.contractTypeId === contractTypeFilterId);
   return (
     <>
-      <AdminCatalogList title="Reglas de costos" rows={adminData.costRules.map((rule) => ({ ...rule, name: `${rule.contractTypeName} / ${rule.costConceptName}` }))} onNew={() => setSelected("new")} onEdit={setSelected as any} subtitle={(item) => `${item.calculationType} ${item.value} ⋅ desde ${item.validFrom}`} active={(item) => item.status === "ACTIVO"} />
-      <AdminCostRuleModal item={selected === "new" ? null : selected} contractTypes={contractTypes} concepts={adminData.costConcepts} visible={selected !== null} onClose={() => setSelected(null)} onSaved={async () => { setSelected(null); await onChanged(); }} />
+      <FormCard title="Filtros">
+        <View style={styles.adminRateFilterGrid}>
+          <AdminSelectField
+            label="Tipo de contrato"
+            icon="briefcase-outline"
+            value={contractTypeFilterId}
+            options={[{ id: 0, name: "Todos los tipos" }, ...contractTypes.map((type) => ({ id: type.id, name: type.name }))]}
+            onChange={setContractTypeFilterId}
+          />
+        </View>
+        <View style={styles.between}>
+          <Text style={styles.caption}>{visibleRules.length} resultados</Text>
+          <Pressable style={styles.smallActionButton} onPress={() => setContractTypeFilterId(0)}>
+            <Ionicons name="refresh-outline" size={16} color={C.navy} />
+            <Text style={styles.smallActionText}>Limpiar filtros</Text>
+          </Pressable>
+        </View>
+      </FormCard>
+
+      <FormCard title="Reglas de costos">
+        <View style={styles.between}>
+          <Text style={styles.caption}>{visibleRules.length} registros</Text>
+          <Pressable style={styles.smallActionButton} onPress={() => setSelected("new")}>
+            <Ionicons name="add-circle-outline" size={16} color={C.navy} />
+            <Text style={styles.smallActionText}>Crear regla</Text>
+          </Pressable>
+        </View>
+        {visibleRules.length === 0 ? (
+          <EmptyState icon="calculator-outline" text="No hay reglas de costos para los filtros seleccionados." />
+        ) : (
+          <View style={styles.adminCompactTable}>
+            <View style={[styles.adminCompactRow, styles.adminCompactHeader]}>
+              <Text style={styles.adminCompactHead}>Tipo contrato</Text>
+              <Text style={styles.adminCompactHead}>Concepto</Text>
+              <Text style={styles.adminCompactHead}>Cálculo</Text>
+              <Text style={styles.adminCompactHead}>Valor</Text>
+              <Text style={styles.adminCompactHead}>Vigencia</Text>
+              <Text style={styles.adminCompactHead}>Estado</Text>
+              <Text style={styles.adminCompactActionHead}>Editar</Text>
+            </View>
+            {visibleRules.map((rule) => (
+              <Pressable key={rule.id} style={styles.adminCompactRow} onPress={() => setSelected(rule)}>
+                <Text style={styles.adminCompactCell}>{rule.contractTypeName}</Text>
+                <Text style={styles.adminCompactCell}>{rule.costConceptName}</Text>
+                <Text style={styles.adminCompactCell}>{adminCalculationLabel(rule.calculationType)}</Text>
+                <Text style={styles.adminCompactCell}>{adminCostRuleValue(rule)}</Text>
+                <Text style={styles.adminCompactCell}>{rule.validFrom}{rule.validTo ? ` a ${rule.validTo}` : " en adelante"}</Text>
+                <View style={styles.adminCompactCell}>
+                  <StatusPill good={rule.status === "ACTIVO"} text={rule.status} />
+                </View>
+                <View style={styles.adminCompactAction}>
+                  <Ionicons name="create-outline" size={18} color={C.navy} />
+                </View>
+              </Pressable>
+            ))}
+          </View>
+        )}
+      </FormCard>
+      <AdminCostRuleModal item={selected === "new" ? null : selected} initialContractTypeId={contractTypeFilterId} contractTypes={contractTypes} concepts={adminData.costConcepts} visible={selected !== null} onClose={() => setSelected(null)} onSaved={async () => { setSelected(null); await onChanged(); }} />
     </>
   );
 }
 
+function adminCalculationLabel(type: AdminData["costRules"][number]["calculationType"]) {
+  if (type === "FIXED_AMOUNT") return "Valor fijo";
+  if (type === "PERCENTAGE_OF_SALE") return "% venta";
+  return "% costo base";
+}
+
+function adminCostRuleValue(rule: AdminData["costRules"][number]) {
+  return rule.calculationType === "FIXED_AMOUNT" ? formatCurrency(rule.value) : `${rule.value}%`;
+}
+
 function AdminWorkwearModule({ adminData, onChanged }: { adminData: AdminData; onChanged: () => void }) {
+  const [workwearTab, setWorkwearTab] = useState<"TYPES" | "HISTORY">("TYPES");
   const [selected, setSelected] = useState<AdminData["workwearTypes"][number] | null | "new">(null);
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [contractorFilterId, setContractorFilterId] = useState(0);
+  const [workwearTypeFilterId, setWorkwearTypeFilterId] = useState(0);
+  const contractorOptions = Array.from(
+    new Map(adminData.workwearMovements.map((movement) => [movement.contractorId, movement.contractorName])).entries(),
+  )
+    .map(([id, name]) => ({ id, name }))
+    .sort((a, b) => a.name.localeCompare(b.name, "es"));
+  const visibleMovements = adminData.workwearMovements.filter((movement) =>
+    (!fromDate || movement.movementDate >= fromDate)
+    && (!toDate || movement.movementDate <= toDate)
+    && (!contractorFilterId || movement.contractorId === contractorFilterId)
+    && (!workwearTypeFilterId || movement.workwearTypeId === workwearTypeFilterId),
+  );
   return (
     <>
-      <AdminCatalogList title="Tipos de dotación" rows={adminData.workwearTypes} onNew={() => setSelected("new")} onEdit={setSelected} subtitle={(item) => item.description ?? "Sin descripción"} active={(item) => item.isActive} />
+      <View style={styles.adminRateTabs}>
+        <AdminRateTab label="Tipos de dotación" icon="shirt-outline" selected={workwearTab === "TYPES"} onPress={() => setWorkwearTab("TYPES")} />
+        <AdminRateTab label="Historial de dotación" icon="list-outline" selected={workwearTab === "HISTORY"} onPress={() => setWorkwearTab("HISTORY")} />
+      </View>
+
+      {workwearTab === "TYPES" && (
+        <AdminCatalogList title="Tipos de dotación" rows={adminData.workwearTypes} onNew={() => setSelected("new")} onEdit={setSelected} subtitle={(item) => item.description ?? "Sin descripción"} active={(item) => item.isActive} />
+      )}
+
+      {workwearTab === "HISTORY" && (
+        <>
+          <FormCard title="Filtros">
+            <View style={styles.adminRateFilterGrid}>
+              <View style={styles.adminRateFilterField}>
+                <AdminField label="Desde" value={fromDate} onChangeText={setFromDate} icon="calendar-outline" />
+              </View>
+              <View style={styles.adminRateFilterField}>
+                <AdminField label="Hasta" value={toDate} onChangeText={setToDate} icon="calendar-outline" />
+              </View>
+              <AdminSelectField
+                label="Contratista"
+                icon="person-outline"
+                value={contractorFilterId}
+                options={[{ id: 0, name: "Todos los contratistas" }, ...contractorOptions]}
+                onChange={setContractorFilterId}
+              />
+              <AdminSelectField
+                label="Tipo de dotación"
+                icon="shirt-outline"
+                value={workwearTypeFilterId}
+                options={[{ id: 0, name: "Todos los tipos" }, ...adminData.workwearTypes.map((type) => ({ id: type.id, name: type.name }))]}
+                onChange={setWorkwearTypeFilterId}
+              />
+            </View>
+            <View style={styles.between}>
+              <Text style={styles.caption}>{visibleMovements.length} resultados</Text>
+              <Pressable style={styles.smallActionButton} onPress={() => { setFromDate(""); setToDate(""); setContractorFilterId(0); setWorkwearTypeFilterId(0); }}>
+                <Ionicons name="refresh-outline" size={16} color={C.navy} />
+                <Text style={styles.smallActionText}>Limpiar filtros</Text>
+              </Pressable>
+            </View>
+          </FormCard>
+
+          <FormCard title="Historial de dotación">
+            {visibleMovements.length === 0 ? (
+              <EmptyState icon="list-outline" text="No hay movimientos de dotación para los filtros seleccionados." />
+            ) : (
+              <View style={styles.adminCompactTable}>
+                <View style={[styles.adminCompactRow, styles.adminCompactHeader]}>
+                  <Text style={styles.adminCompactHead}>Fecha</Text>
+                  <Text style={styles.adminCompactHead}>Contratista</Text>
+                  <Text style={styles.adminCompactHead}>Dotación</Text>
+                  <Text style={styles.adminCompactHead}>Movimiento</Text>
+                  <Text style={styles.adminCompactHead}>Cantidad</Text>
+                  <Text style={styles.adminCompactWideHead}>Observación</Text>
+                </View>
+                {visibleMovements.map((movement) => (
+                  <View key={movement.id} style={styles.adminCompactRow}>
+                    <Text style={styles.adminCompactCell}>{movement.movementDate}</Text>
+                    <Text style={styles.adminCompactCell}>{movement.contractorName}</Text>
+                    <Text style={styles.adminCompactCell}>{movement.workwearTypeName}</Text>
+                    <Text style={styles.adminCompactCell}>{workwearMovementLabel(movement.movementType)}</Text>
+                    <Text style={styles.adminCompactCell}>{movement.quantity}</Text>
+                    <Text style={styles.adminCompactWideCell}>{movement.observations ?? "Sin observación"}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+          </FormCard>
+        </>
+      )}
+
       <AdminWorkwearModal item={selected === "new" ? null : selected} visible={selected !== null} onClose={() => setSelected(null)} onSaved={async () => { setSelected(null); await onChanged(); }} />
     </>
   );
@@ -5862,7 +6107,7 @@ function AdminClientModal({ visible, item, onClose, onSaved }: { visible: boolea
   );
 }
 
-function AdminAreaModal({ visible, item, clients, onClose, onSaved }: { visible: boolean; item: AdminData["areas"][number] | null; clients: AdminData["clients"]; onClose: () => void; onSaved: () => void }) {
+function AdminAreaModal({ visible, item, clients, initialClientId = 0, onClose, onSaved }: { visible: boolean; item: AdminData["areas"][number] | null; clients: AdminData["clients"]; initialClientId?: number; onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState("");
   const [clientId, setClientId] = useState(0);
   const [isActive, setIsActive] = useState(true);
@@ -5870,9 +6115,10 @@ function AdminAreaModal({ visible, item, clients, onClose, onSaved }: { visible:
   useEffect(() => {
     if (!visible) return;
     setName(item?.name ?? "");
-    setClientId(item?.clientId ?? clients[0]?.id ?? 0);
+    const selectedClientId = item?.clientId ?? (initialClientId && clients.some((client) => client.id === initialClientId) ? initialClientId : clients[0]?.id ?? 0);
+    setClientId(selectedClientId);
     setIsActive(item?.isActive ?? true);
-  }, [clients, item, visible]);
+  }, [clients, initialClientId, item, visible]);
   return (
     <AdminModalShell visible={visible} title={item ? "Editar área" : "Crear área"} saving={saving} onClose={onClose} onSave={async () => {
       setSaving(true);
@@ -5892,17 +6138,26 @@ function AdminAreaModal({ visible, item, clients, onClose, onSaved }: { visible:
   );
 }
 
-function AdminShiftModal({ visible, item, areas, onClose, onSaved }: { visible: boolean; item: AdminData["shifts"][number] | null; areas: AdminData["areas"]; onClose: () => void; onSaved: () => void }) {
+function AdminShiftModal({ visible, item, clients, areas, initialClientId = 0, initialAreaId = 0, onClose, onSaved }: { visible: boolean; item: AdminData["shifts"][number] | null; clients: AdminData["clients"]; areas: AdminData["areas"]; initialClientId?: number; initialAreaId?: number; onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState("");
+  const [clientId, setClientId] = useState(0);
   const [areaId, setAreaId] = useState(0);
   const [isActive, setIsActive] = useState(true);
   const [saving, setSaving] = useState(false);
   useEffect(() => {
     if (!visible) return;
     setName(item?.name ?? "");
-    setAreaId(item?.areaId ?? areas[0]?.id ?? 0);
+    const itemArea = item ? areas.find((area) => area.id === item.areaId) : null;
+    const nextClientId = itemArea?.clientId
+      ?? (initialClientId && clients.some((client) => client.id === initialClientId) ? initialClientId : clients[0]?.id ?? 0);
+    const availableAreas = areas.filter((area) => area.clientId === nextClientId);
+    const nextAreaId = item?.areaId
+      ?? (initialAreaId && availableAreas.some((area) => area.id === initialAreaId) ? initialAreaId : availableAreas[0]?.id ?? 0);
+    setClientId(nextClientId);
+    setAreaId(nextAreaId);
     setIsActive(item?.isActive ?? true);
-  }, [areas, item, visible]);
+  }, [areas, clients, initialAreaId, initialClientId, item, visible]);
+  const availableAreas = areas.filter((area) => area.clientId === clientId);
   return (
     <AdminModalShell visible={visible} title={item ? "Editar turno" : "Crear turno"} saving={saving} onClose={onClose} onSave={async () => {
       setSaving(true);
@@ -5916,7 +6171,26 @@ function AdminShiftModal({ visible, item, areas, onClose, onSaved }: { visible: 
       }
     }}>
       <AdminField label="Nombre" value={name} onChangeText={setName} icon="time-outline" />
-      <AdminOptionChips label="Área" value={areaId} options={areas.map((area) => ({ id: area.id, name: `${area.clientName} / ${area.name}` }))} onChange={setAreaId} />
+      <AdminSelectField
+        label="Empresa"
+        icon="business-outline"
+        value={clientId}
+        options={clients.map((client) => ({ id: client.id, name: client.name }))}
+        onChange={(next) => {
+          const nextAreas = areas.filter((area) => area.clientId === next);
+          setClientId(next);
+          setAreaId(nextAreas[0]?.id ?? 0);
+        }}
+      />
+      <AdminSelectField
+        label="Área"
+        icon="location-outline"
+        value={areaId}
+        disabled={!clientId}
+        disabledText="Selecciona una empresa primero"
+        options={availableAreas.map((area) => ({ id: area.id, name: area.name }))}
+        onChange={setAreaId}
+      />
       <AdminSwitch label="Estado" value={isActive} onValueChange={setIsActive} />
     </AdminModalShell>
   );
@@ -6053,7 +6327,7 @@ function AdminCostConceptModal({ visible, item, onClose, onSaved }: { visible: b
   );
 }
 
-function AdminCostRuleModal({ visible, item, contractTypes, concepts, onClose, onSaved }: { visible: boolean; item: AdminData["costRules"][number] | null; contractTypes: AppData["contractTypes"]; concepts: AdminData["costConcepts"]; onClose: () => void; onSaved: () => void }) {
+function AdminCostRuleModal({ visible, item, initialContractTypeId = 0, contractTypes, concepts, onClose, onSaved }: { visible: boolean; item: AdminData["costRules"][number] | null; initialContractTypeId?: number; contractTypes: AppData["contractTypes"]; concepts: AdminData["costConcepts"]; onClose: () => void; onSaved: () => void }) {
   const [contractTypeId, setContractTypeId] = useState(0);
   const [costConceptId, setCostConceptId] = useState(0);
   const [calculationType, setCalculationType] = useState("FIXED_AMOUNT");
@@ -6064,14 +6338,15 @@ function AdminCostRuleModal({ visible, item, contractTypes, concepts, onClose, o
   const [saving, setSaving] = useState(false);
   useEffect(() => {
     if (!visible) return;
-    setContractTypeId(item?.contractTypeId ?? contractTypes[0]?.id ?? 0);
+    const nextContractTypeId = item?.contractTypeId ?? (initialContractTypeId && contractTypes.some((type) => type.id === initialContractTypeId) ? initialContractTypeId : contractTypes[0]?.id ?? 0);
+    setContractTypeId(nextContractTypeId);
     setCostConceptId(item?.costConceptId ?? concepts[0]?.id ?? 0);
     setCalculationType(item?.calculationType ?? "FIXED_AMOUNT");
     setValue(String(item?.value ?? ""));
     setValidFrom(item?.validFrom ?? todayIso());
     setValidTo(item?.validTo ?? "");
     setStatus(item?.status ?? "ACTIVO");
-  }, [concepts, contractTypes, item, visible]);
+  }, [concepts, contractTypes, initialContractTypeId, item, visible]);
   return (
     <AdminModalShell visible={visible} title={item ? "Editar regla" : "Crear regla"} saving={saving} onClose={onClose} onSave={async () => {
       setSaving(true);
@@ -6748,6 +7023,15 @@ const styles = StyleSheet.create({
   adminTableRow: { minHeight: 58, paddingHorizontal: 14, paddingVertical: 11, borderRadius: 15, backgroundColor: C.white, borderWidth: 1, borderColor: C.line, flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 8 },
   adminCellMain: { flex: 1.3, color: C.ink, fontSize: 13, fontWeight: "900" },
   adminCell: { flex: 1, color: C.muted, fontSize: 11, fontWeight: "700" },
+  adminCompactTable: { borderWidth: 1, borderColor: C.line, borderRadius: 14, overflow: "hidden", backgroundColor: C.white },
+  adminCompactRow: { minHeight: 48, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 10, paddingVertical: 9, borderBottomWidth: 1, borderBottomColor: C.line },
+  adminCompactHeader: { minHeight: 42, backgroundColor: C.bg },
+  adminCompactHead: { flex: 1, color: C.ink, fontSize: 9, fontWeight: "900", textTransform: "uppercase" },
+  adminCompactWideHead: { flex: 1.4, color: C.ink, fontSize: 9, fontWeight: "900", textTransform: "uppercase" },
+  adminCompactActionHead: { width: 44, color: C.ink, fontSize: 9, fontWeight: "900", textTransform: "uppercase", textAlign: "center" },
+  adminCompactCell: { flex: 1, color: C.muted, fontSize: 10, fontWeight: "700" },
+  adminCompactWideCell: { flex: 1.4, color: C.muted, fontSize: 10, fontWeight: "700" },
+  adminCompactAction: { width: 44, alignItems: "center", justifyContent: "center" },
   adminModalCard: { width: "100%", maxWidth: 620, maxHeight: "88%", borderRadius: 22, padding: 18, backgroundColor: C.white, gap: 14 },
   adminModalContent: { gap: 12, paddingBottom: 4 },
   adminActions: { gap: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: C.line },

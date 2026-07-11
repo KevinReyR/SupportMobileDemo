@@ -248,6 +248,18 @@ export interface AdminWorkwearType extends NamedRecord {
   isActive: boolean;
 }
 
+export interface AdminWorkwearMovement {
+  id: number;
+  contractorId: number;
+  contractorName: string;
+  workwearTypeId: number;
+  workwearTypeName: string;
+  movementType: WorkwearMovementType;
+  movementDate: string;
+  quantity: number;
+  observations: string | null;
+}
+
 export interface AdminContractRecord {
   id: number;
   contractorId: number;
@@ -270,6 +282,7 @@ export interface AdminData {
   costConcepts: AdminCostConcept[];
   costRules: AdminCostRule[];
   workwearTypes: AdminWorkwearType[];
+  workwearMovements: AdminWorkwearMovement[];
   contracts: AdminContractRecord[];
 }
 

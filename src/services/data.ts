@@ -960,6 +960,7 @@ export async function loadAdminData(): Promise<AdminData> {
     costConceptsResult,
     costRulesResult,
     workwearResult,
+    workwearMovementsResult,
     contractsResult,
   ] = await Promise.all([
     supabase.from("clients").select("id,name,document_number,is_active").order("name"),
@@ -980,6 +981,11 @@ export async function loadAdminData(): Promise<AdminData> {
       .order("valid_from", { ascending: false }),
     supabase.from("workwear_type").select("id,name,description,is_active").order("name"),
     supabase
+      .from("contractor_workwear_movements")
+      .select("id,contractor_id,workwear_type_id,movement_type,movement_date,quantity,observations,contractor(name,last_name),workwear_type(name)")
+      .order("movement_date", { ascending: false })
+      .order("id", { ascending: false }),
+    supabase
       .from("contractor_contract")
       .select("id,contractor_id,contract_type,status_id,start_date,end_date,observations,contractor(name,last_name),contract_status(name),contract_type_ref:contract_type(name)")
       .order("start_date", { ascending: false }),
@@ -994,6 +1000,7 @@ export async function loadAdminData(): Promise<AdminData> {
     costConceptsResult,
     costRulesResult,
     workwearResult,
+    workwearMovementsResult,
     contractsResult,
   ].forEach((result) => fail(result.error));
 
@@ -1079,6 +1086,20 @@ export async function loadAdminData(): Promise<AdminData> {
       description: cleanText(row.description) || null,
       isActive: row.is_active !== false,
     })),
+    workwearMovements: (workwearMovementsResult.data ?? []).map((row: any) => {
+      const contractor = firstRelation<any>(row.contractor);
+      return {
+        id: row.id,
+        contractorId: row.contractor_id,
+        contractorName: `${cleanText(contractor?.name)} ${cleanText(contractor?.last_name)}`.trim() || "Sin contratista",
+        workwearTypeId: row.workwear_type_id,
+        workwearTypeName: cleanText(firstRelation<any>(row.workwear_type)?.name),
+        movementType: row.movement_type,
+        movementDate: row.movement_date,
+        quantity: Number(row.quantity ?? 0),
+        observations: cleanText(row.observations) || null,
+      };
+    }),
     contracts: (contractsResult.data ?? []).map((row: any) => {
       const contractor = firstRelation<any>(row.contractor);
       return {
