@@ -221,7 +221,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       supabase
         .from("contractor")
         .select(
-          "id,name,last_name,document_number,profile_photo_file_id,birth_date,phone_number,email,rh,eps,arl,disponibility,shirt_size,pant_size,shoe_size,hire_date,termination_date,transport_type(name),civil_state_type(name)",
+          "id,name,last_name,document_number,profile_photo_file_id,birth_date,birth_place,residence_city,phone_number,email,emergency_contact_name,emergency_contact_relationship,emergency_contact_phone,rh,eps,arl,pension_fund,disponibility,shirt_size,pant_size,shoe_size,hire_date,termination_date,transport_type(name),civil_state_type(name)",
         )
         .order("name"),
       supabase
@@ -278,14 +278,19 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
         document: row.document_number,
         profilePhotoFileId: row.profile_photo_file_id ?? null,
         birthDate: row.birth_date,
+        birthPlace: cleanText(row.birth_place) || "Sin registrar",
         phone: row.phone_number,
         email: row.email,
+        emergencyContactName: cleanText(row.emergency_contact_name) || "Sin registrar",
+        emergencyContactRelationship: cleanText(row.emergency_contact_relationship) || "Sin registrar",
+        emergencyContactPhone: cleanText(row.emergency_contact_phone) || "Sin registrar",
         rh: row.rh,
         eps: cleanText(row.eps) || null,
         arl: cleanText(row.arl) || null,
+        pensionFund: cleanText(row.pension_fund) || null,
         transport: cleanText(firstRelation<any>(row.transport_type)?.name) || "Sin registrar",
         civilState: cleanText(firstRelation<any>(row.civil_state_type)?.name) || "Sin registrar",
-        city: "Medellín",
+        city: cleanText(row.residence_city) || "Sin registrar",
         available: Boolean(row.disponibility),
         shirtSize: row.shirt_size,
         pantSize: row.pant_size,
@@ -413,6 +418,113 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
     })),
     users,
   };
+}
+
+function mapClientContractor(row: any): ClientContractor {
+  const name = cleanText(row.first_name);
+  const lastName = cleanText(row.last_name);
+  return {
+    id: Number(row.contractor_id),
+    name,
+    lastName,
+    fullName: `${name} ${lastName}`.trim(),
+    initials: `${name[0] ?? ""}${lastName[0] ?? ""}`.toUpperCase(),
+    document: cleanText(row.document_number),
+    profilePhotoFileId: row.profile_photo_file_id ?? null,
+    birthDate: row.birth_date,
+    rh: cleanText(row.rh) || null,
+    eps: cleanText(row.eps) || null,
+    arl: cleanText(row.arl) || null,
+    civilState: cleanText(row.civil_state) || "Sin registrar",
+    lastArea: cleanText(row.last_area) || "Sin área",
+    lastDate: row.last_operation_date,
+  };
+}
+
+export async function loadContractorProfile(contractorId: number): Promise<Contractor> {
+  const [contractorResult, assignmentResult, contractResult] = await Promise.all([
+    supabase
+      .from("contractor")
+      .select(
+        "id,name,last_name,document_number,profile_photo_file_id,birth_date,birth_place,residence_city,phone_number,email,emergency_contact_name,emergency_contact_relationship,emergency_contact_phone,rh,eps,arl,pension_fund,disponibility,shirt_size,pant_size,shoe_size,hire_date,termination_date,transport_type(name),civil_state_type(name)",
+      )
+      .eq("id", contractorId)
+      .single(),
+    supabase
+      .from("operation_assignment")
+      .select("id,contractor_id,operation(operation_date,clients(name),area(name))")
+      .eq("contractor_id", contractorId)
+      .is("deleted_at", null),
+    supabase
+      .from("contractor_contract")
+      .select("id,contractor_id,start_date,end_date,status_id,contract_type,contract_status(name),contract_type_ref:contract_type(name)")
+      .eq("contractor_id", contractorId)
+      .order("start_date", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(1),
+  ]);
+  fail(contractorResult.error);
+  fail(assignmentResult.error);
+  fail(contractResult.error);
+
+  const row = contractorResult.data as any;
+  const latestAssignment = (assignmentResult.data ?? [])
+    .map((assignment: any) => firstRelation<any>(assignment.operation))
+    .filter(Boolean)
+    .sort((left: any, right: any) => String(right.operation_date).localeCompare(String(left.operation_date)))[0];
+  const contract = (contractResult.data ?? [])[0] as any;
+  const contractStatus = contract
+    ? normalizeContractStatus(firstRelation<any>(contract.contract_status)?.name)
+    : "INACTIVO";
+  const firstName = cleanText(row.name);
+  const lastName = cleanText(row.last_name);
+
+  return {
+    id: Number(row.id),
+    name: firstName,
+    lastName,
+    fullName: `${firstName} ${lastName}`.trim(),
+    initials: `${firstName[0] ?? ""}${lastName[0] ?? ""}`.toUpperCase(),
+    document: cleanText(row.document_number),
+    profilePhotoFileId: row.profile_photo_file_id ?? null,
+    birthDate: row.birth_date,
+    birthPlace: cleanText(row.birth_place) || "Sin registrar",
+    phone: row.phone_number,
+    email: row.email,
+    emergencyContactName: cleanText(row.emergency_contact_name) || "Sin registrar",
+    emergencyContactRelationship: cleanText(row.emergency_contact_relationship) || "Sin registrar",
+    emergencyContactPhone: cleanText(row.emergency_contact_phone) || "Sin registrar",
+    rh: row.rh,
+    eps: cleanText(row.eps) || null,
+    arl: cleanText(row.arl) || null,
+    pensionFund: cleanText(row.pension_fund) || null,
+    transport: cleanText(firstRelation<any>(row.transport_type)?.name) || "Sin registrar",
+    civilState: cleanText(firstRelation<any>(row.civil_state_type)?.name) || "Sin registrar",
+    city: cleanText(row.residence_city) || "Sin registrar",
+    available: Boolean(row.disponibility),
+    shirtSize: row.shirt_size,
+    pantSize: row.pant_size,
+    shoeSize: row.shoe_size,
+    hireDate: row.hire_date,
+    terminationDate: row.termination_date,
+    active: contractStatus === "ACTIVO",
+    contractStatus,
+    contractTypeId: contract?.contract_type ?? null,
+    contractTypeName: cleanText(firstRelation<any>(contract?.contract_type_ref)?.name) || "Sin tipo",
+    lastClient: cleanText(firstRelation<any>(latestAssignment?.clients)?.name) || "Sin operación",
+    lastArea: cleanText(firstRelation<any>(latestAssignment?.area)?.name) || "Sin área",
+    lastDate: latestAssignment?.operation_date ?? null,
+  };
+}
+
+export async function loadClientContractorProfile(contractorId: number): Promise<ClientContractor> {
+  const result = await supabase.rpc("get_client_contractor", {
+    p_contractor_id: contractorId,
+  });
+  fail(result.error);
+  const row = (result.data ?? [])[0];
+  if (!row) throw new Error("No tienes acceso a este contratista.");
+  return mapClientContractor(row);
 }
 
 export async function loadOperationAssignments(operationId: number): Promise<Assignment[]> {
@@ -781,12 +893,14 @@ export async function reviewOperation(
 }
 
 export async function loadStatisticsSummary(input: {
-  month: string;
+  startDate: string;
+  endDate: string;
   clientId: number | null;
   contractorId: number | null;
 }): Promise<StatisticsSummary> {
-  const result = await supabase.rpc("get_monthly_statistics", {
-    p_month: input.month,
+  const result = await supabase.rpc("get_statistics_by_date_range", {
+    p_start_date: input.startDate,
+    p_end_date: input.endDate,
     p_client_id: input.clientId || null,
     p_contractor_id: input.contractorId || null,
   });
@@ -837,12 +951,14 @@ function mapDirectorRanking(items: any[] = []): DirectorReportRankingItem[] {
 }
 
 export async function loadDirectorReports(input: {
-  month: string;
+  startDate: string;
+  endDate: string;
   clientId: number | null;
   contractorId: number | null;
 }): Promise<DirectorReportsSummary> {
   const result = await supabase.rpc("get_director_reports", {
-    p_month: input.month,
+    p_start_date: input.startDate,
+    p_end_date: input.endDate,
     p_client_id: input.clientId || null,
     p_contractor_id: input.contractorId || null,
   });
@@ -863,8 +979,8 @@ export async function loadDirectorReports(input: {
     absences: Number(row?.absences ?? 0),
     clientsCount: Number(row?.clients_count ?? 0),
     coveragePercent: Number(row?.coverage_percent ?? 0),
-    weeklySeries: mapDirectorSeries(row?.weekly_series ?? []),
-    dailySeries: mapDirectorSeries(row?.daily_series ?? []),
+    trendGranularity: row?.trend_granularity ?? "DAY",
+    trendSeries: mapDirectorSeries(row?.trend_series ?? []),
     clientRanking: mapDirectorRanking(row?.client_ranking ?? []),
     contractorRanking: mapDirectorRanking(row?.contractor_ranking ?? []),
     payrollByClient: mapDirectorRanking(row?.payroll_by_client ?? []),

@@ -1,4 +1,4 @@
-﻿import React, { useCallback, useEffect, useRef, useState } from "react";
+﻿import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -45,9 +45,11 @@ import {
   finalizeOperation,
   loadAdminData,
   loadAppData,
+  loadClientContractorProfile,
   loadClientContractorHistory,
   loadContractorDocuments,
   loadContractorHistory,
+  loadContractorProfile,
   loadContractorWorkwearMovements,
   loadContractorWorkwearSummary,
   loadAvailableContractorIds,
@@ -699,6 +701,14 @@ export default function SupportApp() {
             {screen === "contractor" && context.role === "Cliente" && selectedClientContractor && (
               <ClientContractorProfile
                 contractor={selectedClientContractor}
+                onContractorRefreshed={(updatedContractor) => {
+                  setData((current) => ({
+                    ...current,
+                    clientContractors: current.clientContractors.map((item) =>
+                      item.id === updatedContractor.id ? updatedContractor : item,
+                    ),
+                  }));
+                }}
                 onDocument={openDocument}
                 onHistory={(history) => {
                   setSelectedHistory(history);
@@ -716,6 +726,14 @@ export default function SupportApp() {
                 workwearTypes={data.workwearTypes}
                 onDocument={openDocument}
                 onChanged={refresh}
+                onContractorRefreshed={(updatedContractor) => {
+                  setData((current) => ({
+                    ...current,
+                    contractors: current.contractors.map((item) =>
+                      item.id === updatedContractor.id ? updatedContractor : item,
+                    ),
+                  }));
+                }}
                 onHistory={(history) => {
                   setSelectedHistory(history);
                   navigate("history-detail");
@@ -3310,17 +3328,34 @@ function Staff({
   );
 }
 
+type ContractorDocumentsSectionHandle = {
+  replaceDocuments: (documents: ContractorDocument[]) => void;
+};
+
+type ContractorWorkwearSectionHandle = {
+  replaceWorkwear: (summary: WorkwearSummary[], movements: WorkwearMovement[]) => void;
+};
+
+type ContractorActivationDocumentsCardHandle = {
+  replaceDocuments: (documents: ContractorDocument[]) => void;
+};
+
 function ClientContractorProfile({
   contractor,
+  onContractorRefreshed,
   onDocument,
   onHistory,
 }: {
   contractor: ClientContractor;
+  onContractorRefreshed: (contractor: ClientContractor) => void;
   onDocument: (document: ContractorDocument) => void;
   onHistory: (history: ContractorHistory) => void;
 }) {
   const [history, setHistory] = useState<ContractorHistory[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshingRef = useRef(false);
+  const documentsRef = useRef<ContractorDocumentsSectionHandle>(null);
 
   useEffect(() => {
     loadClientContractorHistory(contractor.id)
@@ -3329,8 +3364,32 @@ function ClientContractorProfile({
       .finally(() => setLoading(false));
   }, [contractor.id]);
 
+  const refreshProfile = useCallback(async () => {
+    if (refreshingRef.current) return;
+    refreshingRef.current = true;
+    setRefreshing(true);
+    try {
+      const [updatedContractor, updatedHistory, updatedDocuments] = await Promise.all([
+        loadClientContractorProfile(contractor.id),
+        loadClientContractorHistory(contractor.id),
+        loadContractorDocuments(contractor.id),
+      ]);
+      onContractorRefreshed(updatedContractor);
+      setHistory(updatedHistory);
+      documentsRef.current?.replaceDocuments(updatedDocuments);
+    } catch (cause) {
+      Alert.alert("No fue posible actualizar", errorMessage(cause));
+    } finally {
+      refreshingRef.current = false;
+      setRefreshing(false);
+    }
+  }, [contractor.id, onContractorRefreshed]);
+
   return (
-    <Page>
+    <Page
+      loading={refreshing}
+      onRefresh={Platform.OS !== "web" ? refreshProfile : undefined}
+    >
       <LinearGradient colors={[C.navy, C.navy2]} style={styles.profileHero}>
         <ContractorProfileAvatar fileId={contractor.profilePhotoFileId} initials={contractor.initials} />
         <Text style={styles.profileName}>{contractor.fullName}</Text>
@@ -3351,7 +3410,7 @@ function ClientContractorProfile({
         ["EPS", contractor.eps ?? "Sin registrar"],
         ["ARL", contractor.arl ?? "Sin registrar"],
       ]} />
-      <ContractorDocumentsSection contractorId={contractor.id} onOpen={onDocument} />
+      <ContractorDocumentsSection ref={documentsRef} contractorId={contractor.id} onOpen={onDocument} />
       <SectionTitle title="Historial de operaciones" action={`${history.length} registros`} />
       {loading ? (
         <ActivityIndicator color={C.navy} />
@@ -3384,6 +3443,7 @@ function ContractorProfile({
   workwearTypes,
   onDocument,
   onChanged,
+  onContractorRefreshed,
   onHistory,
 }: {
   context: UserContext;
@@ -3394,19 +3454,55 @@ function ContractorProfile({
   workwearTypes: AppData["workwearTypes"];
   onDocument: (document: ContractorDocument) => void;
   onChanged: () => void;
+  onContractorRefreshed: (contractor: Contractor) => void;
   onHistory: (history: ContractorHistory) => void;
 }) {
   const [history, setHistory] = useState<ContractorHistory[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshingRef = useRef(false);
   const [terminationVisible, setTerminationVisible] = useState(false);
+  const documentsRef = useRef<ContractorDocumentsSectionHandle>(null);
+  const workwearRef = useRef<ContractorWorkwearSectionHandle>(null);
+  const activationRef = useRef<ContractorActivationDocumentsCardHandle>(null);
   useEffect(() => {
     loadContractorHistory(contractor.id)
       .then(setHistory)
       .catch((cause) => Alert.alert("No fue posible cargar", errorMessage(cause)))
       .finally(() => setLoading(false));
   }, [contractor.id]);
+
+  const refreshProfile = useCallback(async () => {
+    if (refreshingRef.current) return;
+    refreshingRef.current = true;
+    setRefreshing(true);
+    try {
+      const [updatedContractor, updatedHistory, updatedDocuments, updatedSummary, updatedMovements] =
+        await Promise.all([
+          loadContractorProfile(contractor.id),
+          loadContractorHistory(contractor.id),
+          loadContractorDocuments(contractor.id),
+          loadContractorWorkwearSummary(contractor.id),
+          loadContractorWorkwearMovements(contractor.id),
+        ]);
+      onContractorRefreshed(updatedContractor);
+      setHistory(updatedHistory);
+      documentsRef.current?.replaceDocuments(updatedDocuments);
+      workwearRef.current?.replaceWorkwear(updatedSummary, updatedMovements);
+      activationRef.current?.replaceDocuments(updatedDocuments);
+    } catch (cause) {
+      Alert.alert("No fue posible actualizar", errorMessage(cause));
+    } finally {
+      refreshingRef.current = false;
+      setRefreshing(false);
+    }
+  }, [contractor.id, onContractorRefreshed]);
+
   return (
-    <Page>
+    <Page
+      loading={refreshing}
+      onRefresh={Platform.OS !== "web" ? refreshProfile : undefined}
+    >
       <LinearGradient colors={[C.navy, C.navy2]} style={styles.profileHero}>
         <ContractorProfileAvatar fileId={contractor.profilePhotoFileId} initials={contractor.initials} />
         <Text style={styles.profileName}>{contractor.fullName}</Text>
@@ -3416,12 +3512,13 @@ function ContractorProfile({
       <InfoCard title="Información personal" rows={[
         ["Nombres y apellidos", contractor.fullName],
         ["Fecha de nacimiento", contractor.birthDate ?? "Sin registrar"],
+        ["Ciudad de nacimiento", contractor.birthPlace],
         ["RH", contractor.rh ?? "Sin registrar"],
         ["Estado civil", contractor.civilState],
       ]} />
       <InfoCard title="Seguridad Social" rows={[
         ["EPS", contractor.eps ?? "Sin registrar"],
-        ["ARL", contractor.arl ?? "Sin registrar"],
+        ["Fondo Pensiones", contractor.pensionFund ?? "Sin registrar"],
       ]} />
       <InfoCard title="Información laboral" rows={[
         ["Fecha de contratación", formatDate(contractor.hireDate)],
@@ -3434,9 +3531,15 @@ function ContractorProfile({
         ["Ciudad", contractor.city],
         ["Transporte", contractor.transport],
       ]} />
-      <ContractorWorkwearSection contractorId={contractor.id} workwearTypes={workwearTypes} />
+      <InfoCard title="Contacto de emergencia" rows={[
+        ["Nombre", contractor.emergencyContactName],
+        ["Parentesco", contractor.emergencyContactRelationship],
+        ["Teléfono", contractor.emergencyContactPhone],
+      ]} />
+      <ContractorWorkwearSection ref={workwearRef} contractorId={contractor.id} workwearTypes={workwearTypes} />
       {context.role === "Director" && contractor.contractStatus === "PENDIENTE" && (
         <ContractorActivationDocumentsCard
+          ref={activationRef}
           contractor={contractor}
           contractTypes={contractTypes}
           onChanged={onChanged}
@@ -3461,6 +3564,7 @@ function ContractorProfile({
         }}
       />
       <ContractorDocumentsSection
+        ref={documentsRef}
         contractorId={contractor.id}
         onOpen={onDocument}
         uploadEnabled={
@@ -3554,13 +3658,16 @@ function workwearMovementSuccess(type: WorkwearMovementType) {
   return "Dotación entregada";
 }
 
-function ContractorWorkwearSection({
+const ContractorWorkwearSection = forwardRef<
+  ContractorWorkwearSectionHandle,
+  {
+    contractorId: number;
+    workwearTypes: AppData["workwearTypes"];
+  }
+>(function ContractorWorkwearSection({
   contractorId,
   workwearTypes,
-}: {
-  contractorId: number;
-  workwearTypes: AppData["workwearTypes"];
-}) {
+}, ref) {
   const [summary, setSummary] = useState<WorkwearSummary[]>([]);
   const [movements, setMovements] = useState<WorkwearMovement[]>([]);
   const [loading, setLoading] = useState(true);
@@ -3588,6 +3695,15 @@ function ContractorWorkwearSection({
   useEffect(() => {
     loadWorkwear();
   }, [loadWorkwear]);
+
+  useImperativeHandle(ref, () => ({
+    replaceWorkwear(nextSummary, nextMovements) {
+      setError("");
+      setSummary(nextSummary);
+      setMovements(nextMovements);
+      setLoading(false);
+    },
+  }), []);
 
   return (
     <View style={styles.documentsSection}>
@@ -3677,7 +3793,7 @@ function ContractorWorkwearSection({
       />
     </View>
   );
-}
+});
 
 function WorkwearMovementModal({
   visible,
@@ -3876,17 +3992,20 @@ function WorkwearMovementModal({
   );
 }
 
-function ContractorDocumentsSection({
+const ContractorDocumentsSection = forwardRef<
+  ContractorDocumentsSectionHandle,
+  {
+    contractorId: number;
+    onOpen: (document: ContractorDocument) => void;
+    uploadEnabled?: boolean;
+    documentTypes?: ContractorDocumentTypeOption[];
+  }
+>(function ContractorDocumentsSection({
   contractorId,
   onOpen,
   uploadEnabled = false,
   documentTypes = [],
-}: {
-  contractorId: number;
-  onOpen: (document: ContractorDocument) => void;
-  uploadEnabled?: boolean;
-  documentTypes?: ContractorDocumentTypeOption[];
-}) {
+}, ref) {
   const [documents, setDocuments] = useState<ContractorDocument[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -3907,6 +4026,14 @@ function ContractorDocumentsSection({
   useEffect(() => {
     void loadDocuments();
   }, [loadDocuments]);
+
+  useImperativeHandle(ref, () => ({
+    replaceDocuments(nextDocuments) {
+      setError("");
+      setDocuments(nextDocuments);
+      setLoading(false);
+    },
+  }), []);
 
   return (
     <View style={styles.documentsSection}>
@@ -3966,7 +4093,7 @@ function ContractorDocumentsSection({
       />
     </View>
   );
-}
+});
 
 function ContractorActivationCard({
   contractorId,
@@ -4345,15 +4472,18 @@ const activationDocumentOptions: { typeCode: ContractorActivationDocumentType; t
   { typeCode: "ANTECEDENTES_PROCURADURIA", title: "Antecedentes Procuraduría" },
 ];
 
-function ContractorActivationDocumentsCard({
+const ContractorActivationDocumentsCard = forwardRef<
+  ContractorActivationDocumentsCardHandle,
+  {
+    contractor: Contractor;
+    contractTypes: AppData["contractTypes"];
+    onChanged: () => void;
+  }
+>(function ContractorActivationDocumentsCard({
   contractor,
   contractTypes,
   onChanged,
-}: {
-  contractor: Contractor;
-  contractTypes: AppData["contractTypes"];
-  onChanged: () => void;
-}) {
+}, ref) {
   const [selectedFiles, setSelectedFiles] = useState<Partial<Record<ContractorActivationDocumentType, ContractorPdfFile>>>({});
   const [existingCodes, setExistingCodes] = useState<ContractorActivationDocumentType[]>([]);
   const [contractTypeId, setContractTypeId] = useState(contractor.contractTypeId ?? contractTypes[0]?.id ?? 0);
@@ -4388,6 +4518,17 @@ function ContractorActivationDocumentsCard({
   useEffect(() => {
     setContractTypeId(contractor.contractTypeId ?? contractTypes[0]?.id ?? 0);
   }, [contractTypes, contractor.contractTypeId, contractor.id]);
+
+  useImperativeHandle(ref, () => ({
+    replaceDocuments(documents) {
+      setExistingCodes(
+        activationDocumentOptions
+          .map((item) => item.typeCode)
+          .filter((code) => documents.some((document) => document.typeCode === code)),
+      );
+      setLoadingDocuments(false);
+    },
+  }), []);
 
   const pickDocument = async (typeCode: ContractorActivationDocumentType, title: string) => {
     try {
@@ -4571,7 +4712,7 @@ function ContractorActivationDocumentsCard({
     />
     </>
   );
-}
+});
 
 function DocumentPreview({ document }: { document: ContractorDocument }) {
   const [url, setUrl] = useState("");
@@ -4679,11 +4820,12 @@ const directorReportTabs: { id: DirectorReportTab; title: string; icon: IconName
 ];
 
 function DirectorReports({ context, data }: { context: UserContext; data: AppData }) {
-  const defaultMonth = monthStartIso(todayIso());
-  const [month, setMonth] = useState(defaultMonth);
+  const today = todayIso();
+  const [startDate, setStartDate] = useState(monthStartIso(today));
+  const [endDate, setEndDate] = useState(today);
   const [clientId, setClientId] = useState(0);
   const [contractorId, setContractorId] = useState(0);
-  const [openFilter, setOpenFilter] = useState<"month" | "client" | "contractor" | null>(null);
+  const [openFilter, setOpenFilter] = useState<"startDate" | "endDate" | "client" | "contractor" | null>(null);
   const [activeTab, setActiveTab] = useState<DirectorReportTab>("operation");
   const [report, setReport] = useState<DirectorReportsSummary | null>(null);
   const [contractorOptions, setContractorOptions] = useState<DirectorReportsSummary["contractorOptions"]>([]);
@@ -4706,12 +4848,14 @@ function DirectorReports({ context, data }: { context: UserContext; data: AppDat
     try {
       const [reportResult, optionsResult] = await Promise.all([
         loadDirectorReports({
-          month,
+          startDate,
+          endDate,
           clientId: clientId || null,
           contractorId: contractorId || null,
         }),
         loadDirectorReports({
-          month,
+          startDate,
+          endDate,
           clientId: clientId || null,
           contractorId: null,
         }),
@@ -4725,7 +4869,7 @@ function DirectorReports({ context, data }: { context: UserContext; data: AppDat
     } finally {
       setLoading(false);
     }
-  }, [clientId, contractorId, month]);
+  }, [clientId, contractorId, endDate, startDate]);
 
   useEffect(() => {
     refreshReports();
@@ -4741,8 +4885,22 @@ function DirectorReports({ context, data }: { context: UserContext; data: AppDat
       report.extraHours > 0
     : false;
 
-  const selectMonth = (date: string) => {
-    setMonth(monthStartIso(date));
+  const selectStartDate = (date: string) => {
+    if (date > endDate) {
+      Alert.alert("Rango no válido", "La fecha inicial no puede ser posterior a la fecha final.");
+      return;
+    }
+    setStartDate(date);
+    setContractorId(0);
+    setOpenFilter(null);
+  };
+
+  const selectEndDate = (date: string) => {
+    if (date < startDate) {
+      Alert.alert("Rango no válido", "La fecha final no puede ser anterior a la fecha inicial.");
+      return;
+    }
+    setEndDate(date);
     setContractorId(0);
     setOpenFilter(null);
   };
@@ -4757,7 +4915,10 @@ function DirectorReports({ context, data }: { context: UserContext; data: AppDat
       <FormCard title="Filtros">
         <View style={styles.reportFilterGrid}>
           <View style={styles.reportFilterField}>
-            <Choice label="Mes" value={formatMonth(month)} icon="calendar-outline" onPress={() => setOpenFilter("month")} />
+            <Choice label="Fecha inicial" value={formatDate(startDate)} icon="calendar-outline" onPress={() => setOpenFilter("startDate")} />
+          </View>
+          <View style={styles.reportFilterField}>
+            <Choice label="Fecha final" value={formatDate(endDate)} icon="calendar-outline" onPress={() => setOpenFilter("endDate")} />
           </View>
           <View style={styles.reportFilterField}>
             <Choice label="Empresa" value={selectedClientName} icon="business-outline" onPress={() => setOpenFilter("client")} />
@@ -4791,15 +4952,23 @@ function DirectorReports({ context, data }: { context: UserContext; data: AppDat
       ) : !report || !hasData ? (
         <EmptyState icon="bar-chart-outline" text="No hay informes para los filtros seleccionados." />
       ) : (
-        <DirectorReportTabContent report={report} tab={activeTab} month={month} />
+        <DirectorReportTabContent report={report} tab={activeTab} startDate={startDate} endDate={endDate} />
       )}
       <CalendarModal
-        visible={openFilter === "month"}
-        selectedDate={month}
-        title="Seleccionar mes"
-        subtitle="Elige cualquier día del mes que quieres visualizar."
+        visible={openFilter === "startDate"}
+        selectedDate={startDate}
+        title="Seleccionar fecha inicial"
+        subtitle="Elige el primer día que quieres incluir en el informe."
         onClose={() => setOpenFilter(null)}
-        onSelect={selectMonth}
+        onSelect={selectStartDate}
+      />
+      <CalendarModal
+        visible={openFilter === "endDate"}
+        selectedDate={endDate}
+        title="Seleccionar fecha final"
+        subtitle="Elige el último día que quieres incluir en el informe."
+        onClose={() => setOpenFilter(null)}
+        onSelect={selectEndDate}
       />
       <DropdownModal
         visible={openFilter === "client"}
@@ -4840,13 +5009,16 @@ function DirectorReports({ context, data }: { context: UserContext; data: AppDat
 function DirectorReportTabContent({
   report,
   tab,
-  month,
+  startDate,
+  endDate,
 }: {
   report: DirectorReportsSummary;
   tab: DirectorReportTab;
-  month: string;
+  startDate: string;
+  endDate: string;
 }) {
   const isWeb = Platform.OS === "web";
+  const trendLabel = report.trendGranularity === "DAY" ? "día" : report.trendGranularity === "WEEK" ? "semana" : "mes";
   if (tab === "operation") {
     return (
       <>
@@ -4859,8 +5031,8 @@ function DirectorReportTabContent({
         <View style={styles.reportGrid}>
           <View style={styles.reportGridItem}>
             <ReportBarChart
-              title="Operaciones cerradas por semana"
-              data={report.weeklySeries}
+              title={`Operaciones cerradas por ${trendLabel}`}
+              data={report.trendSeries}
               getValue={(item) => item.closedOperations ?? 0}
               valueLabel={(value) => String(Math.round(value))}
             />
@@ -4869,13 +5041,13 @@ function DirectorReportTabContent({
             <View style={styles.reportGridItem}>
               <ReportLineChart
                 title="Tendencia de turnos trabajados"
-                data={report.dailySeries}
+                data={report.trendSeries}
                 getValue={(item) => item.workedShifts ?? 0}
               />
             </View>
           )}
         </View>
-        <Notice icon="bulb-outline" text={`Cobertura calculada con personal trabajado frente a planeado durante ${formatMonth(month)}.`} />
+        <Notice icon="bulb-outline" text={`Cobertura calculada con personal trabajado frente a planeado entre ${formatDate(startDate)} y ${formatDate(endDate)}.`} />
       </>
     );
   }
@@ -4894,8 +5066,8 @@ function DirectorReportTabContent({
           {isWeb && (
             <View style={styles.reportGridItem}>
               <ReportBarChart
-                title="Auxiliares por semana"
-                data={report.weeklySeries}
+                title={`Auxiliares por ${trendLabel}`}
+                data={report.trendSeries}
                 getValue={(item) => item.contractors ?? 0}
                 valueLabel={(value) => String(Math.round(value))}
               />
@@ -4938,8 +5110,8 @@ function DirectorReportTabContent({
           {isWeb && (
             <View style={styles.reportGridItem}>
               <ReportBarChart
-                title="Ventas por semana"
-                data={report.weeklySeries}
+                title={`Ventas por ${trendLabel}`}
+                data={report.trendSeries}
                 getValue={(item) => item.saleTotal ?? 0}
                 valueLabel={formatShortCurrency}
               />
@@ -5010,7 +5182,7 @@ function ReportBarChart<T>({
   getLabel?: (item: T) => string;
   valueLabel?: (value: number) => string;
 }) {
-  const items = data.slice(0, Platform.OS === "web" ? 12 : 7);
+  const items = sampleChartItems(data, Platform.OS === "web" ? 12 : 7);
   const values = items.map(getValue);
   const max = Math.max(...values, 1);
   const width = 360;
@@ -5061,7 +5233,7 @@ function ReportLineChart({
   data: DirectorReportSeries[];
   getValue: (item: DirectorReportSeries) => number;
 }) {
-  const items = data.slice(-14);
+  const items = sampleChartItems(data, 14);
   const values = items.map(getValue);
   const max = Math.max(...values, 1);
   const width = 360;
@@ -5100,6 +5272,14 @@ function ReportLineChart({
       )}
     </View>
   );
+}
+
+function sampleChartItems<T>(items: T[], limit: number): T[] {
+  if (items.length <= limit) return items;
+  return Array.from({ length: limit }, (_, index) => {
+    const sourceIndex = Math.round((index * (items.length - 1)) / (limit - 1));
+    return items[sourceIndex];
+  });
 }
 
 function ReportRankingList({
@@ -5148,12 +5328,13 @@ function Statistics({ context, data }: { context: UserContext; data: AppData }) 
     return <DirectorReports context={context} data={data} />;
   }
 
-  const defaultMonth = monthStartIso(todayIso());
+  const today = todayIso();
   const fixedClientId = context.role === "Cliente" ? context.clients[0]?.id ?? 0 : 0;
-  const [month, setMonth] = useState(defaultMonth);
+  const [startDate, setStartDate] = useState(monthStartIso(today));
+  const [endDate, setEndDate] = useState(today);
   const [clientId, setClientId] = useState(fixedClientId);
   const [contractorId, setContractorId] = useState(0);
-  const [openFilter, setOpenFilter] = useState<"month" | "client" | "contractor" | null>(null);
+  const [openFilter, setOpenFilter] = useState<"startDate" | "endDate" | "client" | "contractor" | null>(null);
   const [summary, setSummary] = useState<StatisticsSummary | null>(null);
   const [contractorOptions, setContractorOptions] = useState<StatisticsSummary["contractorOptions"]>([]);
   const [loading, setLoading] = useState(true);
@@ -5175,12 +5356,14 @@ function Statistics({ context, data }: { context: UserContext; data: AppData }) 
     try {
       const [summaryResult, optionsResult] = await Promise.all([
         loadStatisticsSummary({
-          month,
+          startDate,
+          endDate,
           clientId: clientId || null,
           contractorId: contractorId || null,
         }),
         loadStatisticsSummary({
-          month,
+          startDate,
+          endDate,
           clientId: clientId || null,
           contractorId: null,
         }),
@@ -5194,7 +5377,7 @@ function Statistics({ context, data }: { context: UserContext; data: AppData }) 
     } finally {
       setLoading(false);
     }
-  }, [clientId, contractorId, month]);
+  }, [clientId, contractorId, endDate, startDate]);
 
   useEffect(() => {
     refreshStatistics();
@@ -5210,8 +5393,22 @@ function Statistics({ context, data }: { context: UserContext; data: AppData }) 
       summary.extraHours > 0
     : false;
 
-  const selectMonth = (date: string) => {
-    setMonth(monthStartIso(date));
+  const selectStartDate = (date: string) => {
+    if (date > endDate) {
+      Alert.alert("Rango no válido", "La fecha inicial no puede ser posterior a la fecha final.");
+      return;
+    }
+    setStartDate(date);
+    setContractorId(0);
+    setOpenFilter(null);
+  };
+
+  const selectEndDate = (date: string) => {
+    if (date < startDate) {
+      Alert.alert("Rango no válido", "La fecha final no puede ser anterior a la fecha inicial.");
+      return;
+    }
+    setEndDate(date);
     setContractorId(0);
     setOpenFilter(null);
   };
@@ -5229,10 +5426,16 @@ function Statistics({ context, data }: { context: UserContext; data: AppData }) 
       </View>
       <FormCard title="Filtros">
         <Choice
-          label="Mes"
-          value={formatMonth(month)}
+          label="Fecha inicial"
+          value={formatDate(startDate)}
           icon="calendar-outline"
-          onPress={() => setOpenFilter("month")}
+          onPress={() => setOpenFilter("startDate")}
+        />
+        <Choice
+          label="Fecha final"
+          value={formatDate(endDate)}
+          icon="calendar-outline"
+          onPress={() => setOpenFilter("endDate")}
         />
         {context.role !== "Cliente" && (
           <Choice
@@ -5269,17 +5472,25 @@ function Statistics({ context, data }: { context: UserContext; data: AppData }) 
           </View>
           <Notice
             icon="bulb-outline"
-            text={`Las métricas corresponden a operaciones visibles de ${formatMonth(month)}.`}
+            text={`Las métricas corresponden a operaciones visibles entre ${formatDate(startDate)} y ${formatDate(endDate)}.`}
           />
         </>
       )}
       <CalendarModal
-        visible={openFilter === "month"}
-        selectedDate={month}
-        title="Seleccionar mes"
-        subtitle="Elige cualquier día del mes que quieres visualizar."
+        visible={openFilter === "startDate"}
+        selectedDate={startDate}
+        title="Seleccionar fecha inicial"
+        subtitle="Elige el primer día que quieres incluir en el informe."
         onClose={() => setOpenFilter(null)}
-        onSelect={selectMonth}
+        onSelect={selectStartDate}
+      />
+      <CalendarModal
+        visible={openFilter === "endDate"}
+        selectedDate={endDate}
+        title="Seleccionar fecha final"
+        subtitle="Elige el último día que quieres incluir en el informe."
+        onClose={() => setOpenFilter(null)}
+        onSelect={selectEndDate}
       />
       <DropdownModal
         visible={openFilter === "client"}

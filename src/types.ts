@@ -75,11 +75,16 @@ export interface Contractor {
   document: string;
   profilePhotoFileId: string | null;
   birthDate: string;
+  birthPlace: string;
   phone: string | null;
   email: string | null;
+  emergencyContactName: string;
+  emergencyContactRelationship: string;
+  emergencyContactPhone: string;
   rh: string | null;
   eps: string | null;
   arl: string | null;
+  pensionFund: string | null;
   transport: string;
   civilState: string;
   city: string;
@@ -311,6 +316,8 @@ export interface DirectorReportSeries {
   closedOperations?: number;
 }
 
+export type ReportTrendGranularity = "DAY" | "WEEK" | "MONTH";
+
 export interface DirectorReportRankingItem extends NamedRecord {
   document?: string;
   clientName?: string;
@@ -338,8 +345,8 @@ export interface DirectorReportsSummary {
   absences: number;
   clientsCount: number;
   coveragePercent: number;
-  weeklySeries: DirectorReportSeries[];
-  dailySeries: DirectorReportSeries[];
+  trendGranularity: ReportTrendGranularity;
+  trendSeries: DirectorReportSeries[];
   clientRanking: DirectorReportRankingItem[];
   contractorRanking: DirectorReportRankingItem[];
   payrollByClient: DirectorReportRankingItem[];

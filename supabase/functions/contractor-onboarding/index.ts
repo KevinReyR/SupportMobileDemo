@@ -13,7 +13,6 @@ import {
 } from "../_shared/onboarding.ts";
 
 const MAX_SELFIE_BYTES = 2_097_152;
-const CONTRACT_BUCKET = "contractor-contracts";
 const CONTRACTOR_DOCUMENT_BUCKET = "contractor-documents";
 const PENDING_CONTRACT_DOCUMENT_CODE = "CONTRATO_PENDIENTE";
 const SIGNED_CONTRACT_DOCUMENT_CODE = "CONTRATO_FIRMADO";
@@ -579,22 +578,25 @@ async function getContractValues(serviceClient: any, contractorId: number, invit
   };
 }
 
-async function uploadContractArtifact(
+async function uploadContractSignatureArtifact(
   serviceClient: any,
   contractorId: number,
-  folder: string,
   bytes: Uint8Array,
-  originalName: string,
-  mimeType: string,
 ) {
-  const extension = mimeType === "application/pdf" ? "pdf" : "png";
-  const path = `contractor/${contractorId}/contracts/${folder}/${crypto.randomUUID()}.${extension}`;
-  const upload = await serviceClient.storage.from(CONTRACT_BUCKET).upload(path, bytes, {
-    contentType: mimeType,
+  const path = `contractor/${contractorId}/FIRMA_CONTRATO/${crypto.randomUUID()}.png`;
+  const upload = await serviceClient.storage.from(CONTRACTOR_DOCUMENT_BUCKET).upload(path, bytes, {
+    contentType: "image/png",
     upsert: false,
   });
   if (upload.error) throw new Error(upload.error.message);
-  return await registerAppFile(serviceClient, CONTRACT_BUCKET, path, originalName, mimeType, bytes.byteLength);
+  return await registerAppFile(
+    serviceClient,
+    CONTRACTOR_DOCUMENT_BUCKET,
+    path,
+    "firma-contratista.png",
+    "image/png",
+    bytes.byteLength,
+  );
 }
 
 async function uploadContractPdfArtifact(
@@ -796,13 +798,10 @@ Deno.serve(async (req) => {
         CONTRACT_ACCEPTANCE_TEXT,
       ];
       const signedPdfBytes = await createContractPdf(serviceClient, contract.values, { bytes: signatureBytes, evidenceLines });
-      const signatureFileId = await uploadContractArtifact(
+      const signatureFileId = await uploadContractSignatureArtifact(
         serviceClient,
         invite.contractor_id,
-        "signatures",
         signatureBytes,
-        "firma-contratista.png",
-        "image/png",
       );
       const signedContractFileId = await uploadContractPdfArtifact(
         serviceClient,
