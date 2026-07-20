@@ -434,7 +434,6 @@ export interface AppData {
   clientContractors: ClientContractor[];
   areas: (NamedRecord & { clientId: number })[];
   shifts: (NamedRecord & { areaId: number })[];
-  services: { id: number; areaId: number }[];
   attendanceStatuses: NamedRecord[];
   workwearTypes: NamedRecord[];
   terminationReasons: NamedRecord[];

@@ -166,7 +166,6 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       .order("required_date", { ascending: false }),
     supabase.from("area").select("id,name,client_id").eq("is_active", true).order("id"),
     supabase.from("shift").select("id,name,area_id").eq("is_active", true).order("area_id").order("id"),
-    supabase.from("client_services").select("id,area_id").order("id"),
     supabase.from("attendance_status").select("id,name").order("id"),
     supabase.from("workwear_type").select("id,name").order("name"),
     supabase.from("contractor_termination_reasons").select("id,name").eq("is_active", true).order("id"),
@@ -389,30 +388,26 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       name: cleanText(shift.name),
       areaId: shift.area_id,
     })),
-    services: (common[6].data ?? []).map((service: any) => ({
-      id: service.id,
-      areaId: service.area_id,
-    })),
-    attendanceStatuses: (common[7].data ?? []).map((status: any) => ({
+    attendanceStatuses: (common[6].data ?? []).map((status: any) => ({
       id: status.id,
       name: status.name,
     })),
-    workwearTypes: (common[8].data ?? []).map((type: any) => ({
+    workwearTypes: (common[7].data ?? []).map((type: any) => ({
       id: type.id,
       name: cleanText(type.name),
     })),
-    terminationReasons: (common[9].data ?? []).map((reason: any) => ({
+    terminationReasons: (common[8].data ?? []).map((reason: any) => ({
       id: reason.id,
       name: cleanText(reason.name),
     })),
-    contractorDocumentTypes: (common[10].data ?? [])
+    contractorDocumentTypes: (common[9].data ?? [])
       .filter((documentType: any) => documentType.code !== "CONTRATO_FIRMADO")
       .map((documentType: any) => ({
         id: documentType.id,
         name: cleanText(documentType.name),
         code: documentType.code,
       })),
-    contractTypes: (common[11].data ?? []).map((contractType: any) => ({
+    contractTypes: (common[10].data ?? []).map((contractType: any) => ({
       id: contractType.id,
       name: cleanText(contractType.name),
     })),

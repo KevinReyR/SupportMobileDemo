@@ -193,7 +193,6 @@ const EMPTY_DATA: AppData = {
   clientContractors: [],
   areas: [],
   shifts: [],
-  services: [],
   attendanceStatuses: [],
   workwearTypes: [],
   terminationReasons: [],
