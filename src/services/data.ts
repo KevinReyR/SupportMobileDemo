@@ -157,7 +157,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
     supabase
       .from("operation")
       .select(
-        "id,operation_date,client_id,area_id,operation_type_id,shift_id,service_unit_type_id,planned_units,actual_units,status,observations,review_observations,clients(name),area(name),operation_type(code,name),shift(name),service_unit_type(name),operation_assignment(id,planned_quantity,worked_quantity,extra_hours,discharged_units)",
+        "id,operation_date,client_id,area_id,operation_type_id,shift_id,service_unit_type_id,planned_units,actual_units,status,observations,review_observations,clients(name),area(name),operation_type(code,name),shift(name),service_unit_type(name),operation_assignment(id,planned_quantity,worked_quantity,extra_hours)",
       )
       .order("operation_date", { ascending: false })
       .order("id", { ascending: false }),
