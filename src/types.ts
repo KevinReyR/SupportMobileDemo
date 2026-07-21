@@ -5,6 +5,7 @@ export type OperationStatus =
   | "PENDIENTE"
   | "CAMBIOS_SOLICITADOS"
   | "CERRADO";
+export type OperationTypeCode = "TURNO" | "DESCARGUE";
 export type RequestStatus = "ABIERTA" | "ASIGNADA" | "ATENDIDA" | "CANCELADA";
 
 export interface NamedRecord {
@@ -33,8 +34,14 @@ export interface Operation {
   client: string;
   areaId: number;
   area: string;
-  shiftId: number;
+  operationType: OperationTypeCode;
+  operationTypeName: string;
+  shiftId: number | null;
   shift: string;
+  serviceUnitTypeId: number | null;
+  serviceUnitType: string | null;
+  plannedUnits: number | null;
+  actualUnits: number | null;
   people: number;
   worked: number;
   extraHours: number;
@@ -51,6 +58,7 @@ export interface Assignment {
   attendanceStatus: string | null;
   workedQuantity: number;
   extraHours: number;
+  dischargedUnits: number;
   observations: string | null;
 }
 
@@ -75,11 +83,16 @@ export interface Contractor {
   document: string;
   profilePhotoFileId: string | null;
   birthDate: string;
+  birthPlace: string;
   phone: string | null;
   email: string | null;
+  emergencyContactName: string;
+  emergencyContactRelationship: string;
+  emergencyContactPhone: string;
   rh: string | null;
   eps: string | null;
   arl: string | null;
+  pensionFund: string | null;
   transport: string;
   civilState: string;
   city: string;
@@ -189,6 +202,7 @@ export interface AdminArea extends NamedRecord {
 }
 
 export interface AdminShift extends NamedRecord {
+  clientId: number;
   areaId: number;
   areaName: string;
   clientName: string;
@@ -197,6 +211,8 @@ export interface AdminShift extends NamedRecord {
 
 export interface AdminServiceRate {
   id: number;
+  clientId: number;
+  areaId: number;
   shiftId: number;
   shiftName: string;
   areaName: string;
@@ -209,10 +225,31 @@ export interface AdminServiceRate {
 
 export interface AdminExtraHourRate {
   id: number;
+  clientId: number;
   areaId: number;
   areaName: string;
   clientName: string;
   salePrice: number;
+  validFrom: string;
+  validTo: string | null;
+}
+
+export interface AdminServiceUnitType extends NamedRecord {
+  code: string;
+  description: string | null;
+  isActive: boolean;
+}
+
+export interface AdminServiceUnitRate {
+  id: number;
+  clientId: number;
+  areaId: number;
+  serviceUnitTypeId: number;
+  serviceUnitTypeName: string;
+  areaName: string;
+  clientName: string;
+  salePrice: number;
+  costPrice: number;
   validFrom: string;
   validTo: string | null;
 }
@@ -244,6 +281,18 @@ export interface AdminWorkwearType extends NamedRecord {
   isActive: boolean;
 }
 
+export interface AdminWorkwearMovement {
+  id: number;
+  contractorId: number;
+  contractorName: string;
+  workwearTypeId: number;
+  workwearTypeName: string;
+  movementType: WorkwearMovementType;
+  movementDate: string;
+  quantity: number;
+  observations: string | null;
+}
+
 export interface AdminContractRecord {
   id: number;
   contractorId: number;
@@ -263,9 +312,12 @@ export interface AdminData {
   shifts: AdminShift[];
   serviceRates: AdminServiceRate[];
   extraHourRates: AdminExtraHourRate[];
+  serviceUnitTypes: AdminServiceUnitType[];
+  serviceUnitRates: AdminServiceUnitRate[];
   costConcepts: AdminCostConcept[];
   costRules: AdminCostRule[];
   workwearTypes: AdminWorkwearType[];
+  workwearMovements: AdminWorkwearMovement[];
   contracts: AdminContractRecord[];
 }
 
@@ -281,6 +333,62 @@ export interface StatisticsSummary {
   assignedOperations: number;
   workedShifts: number;
   extraHours: number;
+  dischargeOperations: number;
+  dischargedUnits: number;
+  contractorOptions: StatisticsContractorOption[];
+}
+
+export interface DirectorReportSeries {
+  label: string;
+  date?: string;
+  saleTotal?: number;
+  contractors?: number;
+  workedShifts?: number;
+  extraHours?: number;
+  closedOperations?: number;
+  dischargeOperations?: number;
+  dischargedUnits?: number;
+}
+
+export type ReportTrendGranularity = "DAY" | "WEEK" | "MONTH";
+
+export interface DirectorReportRankingItem extends NamedRecord {
+  document?: string;
+  clientName?: string;
+  saleTotal?: number;
+  costTotal?: number;
+  payrollTotal?: number;
+  contractors?: number;
+  workedShifts?: number;
+  extraHours?: number;
+  absences?: number;
+  dischargeOperations?: number;
+  dischargedUnits?: number;
+}
+
+export interface DirectorReportsSummary {
+  saleTotal: number;
+  costTotal: number;
+  payrollTotal: number;
+  contractorsWorked: number;
+  payrollContractors: number;
+  operationsClosed: number;
+  operationsPending: number;
+  assignedOperations: number;
+  workedShifts: number;
+  plannedShifts: number;
+  extraHours: number;
+  dischargeOperations: number;
+  dischargedUnits: number;
+  absences: number;
+  clientsCount: number;
+  coveragePercent: number;
+  trendGranularity: ReportTrendGranularity;
+  trendSeries: DirectorReportSeries[];
+  clientRanking: DirectorReportRankingItem[];
+  contractorRanking: DirectorReportRankingItem[];
+  payrollByClient: DirectorReportRankingItem[];
+  payrollByContractor: DirectorReportRankingItem[];
   contractorOptions: StatisticsContractorOption[];
 }
 
@@ -364,7 +472,7 @@ export interface AppData {
   clientContractors: ClientContractor[];
   areas: (NamedRecord & { clientId: number })[];
   shifts: (NamedRecord & { areaId: number })[];
-  services: { id: number; areaId: number }[];
+  serviceUnitTypes: NamedRecord[];
   attendanceStatuses: NamedRecord[];
   workwearTypes: NamedRecord[];
   terminationReasons: NamedRecord[];

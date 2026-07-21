@@ -13,10 +13,13 @@ import type {
   ContractorOnboardingSubmission,
   ContractorDocument,
   ContractorHistory,
+  DirectorReportRankingItem,
+  DirectorReportsSummary,
   Operation,
   PersonnelRequest,
   Role,
   RoleCode,
+  StatisticsContractorOption,
   StatisticsSummary,
   UserContext,
   WorkwearMovement,
@@ -154,7 +157,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
     supabase
       .from("operation")
       .select(
-        "id,operation_date,client_id,area_id,shift_id,status,observations,review_observations,clients(name),area(name),shift(name),operation_assignment(id,planned_quantity,worked_quantity,extra_hours)",
+        "id,operation_date,client_id,area_id,operation_type_id,shift_id,service_unit_type_id,planned_units,actual_units,status,observations,review_observations,clients(name),area(name),operation_type(code,name),shift(name),service_unit_type(name),operation_assignment(id,planned_quantity,worked_quantity,extra_hours)",
       )
       .order("operation_date", { ascending: false })
       .order("id", { ascending: false }),
@@ -164,12 +167,12 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       .order("required_date", { ascending: false }),
     supabase.from("area").select("id,name,client_id").eq("is_active", true).order("id"),
     supabase.from("shift").select("id,name,area_id").eq("is_active", true).order("area_id").order("id"),
-    supabase.from("client_services").select("id,area_id").order("id"),
     supabase.from("attendance_status").select("id,name").order("id"),
     supabase.from("workwear_type").select("id,name").order("name"),
     supabase.from("contractor_termination_reasons").select("id,name").eq("is_active", true).order("id"),
     supabase.from("contractor_document_types").select("id,name,code").eq("is_active", true).order("name"),
     supabase.from("contract_type").select("id,name").order("id"),
+    supabase.from("service_unit_type").select("id,name").eq("is_active", true).order("name"),
   ]);
 
   common.forEach((result) => fail(result.error));
@@ -183,8 +186,14 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       client: cleanText(firstRelation<any>(row.clients)?.name),
       areaId: row.area_id,
       area: cleanText(firstRelation<any>(row.area)?.name),
+      operationType: (firstRelation<any>(row.operation_type)?.code ?? "TURNO") as "TURNO" | "DESCARGUE",
+      operationTypeName: cleanText(firstRelation<any>(row.operation_type)?.name) || "Turno",
       shiftId: row.shift_id,
       shift: cleanText(firstRelation<any>(row.shift)?.name) || "Sin turno",
+      serviceUnitTypeId: row.service_unit_type_id ?? null,
+      serviceUnitType: cleanText(firstRelation<any>(row.service_unit_type)?.name) || null,
+      plannedUnits: row.planned_units === null ? null : Number(row.planned_units),
+      actualUnits: row.actual_units === null ? null : Number(row.actual_units),
       people: assignments.length,
       worked: assignments.reduce(
         (total: number, assignment: any) => total + Number(assignment.worked_quantity ?? 0),
@@ -219,7 +228,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       supabase
         .from("contractor")
         .select(
-          "id,name,last_name,document_number,profile_photo_file_id,birth_date,phone_number,email,rh,eps,arl,disponibility,shirt_size,pant_size,shoe_size,hire_date,termination_date,transport_type(name),civil_state_type(name)",
+          "id,name,last_name,document_number,profile_photo_file_id,birth_date,birth_place,residence_city,phone_number,email,emergency_contact_name,emergency_contact_relationship,emergency_contact_phone,rh,eps,arl,pension_fund,disponibility,shirt_size,pant_size,shoe_size,hire_date,termination_date,transport_type(name),civil_state_type(name)",
         )
         .order("name"),
       supabase
@@ -276,14 +285,19 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
         document: row.document_number,
         profilePhotoFileId: row.profile_photo_file_id ?? null,
         birthDate: row.birth_date,
+        birthPlace: cleanText(row.birth_place) || "Sin registrar",
         phone: row.phone_number,
         email: row.email,
+        emergencyContactName: cleanText(row.emergency_contact_name) || "Sin registrar",
+        emergencyContactRelationship: cleanText(row.emergency_contact_relationship) || "Sin registrar",
+        emergencyContactPhone: cleanText(row.emergency_contact_phone) || "Sin registrar",
         rh: row.rh,
         eps: cleanText(row.eps) || null,
         arl: cleanText(row.arl) || null,
+        pensionFund: cleanText(row.pension_fund) || null,
         transport: cleanText(firstRelation<any>(row.transport_type)?.name) || "Sin registrar",
         civilState: cleanText(firstRelation<any>(row.civil_state_type)?.name) || "Sin registrar",
-        city: "Medellín",
+        city: cleanText(row.residence_city) || "Sin registrar",
         available: Boolean(row.disponibility),
         shirtSize: row.shirt_size,
         pantSize: row.pant_size,
@@ -382,35 +396,142 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       name: cleanText(shift.name),
       areaId: shift.area_id,
     })),
-    services: (common[6].data ?? []).map((service: any) => ({
-      id: service.id,
-      areaId: service.area_id,
-    })),
-    attendanceStatuses: (common[7].data ?? []).map((status: any) => ({
+    attendanceStatuses: (common[6].data ?? []).map((status: any) => ({
       id: status.id,
       name: status.name,
     })),
-    workwearTypes: (common[8].data ?? []).map((type: any) => ({
+    workwearTypes: (common[7].data ?? []).map((type: any) => ({
       id: type.id,
       name: cleanText(type.name),
     })),
-    terminationReasons: (common[9].data ?? []).map((reason: any) => ({
+    terminationReasons: (common[8].data ?? []).map((reason: any) => ({
       id: reason.id,
       name: cleanText(reason.name),
     })),
-    contractorDocumentTypes: (common[10].data ?? [])
+    contractorDocumentTypes: (common[9].data ?? [])
       .filter((documentType: any) => documentType.code !== "CONTRATO_FIRMADO")
       .map((documentType: any) => ({
         id: documentType.id,
         name: cleanText(documentType.name),
         code: documentType.code,
       })),
-    contractTypes: (common[11].data ?? []).map((contractType: any) => ({
+    contractTypes: (common[10].data ?? []).map((contractType: any) => ({
       id: contractType.id,
       name: cleanText(contractType.name),
     })),
+    serviceUnitTypes: (common[11].data ?? []).map((unitType: any) => ({
+      id: unitType.id,
+      name: cleanText(unitType.name),
+    })),
     users,
   };
+}
+
+function mapClientContractor(row: any): ClientContractor {
+  const name = cleanText(row.first_name);
+  const lastName = cleanText(row.last_name);
+  return {
+    id: Number(row.contractor_id),
+    name,
+    lastName,
+    fullName: `${name} ${lastName}`.trim(),
+    initials: `${name[0] ?? ""}${lastName[0] ?? ""}`.toUpperCase(),
+    document: cleanText(row.document_number),
+    profilePhotoFileId: row.profile_photo_file_id ?? null,
+    birthDate: row.birth_date,
+    rh: cleanText(row.rh) || null,
+    eps: cleanText(row.eps) || null,
+    arl: cleanText(row.arl) || null,
+    civilState: cleanText(row.civil_state) || "Sin registrar",
+    lastArea: cleanText(row.last_area) || "Sin área",
+    lastDate: row.last_operation_date,
+  };
+}
+
+export async function loadContractorProfile(contractorId: number): Promise<Contractor> {
+  const [contractorResult, assignmentResult, contractResult] = await Promise.all([
+    supabase
+      .from("contractor")
+      .select(
+        "id,name,last_name,document_number,profile_photo_file_id,birth_date,birth_place,residence_city,phone_number,email,emergency_contact_name,emergency_contact_relationship,emergency_contact_phone,rh,eps,arl,pension_fund,disponibility,shirt_size,pant_size,shoe_size,hire_date,termination_date,transport_type(name),civil_state_type(name)",
+      )
+      .eq("id", contractorId)
+      .single(),
+    supabase
+      .from("operation_assignment")
+      .select("id,contractor_id,operation(operation_date,clients(name),area(name))")
+      .eq("contractor_id", contractorId)
+      .is("deleted_at", null),
+    supabase
+      .from("contractor_contract")
+      .select("id,contractor_id,start_date,end_date,status_id,contract_type,contract_status(name),contract_type_ref:contract_type(name)")
+      .eq("contractor_id", contractorId)
+      .order("start_date", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(1),
+  ]);
+  fail(contractorResult.error);
+  fail(assignmentResult.error);
+  fail(contractResult.error);
+
+  const row = contractorResult.data as any;
+  const latestAssignment = (assignmentResult.data ?? [])
+    .map((assignment: any) => firstRelation<any>(assignment.operation))
+    .filter(Boolean)
+    .sort((left: any, right: any) => String(right.operation_date).localeCompare(String(left.operation_date)))[0];
+  const contract = (contractResult.data ?? [])[0] as any;
+  const contractStatus = contract
+    ? normalizeContractStatus(firstRelation<any>(contract.contract_status)?.name)
+    : "INACTIVO";
+  const firstName = cleanText(row.name);
+  const lastName = cleanText(row.last_name);
+
+  return {
+    id: Number(row.id),
+    name: firstName,
+    lastName,
+    fullName: `${firstName} ${lastName}`.trim(),
+    initials: `${firstName[0] ?? ""}${lastName[0] ?? ""}`.toUpperCase(),
+    document: cleanText(row.document_number),
+    profilePhotoFileId: row.profile_photo_file_id ?? null,
+    birthDate: row.birth_date,
+    birthPlace: cleanText(row.birth_place) || "Sin registrar",
+    phone: row.phone_number,
+    email: row.email,
+    emergencyContactName: cleanText(row.emergency_contact_name) || "Sin registrar",
+    emergencyContactRelationship: cleanText(row.emergency_contact_relationship) || "Sin registrar",
+    emergencyContactPhone: cleanText(row.emergency_contact_phone) || "Sin registrar",
+    rh: row.rh,
+    eps: cleanText(row.eps) || null,
+    arl: cleanText(row.arl) || null,
+    pensionFund: cleanText(row.pension_fund) || null,
+    transport: cleanText(firstRelation<any>(row.transport_type)?.name) || "Sin registrar",
+    civilState: cleanText(firstRelation<any>(row.civil_state_type)?.name) || "Sin registrar",
+    city: cleanText(row.residence_city) || "Sin registrar",
+    available: Boolean(row.disponibility),
+    shirtSize: row.shirt_size,
+    pantSize: row.pant_size,
+    shoeSize: row.shoe_size,
+    hireDate: row.hire_date,
+    terminationDate: row.termination_date,
+    active: contractStatus === "ACTIVO",
+    contractStatus,
+    contractTypeId: contract?.contract_type ?? null,
+    contractTypeName: cleanText(firstRelation<any>(contract?.contract_type_ref)?.name) || "Sin tipo",
+    lastClient: cleanText(firstRelation<any>(latestAssignment?.clients)?.name) || "Sin operación",
+    lastArea: cleanText(firstRelation<any>(latestAssignment?.area)?.name) || "Sin área",
+    lastDate: latestAssignment?.operation_date ?? null,
+  };
+}
+
+export async function loadClientContractorProfile(contractorId: number): Promise<ClientContractor> {
+  const result = await supabase.rpc("get_client_contractor", {
+    p_contractor_id: contractorId,
+  });
+  fail(result.error);
+  const row = (result.data ?? [])[0];
+  if (!row) throw new Error("No tienes acceso a este contratista.");
+  return mapClientContractor(row);
 }
 
 export async function loadOperationAssignments(operationId: number): Promise<Assignment[]> {
@@ -426,6 +547,7 @@ export async function loadOperationAssignments(operationId: number): Promise<Ass
     attendanceStatus: cleanText(row.attendance_status) || null,
     workedQuantity: Number(row.worked_quantity ?? 0),
     extraHours: Number(row.extra_hours ?? 0),
+    dischargedUnits: Number(row.discharged_units ?? 0),
     observations: cleanText(row.observations) || null,
   }));
 }
@@ -737,6 +859,39 @@ export async function createOperation(input: {
   return result.data as number;
 }
 
+export async function loadAvailableServiceUnits(areaId: number, date: string): Promise<{ id: number; name: string }[]> {
+  if (!areaId) return [];
+  const result = await supabase.rpc("get_available_service_units", {
+    p_area_id: areaId,
+    p_operation_date: date,
+  });
+  fail(result.error);
+  return (result.data ?? []).map((row: any) => ({
+    id: Number(row.service_unit_type_id),
+    name: cleanText(row.service_unit_type_name),
+  }));
+}
+
+export async function createDischargeOperation(input: {
+  date: string;
+  clientId: number;
+  areaId: number;
+  serviceUnitTypeId: number;
+  plannedUnits: number;
+  contractorIds: number[];
+}) {
+  const result = await supabase.rpc("create_discharge_operation_with_assignments", {
+    p_operation_date: input.date,
+    p_client_id: input.clientId,
+    p_area_id: input.areaId,
+    p_service_unit_type_id: input.serviceUnitTypeId,
+    p_planned_units: input.plannedUnits,
+    p_assignments: input.contractorIds.map((contractorId) => ({ contractor_id: contractorId })),
+  });
+  fail(result.error);
+  return Number(result.data);
+}
+
 export async function finalizeOperation(
   operationId: number,
   assignments: Assignment[],
@@ -757,8 +912,37 @@ export async function finalizeOperation(
   fail(result.error);
 }
 
+export async function finalizeDischargeOperation(
+  operationId: number,
+  actualUnits: number,
+  assignments: Assignment[],
+  observations: string,
+) {
+  const result = await supabase.rpc("finalize_discharge_operation", {
+    p_operation_id: operationId,
+    p_actual_units: actualUnits,
+    p_assignments: assignments.map((assignment) => ({
+      assignment_id: assignment.assignmentId > 0 ? assignment.assignmentId : null,
+      contractor_id: assignment.contractorId,
+      attendance_status_id: assignment.attendanceStatus === "AUSENTE" ? 2 : 1,
+      discharged_units: assignment.attendanceStatus === "AUSENTE" ? 0 : assignment.dischargedUnits,
+      observations: assignment.observations ?? "",
+    })),
+    p_observations: observations || null,
+  });
+  fail(result.error);
+}
+
 export async function loadAvailableContractorIds(operationId: number): Promise<number[]> {
   const result = await supabase.rpc("get_available_contractors_for_operation", {
+    p_operation_id: operationId,
+  });
+  fail(result.error);
+  return (result.data ?? []).map((row: any) => Number(row.contractor_id));
+}
+
+export async function loadAvailableDischargeContractorIds(operationId: number): Promise<number[]> {
+  const result = await supabase.rpc("get_available_contractors_for_discharge", {
     p_operation_id: operationId,
   });
   fail(result.error);
@@ -778,31 +962,182 @@ export async function reviewOperation(
   fail(result.error);
 }
 
+export async function reviewDischargeOperation(
+  operationId: number,
+  decision: "CERRADO" | "CAMBIOS_SOLICITADOS",
+  observations?: string,
+) {
+  const result = await supabase.rpc("review_discharge_operation", {
+    p_operation_id: operationId,
+    p_decision: decision,
+    p_observations: observations ?? null,
+  });
+  fail(result.error);
+}
+
 export async function loadStatisticsSummary(input: {
-  month: string;
+  startDate: string;
+  endDate: string;
   clientId: number | null;
   contractorId: number | null;
 }): Promise<StatisticsSummary> {
-  const result = await supabase.rpc("get_monthly_statistics", {
-    p_month: input.month,
+  const args = {
+    p_start_date: input.startDate,
+    p_end_date: input.endDate,
     p_client_id: input.clientId || null,
     p_contractor_id: input.contractorId || null,
-  });
+  };
+  const [result, dischargeResult] = await Promise.all([
+    supabase.rpc("get_statistics_by_date_range", args),
+    supabase.rpc("get_discharge_report_metrics", args),
+  ]);
   fail(result.error);
+  fail(dischargeResult.error);
   const row = Array.isArray(result.data) ? result.data[0] : result.data;
+  const discharge = dischargeResult.data ?? {};
+  const contractorOptions = new Map<number, StatisticsContractorOption>();
+  [...(row?.contractor_options ?? []), ...(discharge?.contractor_options ?? [])].forEach((contractor: any) => {
+    contractorOptions.set(Number(contractor.id), {
+      id: Number(contractor.id), name: cleanText(contractor.name), document: cleanText(contractor.document),
+    });
+  });
   return {
-    saleTotal: Number(row?.sale_total ?? 0),
-    costTotal: Number(row?.cost_total ?? 0),
-    contractorsWorked: Number(row?.contractors_worked ?? 0),
+    saleTotal: Number(row?.sale_total ?? 0) + Number(discharge?.sale_total ?? 0),
+    costTotal: Number(row?.cost_total ?? 0) + Number(discharge?.cost_total ?? 0),
+    contractorsWorked: contractorOptions.size,
     activeContractors: Number(row?.active_contractors ?? 0),
     assignedOperations: Number(row?.assigned_operations ?? 0),
-    workedShifts: Number(row?.worked_shifts ?? 0),
+    workedShifts: Math.max(0, Number(row?.worked_shifts ?? 0) - Number(discharge?.attendee_count ?? 0)),
     extraHours: Number(row?.extra_hours ?? 0),
-    contractorOptions: (row?.contractor_options ?? []).map((contractor: any) => ({
-      id: Number(contractor.id),
-      name: cleanText(contractor.name),
-      document: cleanText(contractor.document),
-    })),
+    dischargeOperations: Number(discharge?.discharge_operations ?? 0),
+    dischargedUnits: Number(discharge?.discharged_units ?? 0),
+    contractorOptions: [...contractorOptions.values()].sort((a, b) => a.name.localeCompare(b.name)),
+  };
+}
+
+function mapDirectorSeries(items: any[] = []) {
+  return items.map((item) => ({
+    label: cleanText(item.label),
+    date: item.date,
+    saleTotal: Number(item.saleTotal ?? 0),
+    contractors: Number(item.contractors ?? 0),
+    workedShifts: Number(item.workedShifts ?? 0),
+    extraHours: Number(item.extraHours ?? 0),
+    closedOperations: Number(item.closedOperations ?? 0),
+    dischargeOperations: Number(item.dischargeOperations ?? 0),
+    dischargedUnits: Number(item.dischargedUnits ?? 0),
+  }));
+}
+
+function mapDirectorRanking(items: any[] = []): DirectorReportRankingItem[] {
+  return items.map((item) => ({
+    id: Number(item.id),
+    name: cleanText(item.name),
+    document: cleanText(item.document),
+    clientName: cleanText(item.clientName),
+    saleTotal: Number(item.saleTotal ?? 0),
+    costTotal: Number(item.costTotal ?? 0),
+    payrollTotal: Number(item.payrollTotal ?? 0),
+    contractors: Number(item.contractors ?? 0),
+    workedShifts: Number(item.workedShifts ?? 0),
+    extraHours: Number(item.extraHours ?? 0),
+    absences: Number(item.absences ?? 0),
+    dischargeOperations: Number(item.dischargeOperations ?? 0),
+    dischargedUnits: Number(item.dischargedUnits ?? 0),
+  }));
+}
+
+function mergeReportRanking(base: DirectorReportRankingItem[], dischargeItems: any[] = [], dischargeAttendance = new Map<number, number>()) {
+  const merged = new Map<number, DirectorReportRankingItem>(base.map((item) => [item.id, { ...item }]));
+  dischargeItems.forEach((raw) => {
+    const id = Number(raw.id);
+    const current = merged.get(id) ?? { id, name: cleanText(raw.name) };
+    merged.set(id, {
+      ...current,
+      document: current.document || cleanText(raw.document),
+      clientName: current.clientName || cleanText(raw.clientName),
+      saleTotal: Number(current.saleTotal ?? 0) + Number(raw.saleTotal ?? 0),
+      costTotal: Number(current.costTotal ?? 0) + Number(raw.costTotal ?? 0),
+      payrollTotal: Number(current.payrollTotal ?? 0) + Number(raw.payrollTotal ?? 0),
+      workedShifts: Math.max(0, Number(current.workedShifts ?? 0) - Number(dischargeAttendance.get(id) ?? raw.dischargeOperations ?? 0)),
+      dischargeOperations: Number(raw.dischargeOperations ?? 0),
+      dischargedUnits: Number(raw.dischargedUnits ?? 0),
+    });
+  });
+  return [...merged.values()];
+}
+
+export async function loadDirectorReports(input: {
+  startDate: string;
+  endDate: string;
+  clientId: number | null;
+  contractorId: number | null;
+}): Promise<DirectorReportsSummary> {
+  const args = {
+    p_start_date: input.startDate,
+    p_end_date: input.endDate,
+    p_client_id: input.clientId || null,
+    p_contractor_id: input.contractorId || null,
+  };
+  const [result, dischargeResult, dischargeTrendResult, dischargeClientAttendanceResult] = await Promise.all([
+    supabase.rpc("get_director_reports", args),
+    supabase.rpc("get_discharge_report_metrics", args),
+    supabase.rpc("get_discharge_attendance_trend", args),
+    supabase.rpc("get_discharge_client_attendance", args),
+  ]);
+  fail(result.error);
+  fail(dischargeResult.error);
+  fail(dischargeTrendResult.error);
+  fail(dischargeClientAttendanceResult.error);
+  const row = Array.isArray(result.data) ? result.data[0] : result.data;
+  const discharge = dischargeResult.data ?? {};
+  const contractorOptions = new Map<number, StatisticsContractorOption>();
+  [...(row?.contractor_options ?? []), ...(discharge?.contractor_options ?? [])].forEach((contractor: any) => {
+    contractorOptions.set(Number(contractor.id), { id: Number(contractor.id), name: cleanText(contractor.name), document: cleanText(contractor.document) });
+  });
+  const dischargeTrend = new Map((discharge?.trend_series ?? []).map((item: any) => [String(item.date), item]));
+  const dischargeAttendanceTrend = new Map((dischargeTrendResult.data ?? []).map((item: any) => [String(item.date), Number(item.attendeeCount ?? 0)]));
+  const dischargeClientAttendance = new Map<number, number>(
+    (dischargeClientAttendanceResult.data ?? []).map((item: any) => [Number(item.id), Number(item.attendeeCount ?? 0)] as [number, number]),
+  );
+  const trendSeries = mapDirectorSeries(row?.trend_series ?? []).map((item) => {
+    const extra: any = dischargeTrend.get(String(item.date));
+    return {
+      ...item,
+      saleTotal: Number(item.saleTotal ?? 0) + Number(extra?.saleTotal ?? 0),
+      workedShifts: Math.max(0, Number(item.workedShifts ?? 0) - Number(dischargeAttendanceTrend.get(String(item.date)) ?? 0)),
+      dischargeOperations: Number(extra?.dischargeOperations ?? 0),
+      dischargedUnits: Number(extra?.dischargedUnits ?? 0),
+    };
+  });
+  const dischargePayrollClients = (discharge?.client_ranking ?? []).filter((item: any) => Number(item.payrollTotal ?? 0) > 0);
+  const dischargePayrollContractors = (discharge?.contractor_ranking ?? []).filter((item: any) => Number(item.payrollTotal ?? 0) > 0);
+  const payrollByClient = mergeReportRanking(mapDirectorRanking(row?.payroll_by_client ?? []), dischargePayrollClients, dischargeClientAttendance);
+  const payrollByContractor = mergeReportRanking(mapDirectorRanking(row?.payroll_by_contractor ?? []), dischargePayrollContractors);
+  return {
+    saleTotal: Number(row?.sale_total ?? 0) + Number(discharge?.sale_total ?? 0),
+    costTotal: Number(row?.cost_total ?? 0) + Number(discharge?.cost_total ?? 0),
+    payrollTotal: Number(row?.payroll_total ?? 0) + Number(discharge?.payroll_total ?? 0),
+    contractorsWorked: contractorOptions.size,
+    payrollContractors: payrollByContractor.length,
+    operationsClosed: Number(row?.operations_closed ?? 0),
+    operationsPending: Number(row?.operations_pending ?? 0),
+    assignedOperations: Number(row?.assigned_operations ?? 0),
+    workedShifts: Math.max(0, Number(row?.worked_shifts ?? 0) - Number(discharge?.attendee_count ?? 0)),
+    plannedShifts: Math.max(0, Number(row?.planned_shifts ?? 0) - Number(discharge?.assignment_count ?? 0)),
+    extraHours: Number(row?.extra_hours ?? 0),
+    dischargeOperations: Number(discharge?.discharge_operations ?? 0),
+    dischargedUnits: Number(discharge?.discharged_units ?? 0),
+    absences: Number(row?.absences ?? 0),
+    clientsCount: Number(row?.clients_count ?? 0),
+    coveragePercent: Number(row?.coverage_percent ?? 0),
+    trendGranularity: row?.trend_granularity ?? "DAY",
+    trendSeries,
+    clientRanking: mergeReportRanking(mapDirectorRanking(row?.client_ranking ?? []), discharge?.client_ranking ?? [], dischargeClientAttendance),
+    contractorRanking: mergeReportRanking(mapDirectorRanking(row?.contractor_ranking ?? []), discharge?.contractor_ranking ?? []),
+    payrollByClient,
+    payrollByContractor,
+    contractorOptions: [...contractorOptions.values()].sort((a, b) => a.name.localeCompare(b.name)),
   };
 }
 
@@ -957,21 +1292,29 @@ export async function loadAdminData(): Promise<AdminData> {
     shiftsResult,
     serviceRatesResult,
     extraRatesResult,
+    serviceUnitTypesResult,
+    serviceUnitRatesResult,
     costConceptsResult,
     costRulesResult,
     workwearResult,
+    workwearMovementsResult,
     contractsResult,
   ] = await Promise.all([
     supabase.from("clients").select("id,name,document_number,is_active").order("name"),
     supabase.from("area").select("id,name,client_id,is_active,clients(name)").order("name"),
-    supabase.from("shift").select("id,name,area_id,is_active,area(name,clients(name))").order("name"),
+    supabase.from("shift").select("id,name,area_id,is_active,area(name,client_id,clients(name))").order("name"),
     supabase
       .from("service_rates")
-      .select("id,shift_id,sale_price,cost_price,valid_from,valid_to,shift(name,area(name,clients(name)))")
+      .select("id,shift_id,sale_price,cost_price,valid_from,valid_to,shift(name,area_id,area(name,client_id,clients(name)))")
       .order("valid_from", { ascending: false }),
     supabase
       .from("area_extra_hour_rates")
-      .select("id,area_id,sale_price,valid_from,valid_to,area(name,clients(name))")
+      .select("id,area_id,sale_price,valid_from,valid_to,area(name,client_id,clients(name))")
+      .order("valid_from", { ascending: false }),
+    supabase.from("service_unit_type").select("id,code,name,description,is_active").order("name"),
+    supabase
+      .from("service_unit_rates")
+      .select("id,area_id,service_unit_type_id,sale_price,cost_price,valid_from,valid_to,area(name,client_id,clients(name)),service_unit_type(name)")
       .order("valid_from", { ascending: false }),
     supabase.from("cost_concepts").select("id,code,name,description,category,status").order("category").order("code"),
     supabase
@@ -979,6 +1322,11 @@ export async function loadAdminData(): Promise<AdminData> {
       .select("id,contract_type_id,cost_concept_id,calculation_type,value,valid_from,valid_to,status,contract_type(name),cost_concepts(name)")
       .order("valid_from", { ascending: false }),
     supabase.from("workwear_type").select("id,name,description,is_active").order("name"),
+    supabase
+      .from("contractor_workwear_movements")
+      .select("id,contractor_id,workwear_type_id,movement_type,movement_date,quantity,observations,contractor(name,last_name),workwear_type(name)")
+      .order("movement_date", { ascending: false })
+      .order("id", { ascending: false }),
     supabase
       .from("contractor_contract")
       .select("id,contractor_id,contract_type,status_id,start_date,end_date,observations,contractor(name,last_name),contract_status(name),contract_type_ref:contract_type(name)")
@@ -991,9 +1339,12 @@ export async function loadAdminData(): Promise<AdminData> {
     shiftsResult,
     serviceRatesResult,
     extraRatesResult,
+    serviceUnitTypesResult,
+    serviceUnitRatesResult,
     costConceptsResult,
     costRulesResult,
     workwearResult,
+    workwearMovementsResult,
     contractsResult,
   ].forEach((result) => fail(result.error));
 
@@ -1016,6 +1367,7 @@ export async function loadAdminData(): Promise<AdminData> {
       return {
         id: row.id,
         name: cleanText(row.name),
+        clientId: area?.client_id,
         areaId: row.area_id,
         areaName: cleanText(area?.name),
         clientName: cleanText(firstRelation<any>(area?.clients)?.name),
@@ -1027,6 +1379,8 @@ export async function loadAdminData(): Promise<AdminData> {
       const area = firstRelation<any>(shift?.area);
       return {
         id: row.id,
+        clientId: area?.client_id,
+        areaId: shift?.area_id,
         shiftId: row.shift_id,
         shiftName: cleanText(shift?.name),
         areaName: cleanText(area?.name),
@@ -1041,10 +1395,34 @@ export async function loadAdminData(): Promise<AdminData> {
       const area = firstRelation<any>(row.area);
       return {
         id: row.id,
+        clientId: area?.client_id,
         areaId: row.area_id,
         areaName: cleanText(area?.name),
         clientName: cleanText(firstRelation<any>(area?.clients)?.name),
         salePrice: Number(row.sale_price ?? 0),
+        validFrom: row.valid_from,
+        validTo: row.valid_to,
+      };
+    }),
+    serviceUnitTypes: (serviceUnitTypesResult.data ?? []).map((row: any) => ({
+      id: row.id,
+      code: row.code,
+      name: cleanText(row.name),
+      description: cleanText(row.description) || null,
+      isActive: row.is_active !== false,
+    })),
+    serviceUnitRates: (serviceUnitRatesResult.data ?? []).map((row: any) => {
+      const area = firstRelation<any>(row.area);
+      return {
+        id: row.id,
+        clientId: area?.client_id,
+        areaId: row.area_id,
+        serviceUnitTypeId: row.service_unit_type_id,
+        serviceUnitTypeName: cleanText(firstRelation<any>(row.service_unit_type)?.name),
+        areaName: cleanText(area?.name),
+        clientName: cleanText(firstRelation<any>(area?.clients)?.name),
+        salePrice: Number(row.sale_price ?? 0),
+        costPrice: Number(row.cost_price ?? 0),
         validFrom: row.valid_from,
         validTo: row.valid_to,
       };
@@ -1075,6 +1453,20 @@ export async function loadAdminData(): Promise<AdminData> {
       description: cleanText(row.description) || null,
       isActive: row.is_active !== false,
     })),
+    workwearMovements: (workwearMovementsResult.data ?? []).map((row: any) => {
+      const contractor = firstRelation<any>(row.contractor);
+      return {
+        id: row.id,
+        contractorId: row.contractor_id,
+        contractorName: `${cleanText(contractor?.name)} ${cleanText(contractor?.last_name)}`.trim() || "Sin contratista",
+        workwearTypeId: row.workwear_type_id,
+        workwearTypeName: cleanText(firstRelation<any>(row.workwear_type)?.name),
+        movementType: row.movement_type,
+        movementDate: row.movement_date,
+        quantity: Number(row.quantity ?? 0),
+        observations: cleanText(row.observations) || null,
+      };
+    }),
     contracts: (contractsResult.data ?? []).map((row: any) => {
       const contractor = firstRelation<any>(row.contractor);
       return {
@@ -1181,6 +1573,48 @@ export async function saveAdminExtraHourRate(input: {
   const result = input.id
     ? await supabase.from("area_extra_hour_rates").update(payload).eq("id", input.id)
     : await supabase.from("area_extra_hour_rates").insert(payload);
+  fail(result.error);
+}
+
+export async function saveAdminServiceUnitType(input: {
+  id?: number;
+  code: string;
+  name: string;
+  description: string;
+  isActive: boolean;
+}) {
+  const payload = {
+    code: input.code.trim().toUpperCase().replace(/\s+/g, "_"),
+    name: input.name.trim(),
+    description: input.description.trim() || null,
+    is_active: input.isActive,
+  };
+  const result = input.id
+    ? await supabase.from("service_unit_type").update(payload).eq("id", input.id)
+    : await supabase.from("service_unit_type").insert(payload);
+  fail(result.error);
+}
+
+export async function saveAdminServiceUnitRate(input: {
+  id?: number;
+  areaId: number;
+  serviceUnitTypeId: number;
+  salePrice: number;
+  costPrice: number;
+  validFrom: string;
+  validTo: string | null;
+}) {
+  const payload = {
+    area_id: input.areaId,
+    service_unit_type_id: input.serviceUnitTypeId,
+    sale_price: input.salePrice,
+    cost_price: input.costPrice,
+    valid_from: input.validFrom,
+    valid_to: input.validTo || null,
+  };
+  const result = input.id
+    ? await supabase.from("service_unit_rates").update(payload).eq("id", input.id)
+    : await supabase.from("service_unit_rates").insert(payload);
   fail(result.error);
 }
 

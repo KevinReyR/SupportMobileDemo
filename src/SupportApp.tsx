@@ -1,4 +1,4 @@
-﻿import React, { useCallback, useEffect, useRef, useState } from "react";
+﻿import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -27,6 +27,7 @@ import * as Linking from "expo-linking";
 import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
 import { LinearGradient } from "expo-linear-gradient";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import Svg, { Line, Polyline, Rect, Text as SvgText } from "react-native-svg";
 import type { Session } from "@supabase/supabase-js";
 
 import PdfViewer from "./components/pdf-viewer";
@@ -40,29 +41,39 @@ import {
   createContractorDocumentSignedUrl,
   createContractorProfilePhotoSignedUrl,
   createOperation,
+  createDischargeOperation,
   createPersonnelRequest,
   finalizeOperation,
+  finalizeDischargeOperation,
   loadAdminData,
   loadAppData,
+  loadClientContractorProfile,
   loadClientContractorHistory,
   loadContractorDocuments,
   loadContractorHistory,
+  loadContractorProfile,
   loadContractorWorkwearMovements,
   loadContractorWorkwearSummary,
   loadAvailableContractorIds,
+  loadAvailableDischargeContractorIds,
+  loadAvailableServiceUnits,
   loadOperationAssignments,
+  loadDirectorReports,
   loadStatisticsSummary,
   loadUserContext,
   loadContractorOnboardingForm,
   loadContractorOnboardingContract,
   registerContractorWorkwearMovement,
   reviewOperation,
+  reviewDischargeOperation,
   saveAdminArea,
   saveAdminClient,
   saveAdminContract,
   saveAdminCostConcept,
   saveAdminCostRule,
   saveAdminExtraHourRate,
+  saveAdminServiceUnitRate,
+  saveAdminServiceUnitType,
   saveAdminServiceRate,
   saveAdminShift,
   saveAdminWorkwearType,
@@ -92,6 +103,9 @@ import type {
   ContractorOnboardingForm,
   ContractorOnboardingSubmission,
   ContractorContractSignatureEvidence,
+  DirectorReportRankingItem,
+  DirectorReportSeries,
+  DirectorReportsSummary,
   Operation,
   OperationStatus,
   PersonnelRequest,
@@ -186,7 +200,7 @@ const EMPTY_DATA: AppData = {
   clientContractors: [],
   areas: [],
   shifts: [],
-  services: [],
+  serviceUnitTypes: [],
   attendanceStatuses: [],
   workwearTypes: [],
   terminationReasons: [],
@@ -200,18 +214,18 @@ const tabsByRole: Record<Role, { label: string; icon: IconName; screen: Screen }
     { label: "Operación", icon: "briefcase-outline", screen: "operations" },
     { label: "Solicitudes", icon: "document-text-outline", screen: "requests" },
     { label: "Personal", icon: "people-outline", screen: "staff" },
-    { label: "Estadísticas", icon: "bar-chart-outline", screen: "statistics" },
+    { label: "Informes", icon: "bar-chart-outline", screen: "statistics" },
   ],
   Cliente: [
     { label: "Operación", icon: "briefcase-outline", screen: "operations" },
     { label: "Solicitudes", icon: "document-text-outline", screen: "requests" },
     { label: "Personal", icon: "people-outline", screen: "staff" },
-    { label: "Estadísticas", icon: "bar-chart-outline", screen: "statistics" },
+    { label: "Informes", icon: "bar-chart-outline", screen: "statistics" },
   ],
   Director: [
     { label: "Operación", icon: "briefcase-outline", screen: "operations" },
     { label: "Personal", icon: "people-outline", screen: "staff" },
-    { label: "Estadísticas", icon: "bar-chart-outline", screen: "statistics" },
+    { label: "Informes", icon: "bar-chart-outline", screen: "statistics" },
   ],
   Administrador: [
     { label: "Inicio", icon: "grid-outline", screen: "admin-home" },
@@ -288,6 +302,22 @@ function formatCurrency(value: number) {
     currency: "COP",
     maximumFractionDigits: 0,
   }).format(value);
+}
+
+function formatNumber(value: number) {
+  return new Intl.NumberFormat("es-CO", {
+    maximumFractionDigits: value % 1 === 0 ? 0 : 1,
+  }).format(value);
+}
+
+function formatShortNumber(value: number) {
+  if (Math.abs(value) >= 1_000_000) return `${formatNumber(value / 1_000_000)} M`;
+  if (Math.abs(value) >= 1_000) return `${formatNumber(value / 1_000)} mil`;
+  return formatNumber(value);
+}
+
+function formatShortCurrency(value: number) {
+  return `$${formatShortNumber(value)}`;
 }
 
 function errorMessage(error: unknown) {
@@ -678,6 +708,14 @@ export default function SupportApp() {
             {screen === "contractor" && context.role === "Cliente" && selectedClientContractor && (
               <ClientContractorProfile
                 contractor={selectedClientContractor}
+                onContractorRefreshed={(updatedContractor) => {
+                  setData((current) => ({
+                    ...current,
+                    clientContractors: current.clientContractors.map((item) =>
+                      item.id === updatedContractor.id ? updatedContractor : item,
+                    ),
+                  }));
+                }}
                 onDocument={openDocument}
                 onHistory={(history) => {
                   setSelectedHistory(history);
@@ -695,6 +733,14 @@ export default function SupportApp() {
                 workwearTypes={data.workwearTypes}
                 onDocument={openDocument}
                 onChanged={refresh}
+                onContractorRefreshed={(updatedContractor) => {
+                  setData((current) => ({
+                    ...current,
+                    contractors: current.contractors.map((item) =>
+                      item.id === updatedContractor.id ? updatedContractor : item,
+                    ),
+                  }));
+                }}
                 onHistory={(history) => {
                   setSelectedHistory(history);
                   navigate("history-detail");
@@ -1634,7 +1680,7 @@ function Header({
     contractor: "Perfil del contratista",
     "document-preview": "Documento del contratista",
     "history-detail": "Detalle del turno",
-    statistics: "Estadísticas",
+    statistics: "Informes",
     users: "Administración de usuarios",
   };
   const initials = `${context.name[0] ?? ""}${context.lastName[0] ?? ""}`.toUpperCase();
@@ -1991,6 +2037,9 @@ function OperationCard({
   hideStatus: boolean;
   onPress: () => void;
 }) {
+  const operationContext = operation.operationType === "DESCARGUE"
+    ? `${operation.area} ⋅ ${operation.serviceUnitType ?? "Descargue"} ⋅ ${operation.actualUnits ?? operation.plannedUnits ?? 0} unidades`
+    : `${operation.area} ⋅ ${operation.shift ?? "Sin turno"} ⋅ ${operation.people} personas`;
   return (
     <Pressable style={styles.card} onPress={onPress}>
       <View style={styles.cardTop}>
@@ -2000,9 +2049,10 @@ function OperationCard({
         </View>
         <View style={styles.flex}>
           <Text style={styles.cardTitle}>{operation.client}</Text>
-          <Text style={styles.cardMeta}>{operation.area} ⋅ {operation.shift} ⋅ {operation.people} personas</Text>
+          <Text style={styles.cardMeta}>{operationContext}</Text>
           <Text style={styles.caption}>{formatDate(operation.date)}</Text>
         </View>
+        <StatusPill good={operation.operationType === "TURNO"} text={operation.operationType} />
         {!hideStatus && <StatusBadge status={operation.status} />}
         <Ionicons name="chevron-forward" size={18} color={C.muted} />
       </View>
@@ -2041,7 +2091,11 @@ function OperationDetail({
     }
     setSaving(true);
     try {
-      await reviewOperation(operation.id, decision, reviewText);
+      if (operation.operationType === "DESCARGUE") {
+        await reviewDischargeOperation(operation.id, decision, reviewText);
+      } else {
+        await reviewOperation(operation.id, decision, reviewText);
+      }
       setReviewing(false);
       await onChanged();
     } catch (cause) {
@@ -2058,14 +2112,19 @@ function OperationDetail({
           <View>
             <Text style={styles.eyebrow}>OPERACIÓN #{operation.id}</Text>
             <Text style={styles.detailTitle}>{operation.client}</Text>
-            <Text style={styles.subtitle}>{operation.area} ⋅ {operation.shift} ⋅ {formatDate(operation.date)}</Text>
+            <Text style={styles.subtitle}>
+              {operation.area} ⋅ {operation.operationType === "DESCARGUE" ? operation.serviceUnitType : operation.shift} ⋅ {formatDate(operation.date)}
+            </Text>
           </View>
           {context.role !== "Cliente" && <StatusBadge status={operation.status} />}
         </View>
         <View style={styles.summaryRow}>
           <MiniStat label="Planeados" value={String(operation.people)} />
           <MiniStat label="Trabajaron" value={String(operation.worked)} />
-          <MiniStat label="Extras" value={`${operation.extraHours} h`} />
+          <MiniStat
+            label={operation.operationType === "DESCARGUE" ? "Unidades" : "Extras"}
+            value={operation.operationType === "DESCARGUE" ? String(operation.actualUnits ?? operation.plannedUnits ?? 0) : `${operation.extraHours} h`}
+          />
         </View>
       </View>
       {operation.reviewObservations ? (
@@ -2083,7 +2142,9 @@ function OperationDetail({
             <View style={styles.flex}>
               <Text style={styles.personName}>{assignment.contractorName}</Text>
               <Text style={styles.caption}>
-                {assignment.attendanceStatus ?? "Planeado"} ⋅ {assignment.extraHours} horas extra
+                {assignment.attendanceStatus ?? "Planeado"} ⋅ {operation.operationType === "DESCARGUE"
+                  ? `${assignment.dischargedUnits} unidades`
+                  : `${assignment.extraHours} horas extra`}
               </Text>
             </View>
             <Ionicons
@@ -2160,13 +2221,17 @@ function InitialOperation({
 }) {
   const firstClient = context.clients[0];
   const activeContractors = data.contractors.filter((contractor) => contractor.active);
+  const [operationType, setOperationType] = useState<"TURNO" | "DESCARGUE">("TURNO");
   const [clientId, setClientId] = useState(firstClient?.id ?? 0);
   const availableAreas = data.areas.filter((area) => area.clientId === clientId);
   const [areaId, setAreaId] = useState(availableAreas[0]?.id ?? 0);
   const availableShifts = data.shifts.filter((shift) => shift.areaId === areaId);
   const [shiftId, setShiftId] = useState(availableShifts[0]?.id ?? 0);
+  const [serviceUnitTypes, setServiceUnitTypes] = useState(data.serviceUnitTypes);
+  const [serviceUnitTypeId, setServiceUnitTypeId] = useState(0);
+  const [plannedUnits, setPlannedUnits] = useState("");
   const [contractorId, setContractorId] = useState(activeContractors[0]?.id ?? 0);
-  const [openSelector, setOpenSelector] = useState<"client" | "area" | "shift" | "contractor" | null>(null);
+  const [openSelector, setOpenSelector] = useState<"operationType" | "client" | "area" | "shift" | "serviceUnitType" | "contractor" | null>(null);
   const [added, setAdded] = useState<Contractor[]>([]);
   const [saving, setSaving] = useState(false);
 
@@ -2181,6 +2246,16 @@ function InitialOperation({
   }, [areaId, data.shifts]);
 
   useEffect(() => {
+    if (operationType !== "DESCARGUE" || !areaId) return;
+    loadAvailableServiceUnits(areaId, todayIso())
+      .then((rows) => {
+        setServiceUnitTypes(rows);
+        setServiceUnitTypeId((current) => rows.some((item) => item.id === current) ? current : rows[0]?.id ?? 0);
+      })
+      .catch((cause) => Alert.alert("No fue posible cargar las unidades", errorMessage(cause)));
+  }, [areaId, operationType]);
+
+  useEffect(() => {
     if (!activeContractors.some((contractor) => contractor.id === contractorId)) {
       setContractorId(activeContractors[0]?.id ?? 0);
     }
@@ -2189,19 +2264,32 @@ function InitialOperation({
   const selectedContractor = data.contractors.find((item) => item.id === contractorId);
 
   const save = async () => {
-    if (!clientId || !areaId || !shiftId || added.length === 0) {
-      Alert.alert("Completa el registro", "Selecciona cliente, área, turno y al menos un contratista.");
+    const unitCount = Number(plannedUnits);
+    if (!clientId || !areaId || added.length === 0) {
+      Alert.alert("Completa el registro", "Selecciona cliente, área y al menos un contratista.");
+      return;
+    }
+    if (operationType === "TURNO" && !shiftId) {
+      Alert.alert("Completa el registro", "Selecciona el turno.");
+      return;
+    }
+    if (operationType === "DESCARGUE" && (!serviceUnitTypeId || !/^\d+(\.\d{1,2})?$/.test(plannedUnits) || unitCount <= 0)) {
+      Alert.alert("Unidades inválidas", "Selecciona el tipo de unidad e ingresa una cantidad positiva con máximo dos decimales.");
       return;
     }
     setSaving(true);
     try {
-      await createOperation({
-        date: todayIso(),
-        clientId,
-        areaId,
-        shiftId,
-        contractorIds: added.map((item) => item.id),
-      });
+      if (operationType === "DESCARGUE") {
+        await createDischargeOperation({
+          date: todayIso(), clientId, areaId, serviceUnitTypeId,
+          plannedUnits: unitCount, contractorIds: added.map((item) => item.id),
+        });
+      } else {
+        await createOperation({
+          date: todayIso(), clientId, areaId, shiftId,
+          contractorIds: added.map((item) => item.id),
+        });
+      }
       Alert.alert("Registro guardado", "La operación quedó EN CURSO.");
       await onSaved();
     } catch (cause) {
@@ -2216,6 +2304,12 @@ function InitialOperation({
       <FormCard title="Información de la operación">
         <Choice label="Fecha" value={formatDate(todayIso())} icon="calendar-outline" disabled />
         <Choice
+          label="Tipo de operación *"
+          value={operationType === "TURNO" ? "Turno" : "Descargue"}
+          icon="swap-horizontal-outline"
+          onPress={() => setOpenSelector("operationType")}
+        />
+        <Choice
           label="Cliente *"
           value={context.clients.find((item) => item.id === clientId)?.name ?? "Selecciona un cliente"}
           icon="business-outline"
@@ -2228,13 +2322,34 @@ function InitialOperation({
           disabled={!clientId || availableAreas.length === 0}
           onPress={() => setOpenSelector("area")}
         />
-        <Choice
-          label="Turno *"
-          value={availableShifts.find((item) => item.id === shiftId)?.name ?? "Selecciona un turno"}
-          icon="time-outline"
-          disabled={!areaId || availableShifts.length === 0}
-          onPress={() => setOpenSelector("shift")}
-        />
+        {operationType === "TURNO" ? (
+          <Choice
+            label="Turno *"
+            value={availableShifts.find((item) => item.id === shiftId)?.name ?? "Selecciona un turno"}
+            icon="time-outline"
+            disabled={!areaId || availableShifts.length === 0}
+            onPress={() => setOpenSelector("shift")}
+          />
+        ) : (
+          <>
+            <Choice
+              label="Tipo de unidad *"
+              value={serviceUnitTypes.find((item) => item.id === serviceUnitTypeId)?.name ?? "Selecciona una unidad"}
+              icon="cube-outline"
+              disabled={!areaId || serviceUnitTypes.length === 0}
+              onPress={() => setOpenSelector("serviceUnitType")}
+            />
+            <Text style={styles.fieldLabel}>Unidades planeadas *</Text>
+            <TextInput
+              value={plannedUnits}
+              onChangeText={(value) => /^\d*(\.\d{0,2})?$/.test(value) && setPlannedUnits(value)}
+              keyboardType="decimal-pad"
+              placeholder="0.00"
+              placeholderTextColor="#929BAD"
+              style={styles.input}
+            />
+          </>
+        )}
         <Choice
           label="Contratista *"
           value={selectedContractor?.fullName ?? "Selecciona un contratista"}
@@ -2261,7 +2376,9 @@ function InitialOperation({
               <View style={styles.flex}>
                 <Text style={styles.personName}>{contractor.fullName}</Text>
                 <Text style={styles.caption}>
-                  {context.clients.find((item) => item.id === clientId)?.name} ⋅ {availableAreas.find((item) => item.id === areaId)?.name} ⋅ {availableShifts.find((item) => item.id === shiftId)?.name}
+                  {context.clients.find((item) => item.id === clientId)?.name} ⋅ {availableAreas.find((item) => item.id === areaId)?.name} ⋅ {operationType === "TURNO"
+                    ? availableShifts.find((item) => item.id === shiftId)?.name
+                    : serviceUnitTypes.find((item) => item.id === serviceUnitTypeId)?.name}
                 </Text>
               </View>
               <Pressable onPress={() => setAdded(added.filter((item) => item.id !== contractor.id))}>
@@ -2272,6 +2389,18 @@ function InitialOperation({
         </ScrollView>
       </View>
       <PrimaryButton label={saving ? "Guardando..." : "Guardar registro inicial"} icon="save-outline" disabled={saving} onPress={save} />
+      <DropdownModal
+        visible={openSelector === "operationType"}
+        title="Tipo de operación"
+        options={[{ id: 1, name: "Turno" }, { id: 2, name: "Descargue" }]}
+        selectedId={operationType === "TURNO" ? 1 : 2}
+        onClose={() => setOpenSelector(null)}
+        onSelect={(id) => {
+          setOperationType(id === 1 ? "TURNO" : "DESCARGUE");
+          setAdded([]);
+          setOpenSelector(null);
+        }}
+      />
       <DropdownModal
         visible={openSelector === "client"}
         title="Seleccionar cliente"
@@ -2306,6 +2435,17 @@ function InitialOperation({
         }}
       />
       <DropdownModal
+        visible={openSelector === "serviceUnitType"}
+        title="Seleccionar tipo de unidad"
+        options={serviceUnitTypes}
+        selectedId={serviceUnitTypeId}
+        onClose={() => setOpenSelector(null)}
+        onSelect={(id) => {
+          setServiceUnitTypeId(id);
+          setOpenSelector(null);
+        }}
+      />
+      <DropdownModal
         visible={openSelector === "contractor"}
         title="Seleccionar contratista"
         options={activeContractors.map((contractor) => ({
@@ -2335,39 +2475,83 @@ function FinalOperation({
   contractors: Contractor[];
   onSaved: () => void;
 }) {
+  const isDischarge = operation.operationType === "DESCARGUE";
   const [assignments, setAssignments] = useState<Assignment[]>([]);
+  const [actualUnits, setActualUnits] = useState(String(operation.actualUnits ?? operation.plannedUnits ?? 0));
   const [observations, setObservations] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [availableContractorIds, setAvailableContractorIds] = useState<number[]>([]);
   const [contractorSelectorVisible, setContractorSelectorVisible] = useState(false);
 
+  const distributeUnits = useCallback((rows: Assignment[], totalText: string) => {
+    const totalCents = Math.round((Number(totalText) || 0) * 100);
+    const attending = rows.filter((row) => row.attendanceStatus !== "AUSENTE");
+    if (attending.length === 0) return rows.map((row) => ({ ...row, dischargedUnits: 0 }));
+    const base = Math.floor(totalCents / attending.length);
+    let remainder = totalCents - base * attending.length;
+    return rows.map((row) => {
+      if (row.attendanceStatus === "AUSENTE") return { ...row, dischargedUnits: 0 };
+      const cents = base + (remainder-- > 0 ? 1 : 0);
+      return { ...row, dischargedUnits: cents / 100 };
+    });
+  }, []);
+
   const loadAssignments = useCallback(async () => {
     const rows = await loadOperationAssignments(operation.id);
-    setAssignments(
-      rows.map((row) => ({
+    const normalized = rows.map((row) => ({
         ...row,
         attendanceStatus: row.attendanceStatus ?? "ASISTIÓ",
-      })),
-    );
-  }, [operation.id]);
+      }));
+    setAssignments(isDischarge
+      ? distributeUnits(normalized, String(operation.actualUnits ?? operation.plannedUnits ?? 0))
+      : normalized);
+  }, [distributeUnits, isDischarge, operation.actualUnits, operation.id, operation.plannedUnits]);
 
   useEffect(() => {
     Promise.all([
       loadAssignments(),
-      loadAvailableContractorIds(operation.id).then(setAvailableContractorIds),
+      (isDischarge ? loadAvailableDischargeContractorIds(operation.id) : loadAvailableContractorIds(operation.id))
+        .then(setAvailableContractorIds),
     ])
       .catch((cause) => Alert.alert("No fue posible cargar", errorMessage(cause)))
       .finally(() => setLoading(false));
-  }, [loadAssignments, operation.id]);
+  }, [isDischarge, loadAssignments, operation.id]);
+
+  useEffect(() => {
+    if (isDischarge) setAssignments((rows) => distributeUnits(rows, actualUnits));
+  }, [actualUnits, distributeUnits, isDischarge]);
 
   const updateAssignment = (id: number, patch: Partial<Assignment>) => {
-    setAssignments((rows) =>
-      rows.map((row) => (row.assignmentId === id ? { ...row, ...patch } : row)),
-    );
+    setAssignments((rows) => {
+      const next = rows.map((row) => (row.assignmentId === id ? { ...row, ...patch } : row));
+      return isDischarge && Object.prototype.hasOwnProperty.call(patch, "attendanceStatus")
+        ? distributeUnits(next, actualUnits)
+        : next;
+    });
   };
 
   const save = () => {
+    if (isDischarge) {
+      const total = Number(actualUnits);
+      const assignedCents = Math.round(assignments.reduce((sum, item) => sum + item.dischargedUnits, 0) * 100);
+      if (!/^\d+(\.\d{1,2})?$/.test(actualUnits) || total < 0) {
+        Alert.alert("Unidades inválidas", "Ingresa un valor positivo con máximo dos decimales.");
+        return;
+      }
+      if (total === 0 && !observations.trim()) {
+        Alert.alert("Observación requerida", "Explica por qué el descargue terminó con cero unidades.");
+        return;
+      }
+      if (total > 0 && !assignments.some((item) => item.attendanceStatus !== "AUSENTE")) {
+        Alert.alert("Asistencia requerida", "Debe existir al menos un contratista asistente.");
+        return;
+      }
+      if (Math.round(total * 100) !== assignedCents) {
+        Alert.alert("Distribución incompleta", "La suma de unidades por contratista debe coincidir con el total descargado.");
+        return;
+      }
+    }
     Alert.alert(
       "Enviar para aprobación",
       "La operación quedará PENDIENTE hasta la revisión del Director/Gerente.",
@@ -2378,7 +2562,11 @@ function FinalOperation({
           onPress: async () => {
             setSaving(true);
             try {
-              await finalizeOperation(operation.id, assignments, observations);
+              if (isDischarge) {
+                await finalizeDischargeOperation(operation.id, Number(actualUnits), assignments, observations);
+              } else {
+                await finalizeOperation(operation.id, assignments, observations);
+              }
               await onSaved();
             } catch (cause) {
               Alert.alert("No fue posible enviar", errorMessage(cause));
@@ -2397,7 +2585,23 @@ function FinalOperation({
         <Choice label="Fecha" value={formatDate(operation.date)} icon="calendar-outline" disabled />
         <Choice label="Cliente" value={operation.client} icon="business-outline" disabled />
         <Choice label="Área" value={operation.area} icon="location-outline" disabled />
-        <Choice label="Turno" value={operation.shift} icon="time-outline" disabled />
+        {isDischarge ? (
+          <>
+            <Choice label="Tipo de unidad" value={operation.serviceUnitType ?? "Sin registrar"} icon="cube-outline" disabled />
+            <Choice label="Unidades planeadas" value={String(operation.plannedUnits ?? 0)} icon="layers-outline" disabled />
+            <Text style={styles.fieldLabel}>Unidades descargadas *</Text>
+            <TextInput
+              value={actualUnits}
+              onChangeText={(value) => /^\d*(\.\d{0,2})?$/.test(value) && setActualUnits(value)}
+              keyboardType="decimal-pad"
+              placeholder="0.00"
+              placeholderTextColor="#929BAD"
+              style={styles.input}
+            />
+          </>
+        ) : (
+          <Choice label="Turno" value={operation.shift ?? "Sin turno"} icon="time-outline" disabled />
+        )}
       </FormCard>
       <SectionTitle title="Asistencia y novedades" action={`${assignments.length} personas`} />
       {loading ? <ActivityIndicator color={C.navy} /> : assignments.map((assignment) => (
@@ -2413,11 +2617,10 @@ function FinalOperation({
             </View>
             {assignment.assignmentId < 0 && (
               <Pressable
-                onPress={() =>
-                  setAssignments((rows) =>
-                    rows.filter((row) => row.assignmentId !== assignment.assignmentId),
-                  )
-                }
+                onPress={() => setAssignments((rows) => {
+                  const next = rows.filter((row) => row.assignmentId !== assignment.assignmentId);
+                  return isDischarge ? distributeUnits(next, actualUnits) : next;
+                })}
               >
                 <Ionicons name="trash-outline" size={20} color={C.red} />
               </Pressable>
@@ -2434,18 +2637,33 @@ function FinalOperation({
             <Text style={styles.fieldLabel}>Asistencia</Text>
             <StatusPill good={assignment.attendanceStatus !== "AUSENTE"} text={assignment.attendanceStatus ?? "ASISTIÓ"} />
           </Pressable>
-          <View style={styles.between}>
-            <Text style={styles.fieldLabel}>Registró horas extra</Text>
-            <Switch
-              value={assignment.extraHours > 0}
-              onValueChange={(value) =>
-                updateAssignment(assignment.assignmentId, { extraHours: value ? 1 : 0 })
-              }
-              trackColor={{ false: C.line, true: "#AAB8DB" }}
-              thumbColor={assignment.extraHours > 0 ? C.navy : "#F4F4F4"}
-            />
-          </View>
-          {assignment.extraHours > 0 && (
+          {isDischarge ? (
+            <>
+              <Text style={styles.fieldLabel}>Unidades descargadas</Text>
+              <TextInput
+                value={String(assignment.dischargedUnits)}
+                onChangeText={(value) => {
+                  if (/^\d*(\.\d{0,2})?$/.test(value)) {
+                    updateAssignment(assignment.assignmentId, { dischargedUnits: Number(value) || 0 });
+                  }
+                }}
+                editable={assignment.attendanceStatus !== "AUSENTE"}
+                keyboardType="decimal-pad"
+                style={styles.input}
+              />
+            </>
+          ) : (
+            <View style={styles.between}>
+              <Text style={styles.fieldLabel}>Registró horas extra</Text>
+              <Switch
+                value={assignment.extraHours > 0}
+                onValueChange={(value) => updateAssignment(assignment.assignmentId, { extraHours: value ? 1 : 0 })}
+                trackColor={{ false: C.line, true: "#AAB8DB" }}
+                thumbColor={assignment.extraHours > 0 ? C.navy : "#F4F4F4"}
+              />
+            </View>
+          )}
+          {!isDischarge && assignment.extraHours > 0 && (
             <View style={styles.counter}>
               <Pressable onPress={() => updateAssignment(assignment.assignmentId, { extraHours: Math.max(0, assignment.extraHours - 1) })}>
                 <Ionicons name="remove-circle-outline" size={25} color={C.navy} />
@@ -2499,9 +2717,8 @@ function FinalOperation({
           setContractorSelectorVisible(false);
           const contractor = contractors.find((item) => item.id === contractorId);
           if (!contractor) return;
-          setAssignments((rows) => [
-            ...rows,
-            {
+          setAssignments((rows) => {
+            const next = [...rows, {
               assignmentId: -contractor.id,
               contractorId: contractor.id,
               contractorName: contractor.fullName,
@@ -2509,9 +2726,11 @@ function FinalOperation({
               attendanceStatus: "ASISTIÓ",
               workedQuantity: 1,
               extraHours: 0,
+              dischargedUnits: 0,
               observations: null,
-            },
-          ]);
+            }];
+            return isDischarge ? distributeUnits(next, actualUnits) : next;
+          });
         }}
       />
     </Page>
@@ -3289,17 +3508,34 @@ function Staff({
   );
 }
 
+type ContractorDocumentsSectionHandle = {
+  replaceDocuments: (documents: ContractorDocument[]) => void;
+};
+
+type ContractorWorkwearSectionHandle = {
+  replaceWorkwear: (summary: WorkwearSummary[], movements: WorkwearMovement[]) => void;
+};
+
+type ContractorActivationDocumentsCardHandle = {
+  replaceDocuments: (documents: ContractorDocument[]) => void;
+};
+
 function ClientContractorProfile({
   contractor,
+  onContractorRefreshed,
   onDocument,
   onHistory,
 }: {
   contractor: ClientContractor;
+  onContractorRefreshed: (contractor: ClientContractor) => void;
   onDocument: (document: ContractorDocument) => void;
   onHistory: (history: ContractorHistory) => void;
 }) {
   const [history, setHistory] = useState<ContractorHistory[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshingRef = useRef(false);
+  const documentsRef = useRef<ContractorDocumentsSectionHandle>(null);
 
   useEffect(() => {
     loadClientContractorHistory(contractor.id)
@@ -3308,8 +3544,32 @@ function ClientContractorProfile({
       .finally(() => setLoading(false));
   }, [contractor.id]);
 
+  const refreshProfile = useCallback(async () => {
+    if (refreshingRef.current) return;
+    refreshingRef.current = true;
+    setRefreshing(true);
+    try {
+      const [updatedContractor, updatedHistory, updatedDocuments] = await Promise.all([
+        loadClientContractorProfile(contractor.id),
+        loadClientContractorHistory(contractor.id),
+        loadContractorDocuments(contractor.id),
+      ]);
+      onContractorRefreshed(updatedContractor);
+      setHistory(updatedHistory);
+      documentsRef.current?.replaceDocuments(updatedDocuments);
+    } catch (cause) {
+      Alert.alert("No fue posible actualizar", errorMessage(cause));
+    } finally {
+      refreshingRef.current = false;
+      setRefreshing(false);
+    }
+  }, [contractor.id, onContractorRefreshed]);
+
   return (
-    <Page>
+    <Page
+      loading={refreshing}
+      onRefresh={Platform.OS !== "web" ? refreshProfile : undefined}
+    >
       <LinearGradient colors={[C.navy, C.navy2]} style={styles.profileHero}>
         <ContractorProfileAvatar fileId={contractor.profilePhotoFileId} initials={contractor.initials} />
         <Text style={styles.profileName}>{contractor.fullName}</Text>
@@ -3330,7 +3590,7 @@ function ClientContractorProfile({
         ["EPS", contractor.eps ?? "Sin registrar"],
         ["ARL", contractor.arl ?? "Sin registrar"],
       ]} />
-      <ContractorDocumentsSection contractorId={contractor.id} onOpen={onDocument} />
+      <ContractorDocumentsSection ref={documentsRef} contractorId={contractor.id} onOpen={onDocument} />
       <SectionTitle title="Historial de operaciones" action={`${history.length} registros`} />
       {loading ? (
         <ActivityIndicator color={C.navy} />
@@ -3363,6 +3623,7 @@ function ContractorProfile({
   workwearTypes,
   onDocument,
   onChanged,
+  onContractorRefreshed,
   onHistory,
 }: {
   context: UserContext;
@@ -3373,19 +3634,55 @@ function ContractorProfile({
   workwearTypes: AppData["workwearTypes"];
   onDocument: (document: ContractorDocument) => void;
   onChanged: () => void;
+  onContractorRefreshed: (contractor: Contractor) => void;
   onHistory: (history: ContractorHistory) => void;
 }) {
   const [history, setHistory] = useState<ContractorHistory[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshingRef = useRef(false);
   const [terminationVisible, setTerminationVisible] = useState(false);
+  const documentsRef = useRef<ContractorDocumentsSectionHandle>(null);
+  const workwearRef = useRef<ContractorWorkwearSectionHandle>(null);
+  const activationRef = useRef<ContractorActivationDocumentsCardHandle>(null);
   useEffect(() => {
     loadContractorHistory(contractor.id)
       .then(setHistory)
       .catch((cause) => Alert.alert("No fue posible cargar", errorMessage(cause)))
       .finally(() => setLoading(false));
   }, [contractor.id]);
+
+  const refreshProfile = useCallback(async () => {
+    if (refreshingRef.current) return;
+    refreshingRef.current = true;
+    setRefreshing(true);
+    try {
+      const [updatedContractor, updatedHistory, updatedDocuments, updatedSummary, updatedMovements] =
+        await Promise.all([
+          loadContractorProfile(contractor.id),
+          loadContractorHistory(contractor.id),
+          loadContractorDocuments(contractor.id),
+          loadContractorWorkwearSummary(contractor.id),
+          loadContractorWorkwearMovements(contractor.id),
+        ]);
+      onContractorRefreshed(updatedContractor);
+      setHistory(updatedHistory);
+      documentsRef.current?.replaceDocuments(updatedDocuments);
+      workwearRef.current?.replaceWorkwear(updatedSummary, updatedMovements);
+      activationRef.current?.replaceDocuments(updatedDocuments);
+    } catch (cause) {
+      Alert.alert("No fue posible actualizar", errorMessage(cause));
+    } finally {
+      refreshingRef.current = false;
+      setRefreshing(false);
+    }
+  }, [contractor.id, onContractorRefreshed]);
+
   return (
-    <Page>
+    <Page
+      loading={refreshing}
+      onRefresh={Platform.OS !== "web" ? refreshProfile : undefined}
+    >
       <LinearGradient colors={[C.navy, C.navy2]} style={styles.profileHero}>
         <ContractorProfileAvatar fileId={contractor.profilePhotoFileId} initials={contractor.initials} />
         <Text style={styles.profileName}>{contractor.fullName}</Text>
@@ -3395,12 +3692,13 @@ function ContractorProfile({
       <InfoCard title="Información personal" rows={[
         ["Nombres y apellidos", contractor.fullName],
         ["Fecha de nacimiento", contractor.birthDate ?? "Sin registrar"],
+        ["Ciudad de nacimiento", contractor.birthPlace],
         ["RH", contractor.rh ?? "Sin registrar"],
         ["Estado civil", contractor.civilState],
       ]} />
       <InfoCard title="Seguridad Social" rows={[
         ["EPS", contractor.eps ?? "Sin registrar"],
-        ["ARL", contractor.arl ?? "Sin registrar"],
+        ["Fondo Pensiones", contractor.pensionFund ?? "Sin registrar"],
       ]} />
       <InfoCard title="Información laboral" rows={[
         ["Fecha de contratación", formatDate(contractor.hireDate)],
@@ -3413,9 +3711,15 @@ function ContractorProfile({
         ["Ciudad", contractor.city],
         ["Transporte", contractor.transport],
       ]} />
-      <ContractorWorkwearSection contractorId={contractor.id} workwearTypes={workwearTypes} />
+      <InfoCard title="Contacto de emergencia" rows={[
+        ["Nombre", contractor.emergencyContactName],
+        ["Parentesco", contractor.emergencyContactRelationship],
+        ["Teléfono", contractor.emergencyContactPhone],
+      ]} />
+      <ContractorWorkwearSection ref={workwearRef} contractorId={contractor.id} workwearTypes={workwearTypes} />
       {context.role === "Director" && contractor.contractStatus === "PENDIENTE" && (
         <ContractorActivationDocumentsCard
+          ref={activationRef}
           contractor={contractor}
           contractTypes={contractTypes}
           onChanged={onChanged}
@@ -3440,6 +3744,7 @@ function ContractorProfile({
         }}
       />
       <ContractorDocumentsSection
+        ref={documentsRef}
         contractorId={contractor.id}
         onOpen={onDocument}
         uploadEnabled={
@@ -3533,13 +3838,16 @@ function workwearMovementSuccess(type: WorkwearMovementType) {
   return "Dotación entregada";
 }
 
-function ContractorWorkwearSection({
+const ContractorWorkwearSection = forwardRef<
+  ContractorWorkwearSectionHandle,
+  {
+    contractorId: number;
+    workwearTypes: AppData["workwearTypes"];
+  }
+>(function ContractorWorkwearSection({
   contractorId,
   workwearTypes,
-}: {
-  contractorId: number;
-  workwearTypes: AppData["workwearTypes"];
-}) {
+}, ref) {
   const [summary, setSummary] = useState<WorkwearSummary[]>([]);
   const [movements, setMovements] = useState<WorkwearMovement[]>([]);
   const [loading, setLoading] = useState(true);
@@ -3567,6 +3875,15 @@ function ContractorWorkwearSection({
   useEffect(() => {
     loadWorkwear();
   }, [loadWorkwear]);
+
+  useImperativeHandle(ref, () => ({
+    replaceWorkwear(nextSummary, nextMovements) {
+      setError("");
+      setSummary(nextSummary);
+      setMovements(nextMovements);
+      setLoading(false);
+    },
+  }), []);
 
   return (
     <View style={styles.documentsSection}>
@@ -3656,7 +3973,7 @@ function ContractorWorkwearSection({
       />
     </View>
   );
-}
+});
 
 function WorkwearMovementModal({
   visible,
@@ -3855,17 +4172,20 @@ function WorkwearMovementModal({
   );
 }
 
-function ContractorDocumentsSection({
+const ContractorDocumentsSection = forwardRef<
+  ContractorDocumentsSectionHandle,
+  {
+    contractorId: number;
+    onOpen: (document: ContractorDocument) => void;
+    uploadEnabled?: boolean;
+    documentTypes?: ContractorDocumentTypeOption[];
+  }
+>(function ContractorDocumentsSection({
   contractorId,
   onOpen,
   uploadEnabled = false,
   documentTypes = [],
-}: {
-  contractorId: number;
-  onOpen: (document: ContractorDocument) => void;
-  uploadEnabled?: boolean;
-  documentTypes?: ContractorDocumentTypeOption[];
-}) {
+}, ref) {
   const [documents, setDocuments] = useState<ContractorDocument[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -3886,6 +4206,14 @@ function ContractorDocumentsSection({
   useEffect(() => {
     void loadDocuments();
   }, [loadDocuments]);
+
+  useImperativeHandle(ref, () => ({
+    replaceDocuments(nextDocuments) {
+      setError("");
+      setDocuments(nextDocuments);
+      setLoading(false);
+    },
+  }), []);
 
   return (
     <View style={styles.documentsSection}>
@@ -3945,7 +4273,7 @@ function ContractorDocumentsSection({
       />
     </View>
   );
-}
+});
 
 function ContractorActivationCard({
   contractorId,
@@ -4324,15 +4652,18 @@ const activationDocumentOptions: { typeCode: ContractorActivationDocumentType; t
   { typeCode: "ANTECEDENTES_PROCURADURIA", title: "Antecedentes Procuraduría" },
 ];
 
-function ContractorActivationDocumentsCard({
+const ContractorActivationDocumentsCard = forwardRef<
+  ContractorActivationDocumentsCardHandle,
+  {
+    contractor: Contractor;
+    contractTypes: AppData["contractTypes"];
+    onChanged: () => void;
+  }
+>(function ContractorActivationDocumentsCard({
   contractor,
   contractTypes,
   onChanged,
-}: {
-  contractor: Contractor;
-  contractTypes: AppData["contractTypes"];
-  onChanged: () => void;
-}) {
+}, ref) {
   const [selectedFiles, setSelectedFiles] = useState<Partial<Record<ContractorActivationDocumentType, ContractorPdfFile>>>({});
   const [existingCodes, setExistingCodes] = useState<ContractorActivationDocumentType[]>([]);
   const [contractTypeId, setContractTypeId] = useState(contractor.contractTypeId ?? contractTypes[0]?.id ?? 0);
@@ -4367,6 +4698,17 @@ function ContractorActivationDocumentsCard({
   useEffect(() => {
     setContractTypeId(contractor.contractTypeId ?? contractTypes[0]?.id ?? 0);
   }, [contractTypes, contractor.contractTypeId, contractor.id]);
+
+  useImperativeHandle(ref, () => ({
+    replaceDocuments(documents) {
+      setExistingCodes(
+        activationDocumentOptions
+          .map((item) => item.typeCode)
+          .filter((code) => documents.some((document) => document.typeCode === code)),
+      );
+      setLoadingDocuments(false);
+    },
+  }), []);
 
   const pickDocument = async (typeCode: ContractorActivationDocumentType, title: string) => {
     try {
@@ -4550,7 +4892,7 @@ function ContractorActivationDocumentsCard({
     />
     </>
   );
-}
+});
 
 function DocumentPreview({ document }: { document: ContractorDocument }) {
   const [url, setUrl] = useState("");
@@ -4648,19 +4990,549 @@ function ClientHistoryDetail({ history }: { history: ContractorHistory }) {
   );
 }
 
+type DirectorReportTab = "operation" | "contractors" | "client" | "payroll";
+
+const directorReportTabs: { id: DirectorReportTab; title: string; icon: IconName }[] = [
+  { id: "operation", title: "Operación", icon: "briefcase-outline" },
+  { id: "contractors", title: "Contratistas", icon: "people-outline" },
+  { id: "client", title: "Cliente", icon: "business-outline" },
+  { id: "payroll", title: "Nómina", icon: "wallet-outline" },
+];
+
+function DirectorReports({ context, data }: { context: UserContext; data: AppData }) {
+  const today = todayIso();
+  const [startDate, setStartDate] = useState(monthStartIso(today));
+  const [endDate, setEndDate] = useState(today);
+  const [clientId, setClientId] = useState(0);
+  const [contractorId, setContractorId] = useState(0);
+  const [openFilter, setOpenFilter] = useState<"startDate" | "endDate" | "client" | "contractor" | null>(null);
+  const [activeTab, setActiveTab] = useState<DirectorReportTab>("operation");
+  const [report, setReport] = useState<DirectorReportsSummary | null>(null);
+  const [contractorOptions, setContractorOptions] = useState<DirectorReportsSummary["contractorOptions"]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const clientOptions = data.clients;
+  const selectedClientName =
+    clientId === 0
+      ? "Todas las empresas"
+      : clientOptions.find((client) => client.id === clientId)?.name ?? "Todas las empresas";
+  const selectedContractorName =
+    contractorId === 0
+      ? "Todos los contratistas"
+      : contractorOptions.find((contractor) => contractor.id === contractorId)?.name ?? "Todos los contratistas";
+
+  const refreshReports = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [reportResult, optionsResult] = await Promise.all([
+        loadDirectorReports({
+          startDate,
+          endDate,
+          clientId: clientId || null,
+          contractorId: contractorId || null,
+        }),
+        loadDirectorReports({
+          startDate,
+          endDate,
+          clientId: clientId || null,
+          contractorId: null,
+        }),
+      ]);
+      setReport(reportResult);
+      setContractorOptions(optionsResult.contractorOptions);
+    } catch (cause) {
+      setError(errorMessage(cause));
+      setReport(null);
+      setContractorOptions([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [clientId, contractorId, endDate, startDate]);
+
+  useEffect(() => {
+    refreshReports();
+  }, [refreshReports]);
+
+  const hasData = report
+    ? report.saleTotal > 0 ||
+      report.costTotal > 0 ||
+      report.contractorsWorked > 0 ||
+      report.operationsClosed > 0 ||
+      report.operationsPending > 0 ||
+      report.workedShifts > 0 ||
+      report.dischargeOperations > 0 ||
+      report.dischargedUnits > 0 ||
+      report.extraHours > 0
+    : false;
+
+  const selectStartDate = (date: string) => {
+    if (date > endDate) {
+      Alert.alert("Rango no válido", "La fecha inicial no puede ser posterior a la fecha final.");
+      return;
+    }
+    setStartDate(date);
+    setContractorId(0);
+    setOpenFilter(null);
+  };
+
+  const selectEndDate = (date: string) => {
+    if (date < startDate) {
+      Alert.alert("Rango no válido", "La fecha final no puede ser anterior a la fecha inicial.");
+      return;
+    }
+    setEndDate(date);
+    setContractorId(0);
+    setOpenFilter(null);
+  };
+
+  return (
+    <Page>
+      <View>
+        <Text style={styles.eyebrow}>INFORMES</Text>
+        <Text style={styles.greeting}>Panel gerencial</Text>
+        <Text style={styles.subtitle}>Operación, contratistas, clientes y nómina con datos de operaciones cerradas.</Text>
+      </View>
+      <FormCard title="Filtros">
+        <View style={styles.reportFilterGrid}>
+          <View style={styles.reportFilterField}>
+            <Choice label="Fecha inicial" value={formatDate(startDate)} icon="calendar-outline" onPress={() => setOpenFilter("startDate")} />
+          </View>
+          <View style={styles.reportFilterField}>
+            <Choice label="Fecha final" value={formatDate(endDate)} icon="calendar-outline" onPress={() => setOpenFilter("endDate")} />
+          </View>
+          <View style={styles.reportFilterField}>
+            <Choice label="Empresa" value={selectedClientName} icon="business-outline" onPress={() => setOpenFilter("client")} />
+          </View>
+          <View style={styles.reportFilterField}>
+            <Choice
+              label="Contratista"
+              value={selectedContractorName}
+              icon="person-outline"
+              disabled={contractorOptions.length === 0}
+              onPress={() => setOpenFilter("contractor")}
+            />
+          </View>
+        </View>
+      </FormCard>
+      <View style={styles.adminRateTabs}>
+        {directorReportTabs.map((tab) => (
+          <AdminRateTab
+            key={tab.id}
+            label={tab.title}
+            icon={tab.icon}
+            selected={activeTab === tab.id}
+            onPress={() => setActiveTab(tab.id)}
+          />
+        ))}
+      </View>
+      {loading ? (
+        <View style={styles.centerCard}><ActivityIndicator color={C.navy} /></View>
+      ) : error ? (
+        <Notice icon="cloud-offline-outline" tone="error" text={error} />
+      ) : !report || !hasData ? (
+        <EmptyState icon="bar-chart-outline" text="No hay informes para los filtros seleccionados." />
+      ) : (
+        <DirectorReportTabContent report={report} tab={activeTab} startDate={startDate} endDate={endDate} />
+      )}
+      <CalendarModal
+        visible={openFilter === "startDate"}
+        selectedDate={startDate}
+        title="Seleccionar fecha inicial"
+        subtitle="Elige el primer día que quieres incluir en el informe."
+        onClose={() => setOpenFilter(null)}
+        onSelect={selectStartDate}
+      />
+      <CalendarModal
+        visible={openFilter === "endDate"}
+        selectedDate={endDate}
+        title="Seleccionar fecha final"
+        subtitle="Elige el último día que quieres incluir en el informe."
+        onClose={() => setOpenFilter(null)}
+        onSelect={selectEndDate}
+      />
+      <DropdownModal
+        visible={openFilter === "client"}
+        title="Seleccionar empresa"
+        options={[{ id: 0, name: "Todas las empresas" }, ...clientOptions]}
+        selectedId={clientId}
+        onClose={() => setOpenFilter(null)}
+        onSelect={(id) => {
+          setClientId(id);
+          setContractorId(0);
+          setOpenFilter(null);
+        }}
+      />
+      <DropdownModal
+        visible={openFilter === "contractor"}
+        title="Seleccionar contratista"
+        options={[
+          { id: 0, name: "Todos los contratistas" },
+          ...contractorOptions.map((contractor) => ({
+            id: contractor.id,
+            name: contractor.name,
+            detail: contractor.document,
+          })),
+        ]}
+        selectedId={contractorId}
+        searchable
+        searchPlaceholder="Buscar por nombre o documento"
+        onClose={() => setOpenFilter(null)}
+        onSelect={(id) => {
+          setContractorId(id);
+          setOpenFilter(null);
+        }}
+      />
+    </Page>
+  );
+}
+
+function DirectorReportTabContent({
+  report,
+  tab,
+  startDate,
+  endDate,
+}: {
+  report: DirectorReportsSummary;
+  tab: DirectorReportTab;
+  startDate: string;
+  endDate: string;
+}) {
+  const isWeb = Platform.OS === "web";
+  const trendLabel = report.trendGranularity === "DAY" ? "día" : report.trendGranularity === "WEEK" ? "semana" : "mes";
+  if (tab === "operation") {
+    return (
+      <>
+        <View style={styles.statsGrid}>
+          <Stat value={String(report.operationsClosed)} label="Operaciones cerradas" icon="checkmark-circle-outline" />
+          <Stat value={String(report.operationsPending)} label="Pendientes" icon="alert-circle-outline" />
+          <Stat value={formatNumber(report.workedShifts)} label="Turnos trabajados" icon="time-outline" />
+          <Stat value={String(report.dischargeOperations)} label="Descargues" icon="cube-outline" />
+          <Stat value={formatNumber(report.dischargedUnits)} label="Unidades descargadas" icon="layers-outline" />
+          <Stat value={`${formatNumber(report.coveragePercent)}%`} label="Cobertura" icon="analytics-outline" />
+        </View>
+        <View style={styles.reportGrid}>
+          <View style={styles.reportGridItem}>
+            <ReportBarChart
+              title={`Operaciones cerradas por ${trendLabel}`}
+              data={report.trendSeries}
+              getValue={(item) => item.closedOperations ?? 0}
+              valueLabel={(value) => String(Math.round(value))}
+            />
+          </View>
+          {isWeb && (
+            <View style={styles.reportGridItem}>
+              <ReportLineChart
+                title="Tendencia de turnos trabajados"
+                data={report.trendSeries}
+                getValue={(item) => item.workedShifts ?? 0}
+              />
+            </View>
+          )}
+          <View style={styles.reportGridItem}>
+            <ReportBarChart
+              title={`Unidades descargadas por ${trendLabel}`}
+              data={report.trendSeries}
+              getValue={(item) => item.dischargedUnits ?? 0}
+              valueLabel={formatNumber}
+            />
+          </View>
+        </View>
+        <Notice icon="bulb-outline" text={`Cobertura calculada con personal trabajado frente a planeado entre ${formatDate(startDate)} y ${formatDate(endDate)}.`} />
+      </>
+    );
+  }
+
+  if (tab === "contractors") {
+    const average = report.contractorsWorked > 0 ? report.workedShifts / report.contractorsWorked : 0;
+    return (
+      <>
+        <View style={styles.statsGrid}>
+          <Stat value={String(report.contractorsWorked)} label="Contratistas trabajaron" icon="people-outline" />
+          <Stat value={formatNumber(average)} label="Promedio turnos" icon="speedometer-outline" />
+          <Stat value={`${formatNumber(report.extraHours)} h`} label="Horas extra" icon="time-outline" />
+          <Stat value={String(report.absences)} label="Ausencias" icon="close-circle-outline" />
+        </View>
+        <View style={styles.reportGrid}>
+          {isWeb && (
+            <View style={styles.reportGridItem}>
+              <ReportBarChart
+                title={`Auxiliares por ${trendLabel}`}
+                data={report.trendSeries}
+                getValue={(item) => item.contractors ?? 0}
+                valueLabel={(value) => String(Math.round(value))}
+              />
+            </View>
+          )}
+          <View style={styles.reportGridItem}>
+            <ReportRankingList
+              title="Top contratistas por turnos"
+              rows={report.contractorRanking}
+              metric={(item) => formatNumber(item.workedShifts ?? 0)}
+              metricLabel="Turnos"
+              secondary={(item) => `${formatNumber(item.extraHours ?? 0)} h extra ⋅ ${item.absences ?? 0} ausencias`}
+              limit={isWeb ? 10 : 5}
+            />
+          </View>
+        </View>
+      </>
+    );
+  }
+
+  if (tab === "client") {
+    const averageSale = report.clientsCount > 0 ? report.saleTotal / report.clientsCount : 0;
+    return (
+      <>
+        <View style={styles.statsGrid}>
+          <Stat value={formatCurrency(report.saleTotal)} label="Venta total" icon="cash-outline" />
+          <Stat value={formatCurrency(report.costTotal)} label="Costos" icon="receipt-outline" />
+          <Stat value={String(report.clientsCount)} label="Clientes" icon="business-outline" />
+          <Stat value={formatCurrency(averageSale)} label="Promedio por cliente" icon="trending-up-outline" />
+        </View>
+        <View style={styles.reportGrid}>
+          <View style={styles.reportGridItem}>
+            <ReportBarChart
+              title="Ventas por cliente"
+              data={report.clientRanking}
+              getValue={(item) => item.saleTotal ?? 0}
+              valueLabel={formatShortCurrency}
+            />
+          </View>
+          {isWeb && (
+            <View style={styles.reportGridItem}>
+              <ReportBarChart
+                title={`Ventas por ${trendLabel}`}
+                data={report.trendSeries}
+                getValue={(item) => item.saleTotal ?? 0}
+                valueLabel={formatShortCurrency}
+              />
+            </View>
+          )}
+          <View style={styles.reportGridItem}>
+            <ReportRankingList
+              title="Ranking de clientes"
+              rows={report.clientRanking}
+              metric={(item) => formatCurrency(item.saleTotal ?? 0)}
+              metricLabel="Venta"
+              secondary={(item) => `${item.contractors ?? 0} auxiliares ⋅ ${formatNumber(item.workedShifts ?? 0)} turnos`}
+              limit={isWeb ? 10 : 5}
+            />
+          </View>
+        </View>
+      </>
+    );
+  }
+
+  const averagePayroll = report.payrollContractors > 0 ? report.payrollTotal / report.payrollContractors : 0;
+  const hasPayroll = report.payrollTotal > 0 || report.payrollByClient.length > 0 || report.payrollByContractor.length > 0;
+  return (
+    <>
+      <View style={styles.statsGrid}>
+        <Stat value={formatCurrency(report.payrollTotal)} label="Total nómina" icon="wallet-outline" />
+        <Stat value={String(report.payrollContractors)} label="Contratistas con pago" icon="people-outline" />
+        <Stat value={formatCurrency(averagePayroll)} label="Promedio por contratista" icon="calculator-outline" />
+      </View>
+      {!hasPayroll ? (
+        <EmptyState icon="wallet-outline" text="No hay conceptos de costo categorizados como NOMINA para este periodo." />
+      ) : (
+        <View style={styles.reportGrid}>
+          <View style={styles.reportGridItem}>
+            <ReportBarChart
+              title="Nómina por cliente"
+              data={report.payrollByClient}
+              getValue={(item) => item.payrollTotal ?? 0}
+              valueLabel={formatShortCurrency}
+            />
+          </View>
+          <View style={styles.reportGridItem}>
+            <ReportRankingList
+              title="Nómina por contratista"
+              rows={report.payrollByContractor}
+              metric={(item) => formatCurrency(item.payrollTotal ?? 0)}
+              metricLabel="Nómina"
+              secondary={(item) => `${item.clientName || "Sin cliente"} ⋅ ${formatNumber(item.workedShifts ?? 0)} turnos`}
+              limit={isWeb ? 10 : 5}
+            />
+          </View>
+        </View>
+      )}
+    </>
+  );
+}
+
+function ReportBarChart<T>({
+  title,
+  data,
+  getValue,
+  getLabel,
+  valueLabel = formatShortNumber,
+}: {
+  title: string;
+  data: T[];
+  getValue: (item: T) => number;
+  getLabel?: (item: T) => string;
+  valueLabel?: (value: number) => string;
+}) {
+  const items = sampleChartItems(data, Platform.OS === "web" ? 12 : 7);
+  const values = items.map(getValue);
+  const max = Math.max(...values, 1);
+  const width = 360;
+  const height = 210;
+  const chartTop = 24;
+  const chartHeight = 132;
+  const gap = 8;
+  const barWidth = items.length > 0 ? Math.max(12, (width - 34 - gap * (items.length - 1)) / items.length) : 26;
+  return (
+    <View style={styles.chartCard}>
+      <Text style={styles.sectionTitle}>{title}</Text>
+      {items.length === 0 ? (
+        <EmptyState icon="bar-chart-outline" text="No hay datos para graficar." />
+      ) : (
+        <Svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`}>
+          <Line x1={18} y1={chartTop + chartHeight} x2={width - 10} y2={chartTop + chartHeight} stroke="#E6EAF2" strokeWidth={1} />
+          {items.map((item, index) => {
+            const value = Math.max(0, getValue(item));
+            const barHeight = Math.max(4, (value / max) * chartHeight);
+            const x = 18 + index * (barWidth + gap);
+            const y = chartTop + chartHeight - barHeight;
+            const rawLabel = getLabel?.(item) ?? (item as any).label ?? (item as any).name ?? "";
+            const label = rawLabel.length > 10 ? `${rawLabel.slice(0, 9)}…` : rawLabel;
+            return (
+              <React.Fragment key={`${rawLabel}-${index}`}>
+                <Rect x={x} y={y} width={barWidth} height={barHeight} rx={6} fill={C.red} />
+                <SvgText x={x + barWidth / 2} y={Math.max(12, y - 6)} fill={C.red} fontSize="9" fontWeight="700" textAnchor="middle">
+                  {valueLabel(value)}
+                </SvgText>
+                <SvgText x={x + barWidth / 2} y={chartTop + chartHeight + 18} fill={C.muted} fontSize="8" textAnchor="middle">
+                  {label}
+                </SvgText>
+              </React.Fragment>
+            );
+          })}
+        </Svg>
+      )}
+    </View>
+  );
+}
+
+function ReportLineChart({
+  title,
+  data,
+  getValue,
+}: {
+  title: string;
+  data: DirectorReportSeries[];
+  getValue: (item: DirectorReportSeries) => number;
+}) {
+  const items = sampleChartItems(data, 14);
+  const values = items.map(getValue);
+  const max = Math.max(...values, 1);
+  const width = 360;
+  const height = 210;
+  const top = 26;
+  const chartHeight = 126;
+  const step = items.length > 1 ? (width - 40) / (items.length - 1) : 0;
+  const points = items
+    .map((item, index) => {
+      const x = 20 + index * step;
+      const y = top + chartHeight - (Math.max(0, getValue(item)) / max) * chartHeight;
+      return `${x},${y}`;
+    })
+    .join(" ");
+  return (
+    <View style={styles.chartCard}>
+      <Text style={styles.sectionTitle}>{title}</Text>
+      {items.length === 0 ? (
+        <EmptyState icon="analytics-outline" text="No hay tendencia para este periodo." />
+      ) : (
+        <Svg width="100%" height={height} viewBox={`0 0 ${width} ${height}`}>
+          <Line x1={18} y1={top + chartHeight} x2={width - 14} y2={top + chartHeight} stroke="#E6EAF2" strokeWidth={1} />
+          <Polyline points={points} fill="none" stroke={C.navy} strokeWidth={4} strokeLinecap="round" strokeLinejoin="round" />
+          {items.map((item, index) => {
+            const x = 20 + index * step;
+            const y = top + chartHeight - (Math.max(0, getValue(item)) / max) * chartHeight;
+            return <Rect key={`${item.label}-${index}`} x={x - 3} y={y - 3} width={6} height={6} rx={3} fill={C.orange} />;
+          })}
+          <SvgText x={20} y={top + chartHeight + 20} fill={C.muted} fontSize="8">
+            {items[0]?.label}
+          </SvgText>
+          <SvgText x={width - 14} y={top + chartHeight + 20} fill={C.muted} fontSize="8" textAnchor="end">
+            {items[items.length - 1]?.label}
+          </SvgText>
+        </Svg>
+      )}
+    </View>
+  );
+}
+
+function sampleChartItems<T>(items: T[], limit: number): T[] {
+  if (items.length <= limit) return items;
+  return Array.from({ length: limit }, (_, index) => {
+    const sourceIndex = Math.round((index * (items.length - 1)) / (limit - 1));
+    return items[sourceIndex];
+  });
+}
+
+function ReportRankingList({
+  title,
+  rows,
+  metric,
+  metricLabel,
+  secondary,
+  limit,
+}: {
+  title: string;
+  rows: DirectorReportRankingItem[];
+  metric: (item: DirectorReportRankingItem) => string;
+  metricLabel: string;
+  secondary: (item: DirectorReportRankingItem) => string;
+  limit: number;
+}) {
+  const visibleRows = rows.slice(0, limit);
+  return (
+    <FormCard title={title}>
+      {visibleRows.length === 0 ? (
+        <EmptyState icon="list-outline" text="No hay datos para esta lista." />
+      ) : (
+        visibleRows.map((item, index) => (
+          <View key={`${item.id}-${index}`} style={styles.reportRankingRow}>
+            <View style={styles.reportRankingIndex}>
+              <Text style={styles.reportRankingIndexText}>{index + 1}</Text>
+            </View>
+            <View style={styles.flex}>
+              <Text style={styles.personName}>{item.name}</Text>
+              <Text style={styles.cardMeta}>{secondary(item)}</Text>
+            </View>
+            <View style={styles.reportRankingMetric}>
+              <Text style={styles.extra}>{metric(item)}</Text>
+              <Text style={styles.caption}>{metricLabel}</Text>
+            </View>
+          </View>
+        ))
+      )}
+    </FormCard>
+  );
+}
+
 function Statistics({ context, data }: { context: UserContext; data: AppData }) {
-  const defaultMonth = monthStartIso(todayIso());
+  if (context.role === "Director") {
+    return <DirectorReports context={context} data={data} />;
+  }
+
+  const today = todayIso();
   const fixedClientId = context.role === "Cliente" ? context.clients[0]?.id ?? 0 : 0;
-  const [month, setMonth] = useState(defaultMonth);
+  const [startDate, setStartDate] = useState(monthStartIso(today));
+  const [endDate, setEndDate] = useState(today);
   const [clientId, setClientId] = useState(fixedClientId);
   const [contractorId, setContractorId] = useState(0);
-  const [openFilter, setOpenFilter] = useState<"month" | "client" | "contractor" | null>(null);
+  const [openFilter, setOpenFilter] = useState<"startDate" | "endDate" | "client" | "contractor" | null>(null);
   const [summary, setSummary] = useState<StatisticsSummary | null>(null);
   const [contractorOptions, setContractorOptions] = useState<StatisticsSummary["contractorOptions"]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const clientOptions = context.role === "Director" ? data.clients : context.clients;
+  const clientOptions = context.clients;
   const selectedClientName =
     clientId === 0
       ? "Todas las empresas"
@@ -4676,12 +5548,14 @@ function Statistics({ context, data }: { context: UserContext; data: AppData }) 
     try {
       const [summaryResult, optionsResult] = await Promise.all([
         loadStatisticsSummary({
-          month,
+          startDate,
+          endDate,
           clientId: clientId || null,
           contractorId: contractorId || null,
         }),
         loadStatisticsSummary({
-          month,
+          startDate,
+          endDate,
           clientId: clientId || null,
           contractorId: null,
         }),
@@ -4695,7 +5569,7 @@ function Statistics({ context, data }: { context: UserContext; data: AppData }) 
     } finally {
       setLoading(false);
     }
-  }, [clientId, contractorId, month]);
+  }, [clientId, contractorId, endDate, startDate]);
 
   useEffect(() => {
     refreshStatistics();
@@ -4708,11 +5582,27 @@ function Statistics({ context, data }: { context: UserContext; data: AppData }) 
       summary.activeContractors > 0 ||
       summary.assignedOperations > 0 ||
       summary.workedShifts > 0 ||
+      summary.dischargeOperations > 0 ||
+      summary.dischargedUnits > 0 ||
       summary.extraHours > 0
     : false;
 
-  const selectMonth = (date: string) => {
-    setMonth(monthStartIso(date));
+  const selectStartDate = (date: string) => {
+    if (date > endDate) {
+      Alert.alert("Rango no válido", "La fecha inicial no puede ser posterior a la fecha final.");
+      return;
+    }
+    setStartDate(date);
+    setContractorId(0);
+    setOpenFilter(null);
+  };
+
+  const selectEndDate = (date: string) => {
+    if (date < startDate) {
+      Alert.alert("Rango no válido", "La fecha final no puede ser anterior a la fecha inicial.");
+      return;
+    }
+    setEndDate(date);
     setContractorId(0);
     setOpenFilter(null);
   };
@@ -4720,22 +5610,26 @@ function Statistics({ context, data }: { context: UserContext; data: AppData }) 
   return (
     <Page>
       <View>
-        <Text style={styles.eyebrow}>ESTADÍSTICAS</Text>
+        <Text style={styles.eyebrow}>INFORMES</Text>
         <Text style={styles.greeting}>
-          {context.role === "Director" ? "Resultados financieros" : "Resultados operativos"}
+          Resultados operativos
         </Text>
         <Text style={styles.subtitle}>
-          {context.role === "Director"
-            ? "Venta y costos de operaciones cerradas."
-            : "Operaciones, turnos, extras y contratistas visibles según tu perfil."}
+          Operaciones, turnos, extras y contratistas visibles según tu perfil.
         </Text>
       </View>
       <FormCard title="Filtros">
         <Choice
-          label="Mes"
-          value={formatMonth(month)}
+          label="Fecha inicial"
+          value={formatDate(startDate)}
           icon="calendar-outline"
-          onPress={() => setOpenFilter("month")}
+          onPress={() => setOpenFilter("startDate")}
+        />
+        <Choice
+          label="Fecha final"
+          value={formatDate(endDate)}
+          icon="calendar-outline"
+          onPress={() => setOpenFilter("endDate")}
         />
         {context.role !== "Cliente" && (
           <Choice
@@ -4762,41 +5656,37 @@ function Statistics({ context, data }: { context: UserContext; data: AppData }) 
       ) : (
         <>
           <View style={styles.statsGrid}>
-            {context.role === "Director" ? (
-              <>
-                <Stat value={formatCurrency(summary.saleTotal)} label="Venta" icon="cash-outline" />
-                <Stat value={formatCurrency(summary.costTotal)} label="Costos" icon="receipt-outline" />
-                <Stat value={String(summary.contractorsWorked)} label="Contratistas" icon="people" />
-              </>
-            ) : (
-              <>
-                <Stat value={String(summary.contractorsWorked)} label="Contratistas" icon="people" />
-                <Stat value={String(summary.assignedOperations)} label="Operaciones" icon="briefcase-outline" />
-                <Stat value={String(summary.workedShifts)} label="Turnos trabajados" icon="checkmark-circle-outline" />
-                <Stat value={`${summary.extraHours} h`} label="Horas extra" icon="time-outline" />
-                {context.role === "Coordinador" && (
-                  <Stat value={String(summary.activeContractors)} label="Contratistas activos" icon="shield-checkmark-outline" />
-                )}
-              </>
+            <Stat value={String(summary.contractorsWorked)} label="Contratistas" icon="people" />
+            <Stat value={String(summary.assignedOperations)} label="Operaciones" icon="briefcase-outline" />
+            <Stat value={String(summary.workedShifts)} label="Turnos trabajados" icon="checkmark-circle-outline" />
+            <Stat value={String(summary.dischargeOperations)} label="Descargues" icon="cube-outline" />
+            <Stat value={formatNumber(summary.dischargedUnits)} label="Unidades descargadas" icon="layers-outline" />
+            <Stat value={`${summary.extraHours} h`} label="Horas extra" icon="time-outline" />
+            {context.role === "Coordinador" && (
+              <Stat value={String(summary.activeContractors)} label="Contratistas activos" icon="shield-checkmark-outline" />
             )}
           </View>
           <Notice
             icon="bulb-outline"
-            text={
-              context.role === "Director"
-                ? `La venta y los costos corresponden a operaciones cerradas de ${formatMonth(month)}.`
-                : `Las métricas corresponden a operaciones visibles de ${formatMonth(month)}.`
-            }
+            text={`Las métricas corresponden a operaciones visibles entre ${formatDate(startDate)} y ${formatDate(endDate)}.`}
           />
         </>
       )}
       <CalendarModal
-        visible={openFilter === "month"}
-        selectedDate={month}
-        title="Seleccionar mes"
-        subtitle="Elige cualquier día del mes que quieres visualizar."
+        visible={openFilter === "startDate"}
+        selectedDate={startDate}
+        title="Seleccionar fecha inicial"
+        subtitle="Elige el primer día que quieres incluir en el informe."
         onClose={() => setOpenFilter(null)}
-        onSelect={selectMonth}
+        onSelect={selectStartDate}
+      />
+      <CalendarModal
+        visible={openFilter === "endDate"}
+        selectedDate={endDate}
+        title="Seleccionar fecha final"
+        subtitle="Elige el último día que quieres incluir en el informe."
+        onClose={() => setOpenFilter(null)}
+        onSelect={selectEndDate}
       />
       <DropdownModal
         visible={openFilter === "client"}
@@ -5235,17 +6125,100 @@ function AdminContractsModule({ adminData, contractTypes, onChanged }: { adminDa
 }
 
 function AdminCatalogsModule({ adminData, onChanged }: { adminData: AdminData; onChanged: () => void }) {
+  const [catalogTab, setCatalogTab] = useState<"CLIENTS" | "AREAS" | "SHIFTS">("CLIENTS");
+  const [clientFilterId, setClientFilterId] = useState(0);
+  const [areaFilterId, setAreaFilterId] = useState(0);
   const [client, setClient] = useState<AdminData["clients"][number] | null | "new">(null);
   const [area, setArea] = useState<AdminData["areas"][number] | null | "new">(null);
   const [shift, setShift] = useState<AdminData["shifts"][number] | null | "new">(null);
+  const filteredAreas = adminData.areas.filter((item) => !clientFilterId || item.clientId === clientFilterId);
+  const areaOptions = clientFilterId ? adminData.areas.filter((item) => item.clientId === clientFilterId) : [];
+  const filteredShifts = adminData.shifts.filter((item) =>
+    (!clientFilterId || item.clientId === clientFilterId)
+    && (!areaFilterId || item.areaId === areaFilterId),
+  );
   return (
     <>
-      <AdminCatalogList title="Clientes" rows={adminData.clients} onNew={() => setClient("new")} onEdit={setClient} subtitle={(item) => item.documentNumber ?? "Sin documento"} active={(item) => item.isActive} />
-      <AdminCatalogList title="Áreas" rows={adminData.areas} onNew={() => setArea("new")} onEdit={setArea} subtitle={(item) => item.clientName} active={(item) => item.isActive} />
-      <AdminCatalogList title="Turnos" rows={adminData.shifts} onNew={() => setShift("new")} onEdit={setShift} subtitle={(item) => `${item.clientName} ⋅ ${item.areaName}`} active={(item) => item.isActive} />
+      <View style={styles.adminRateTabs}>
+        <AdminRateTab label="Clientes" icon="business-outline" selected={catalogTab === "CLIENTS"} onPress={() => setCatalogTab("CLIENTS")} />
+        <AdminRateTab label="Áreas" icon="location-outline" selected={catalogTab === "AREAS"} onPress={() => setCatalogTab("AREAS")} />
+        <AdminRateTab label="Turnos" icon="time-outline" selected={catalogTab === "SHIFTS"} onPress={() => setCatalogTab("SHIFTS")} />
+      </View>
+
+      {catalogTab === "CLIENTS" && (
+        <AdminCatalogList
+          title="Clientes"
+          rows={adminData.clients}
+          onNew={() => setClient("new")}
+          onEdit={setClient}
+          subtitle={(item) => item.documentNumber ?? "Sin documento"}
+          active={(item) => item.isActive}
+          emptyText="No hay clientes registrados."
+        />
+      )}
+
+      {catalogTab === "AREAS" && (
+        <>
+          <FormCard title="Filtros">
+            <View style={styles.adminRateFilterGrid}>
+              <AdminSelectField
+                label="Cliente"
+                icon="business-outline"
+                value={clientFilterId}
+                options={[{ id: 0, name: "Todos los clientes" }, ...adminData.clients.map((item) => ({ id: item.id, name: item.name }))]}
+                onChange={(next) => { setClientFilterId(next); setAreaFilterId(0); }}
+              />
+            </View>
+          </FormCard>
+          <AdminCatalogList
+            title="Áreas"
+            rows={filteredAreas}
+            onNew={() => setArea("new")}
+            onEdit={setArea}
+            subtitle={(item) => item.clientName}
+            active={(item) => item.isActive}
+            emptyText="No hay áreas para este cliente."
+          />
+        </>
+      )}
+
+      {catalogTab === "SHIFTS" && (
+        <>
+          <FormCard title="Filtros">
+            <View style={styles.adminRateFilterGrid}>
+              <AdminSelectField
+                label="Cliente"
+                icon="business-outline"
+                value={clientFilterId}
+                options={[{ id: 0, name: "Todos los clientes" }, ...adminData.clients.map((item) => ({ id: item.id, name: item.name }))]}
+                onChange={(next) => { setClientFilterId(next); setAreaFilterId(0); }}
+              />
+              <AdminSelectField
+                label="Área"
+                icon="location-outline"
+                value={areaFilterId}
+                disabled={!clientFilterId}
+                disabledText="Selecciona un cliente primero"
+                options={[{ id: 0, name: "Todas las áreas" }, ...areaOptions.map((item) => ({ id: item.id, name: item.name }))]}
+                onChange={setAreaFilterId}
+              />
+            </View>
+          </FormCard>
+          <AdminCatalogList
+            title="Turnos"
+            rows={filteredShifts}
+            onNew={() => setShift("new")}
+            onEdit={setShift}
+            subtitle={(item) => `${item.clientName} ⋅ ${item.areaName}`}
+            active={(item) => item.isActive}
+            emptyText="No hay turnos para los filtros seleccionados."
+          />
+        </>
+      )}
+
       <AdminClientModal item={client === "new" ? null : client} visible={client !== null} onClose={() => setClient(null)} onSaved={async () => { setClient(null); await onChanged(); }} />
-      <AdminAreaModal item={area === "new" ? null : area} clients={adminData.clients} visible={area !== null} onClose={() => setArea(null)} onSaved={async () => { setArea(null); await onChanged(); }} />
-      <AdminShiftModal item={shift === "new" ? null : shift} areas={adminData.areas} visible={shift !== null} onClose={() => setShift(null)} onSaved={async () => { setShift(null); await onChanged(); }} />
+      <AdminAreaModal item={area === "new" ? null : area} clients={adminData.clients} initialClientId={clientFilterId} visible={area !== null} onClose={() => setArea(null)} onSaved={async () => { setArea(null); await onChanged(); }} />
+      <AdminShiftModal item={shift === "new" ? null : shift} clients={adminData.clients} areas={adminData.areas} initialClientId={clientFilterId} initialAreaId={areaFilterId} visible={shift !== null} onClose={() => setShift(null)} onSaved={async () => { setShift(null); await onChanged(); }} />
     </>
   );
 }
@@ -5255,6 +6228,7 @@ function AdminCatalogList<T extends { id: number; name: string }>({
   rows,
   subtitle,
   active,
+  emptyText = "No hay registros para mostrar.",
   onNew,
   onEdit,
 }: {
@@ -5262,6 +6236,7 @@ function AdminCatalogList<T extends { id: number; name: string }>({
   rows: T[];
   subtitle: (item: T) => string;
   active: (item: T) => boolean;
+  emptyText?: string;
   onNew: () => void;
   onEdit: (item: T) => void;
 }) {
@@ -5274,27 +6249,212 @@ function AdminCatalogList<T extends { id: number; name: string }>({
           <Text style={styles.smallActionText}>Crear</Text>
         </Pressable>
       </View>
-      {rows.map((item) => (
-        <Pressable key={item.id} style={styles.adminTableRow} onPress={() => onEdit(item)}>
-          <Text style={styles.adminCellMain}>{item.name}</Text>
-          <Text style={styles.adminCell}>{subtitle(item)}</Text>
-          <StatusPill good={active(item)} text={active(item) ? "ACTIVO" : "INACTIVO"} />
-        </Pressable>
-      ))}
+      {rows.length === 0 ? (
+        <EmptyState icon="albums-outline" text={emptyText} />
+      ) : (
+        rows.map((item) => (
+          <Pressable key={item.id} style={styles.adminTableRow} onPress={() => onEdit(item)}>
+            <Text style={styles.adminCellMain}>{item.name}</Text>
+            <Text style={styles.adminCell}>{subtitle(item)}</Text>
+            <StatusPill good={active(item)} text={active(item) ? "ACTIVO" : "INACTIVO"} />
+          </Pressable>
+        ))
+      )}
     </FormCard>
   );
 }
 
 function AdminRatesModule({ adminData, onChanged }: { adminData: AdminData; onChanged: () => void }) {
+  const [rateTab, setRateTab] = useState<"SHIFT" | "EXTRA" | "UNIT" | "UNIT_TYPES">("SHIFT");
+  const [clientId, setClientId] = useState(0);
+  const [areaId, setAreaId] = useState(0);
+  const [shiftId, setShiftId] = useState(0);
+  const [unitTypeId, setUnitTypeId] = useState(0);
+  const [rateStatus, setRateStatus] = useState<"ALL" | "ACTIVE" | "HISTORICAL">("ACTIVE");
   const [shiftRate, setShiftRate] = useState<AdminData["serviceRates"][number] | null | "new">(null);
   const [extraRate, setExtraRate] = useState<AdminData["extraHourRates"][number] | null | "new">(null);
+  const [unitRate, setUnitRate] = useState<AdminData["serviceUnitRates"][number] | null | "new">(null);
+  const [unitType, setUnitType] = useState<AdminData["serviceUnitTypes"][number] | null | "new">(null);
+
+  const areaOptions = clientId ? adminData.areas.filter((area) => area.clientId === clientId) : [];
+  const shiftOptions = areaId ? adminData.shifts.filter((shift) => shift.areaId === areaId) : [];
+  const matchesStatus = (validTo: string | null) => rateStatus === "ALL" || (rateStatus === "ACTIVE" ? !validTo : Boolean(validTo));
+  const visibleShiftRates = adminData.serviceRates.filter((rate) =>
+    (!clientId || rate.clientId === clientId)
+    && (!areaId || rate.areaId === areaId)
+    && (!shiftId || rate.shiftId === shiftId)
+    && matchesStatus(rate.validTo),
+  );
+  const visibleExtraRates = adminData.extraHourRates.filter((rate) =>
+    (!clientId || rate.clientId === clientId)
+    && (!areaId || rate.areaId === areaId)
+    && matchesStatus(rate.validTo),
+  );
+  const visibleUnitRates = adminData.serviceUnitRates.filter((rate) =>
+    (!clientId || rate.clientId === clientId)
+    && (!areaId || rate.areaId === areaId)
+    && (!unitTypeId || rate.serviceUnitTypeId === unitTypeId)
+    && matchesStatus(rate.validTo),
+  );
+  const visibleRates = rateTab === "SHIFT" ? visibleShiftRates : rateTab === "EXTRA" ? visibleExtraRates : visibleUnitRates;
+
+  const resetFilters = () => {
+    setClientId(0);
+    setAreaId(0);
+    setShiftId(0);
+    setUnitTypeId(0);
+    setRateStatus("ACTIVE");
+  };
+
   return (
     <>
-      <AdminCatalogList title="Tarifas por turno" rows={adminData.serviceRates.map((rate) => ({ ...rate, name: `${rate.clientName} / ${rate.areaName} / ${rate.shiftName}` }))} onNew={() => setShiftRate("new")} onEdit={setShiftRate as any} subtitle={(item) => `${formatCurrency(item.salePrice)} venta ⋅ ${formatCurrency(item.costPrice)} costo ⋅ desde ${item.validFrom}`} active={(item) => !item.validTo} />
-      <AdminCatalogList title="Horas extra por área" rows={adminData.extraHourRates.map((rate) => ({ ...rate, name: `${rate.clientName} / ${rate.areaName}` }))} onNew={() => setExtraRate("new")} onEdit={setExtraRate as any} subtitle={(item) => `${formatCurrency(item.salePrice)} ⋅ desde ${item.validFrom}`} active={(item) => !item.validTo} />
-      <AdminServiceRateModal item={shiftRate === "new" ? null : shiftRate} shifts={adminData.shifts} visible={shiftRate !== null} onClose={() => setShiftRate(null)} onSaved={async () => { setShiftRate(null); await onChanged(); }} />
-      <AdminExtraRateModal item={extraRate === "new" ? null : extraRate} areas={adminData.areas} visible={extraRate !== null} onClose={() => setExtraRate(null)} onSaved={async () => { setExtraRate(null); await onChanged(); }} />
+      <View style={styles.adminRateTabs}>
+        <AdminRateTab label="Tarifas por turno" icon="time-outline" selected={rateTab === "SHIFT"} onPress={() => setRateTab("SHIFT")} />
+        <AdminRateTab label="Horas extra por área" icon="timer-outline" selected={rateTab === "EXTRA"} onPress={() => { setRateTab("EXTRA"); setShiftId(0); }} />
+        <AdminRateTab label="Tarifas de descargue" icon="cube-outline" selected={rateTab === "UNIT"} onPress={() => { setRateTab("UNIT"); setShiftId(0); }} />
+        <AdminRateTab label="Tipos de unidad" icon="list-outline" selected={rateTab === "UNIT_TYPES"} onPress={() => setRateTab("UNIT_TYPES")} />
+      </View>
+
+      {rateTab !== "UNIT_TYPES" && (
+      <FormCard title="Filtros">
+        <View style={styles.adminRateFilterGrid}>
+          <AdminSelectField
+            label="Empresa"
+            icon="business-outline"
+            value={clientId}
+            options={[{ id: 0, name: "Todas las empresas" }, ...adminData.clients.map((client) => ({ id: client.id, name: client.name }))]}
+            onChange={(next) => { setClientId(next); setAreaId(0); setShiftId(0); setUnitTypeId(0); }}
+          />
+          <AdminSelectField
+            label="Área"
+            icon="location-outline"
+            value={areaId}
+            disabled={!clientId}
+            options={[{ id: 0, name: "Todas las áreas" }, ...areaOptions.map((area) => ({ id: area.id, name: area.name }))]}
+            onChange={(next) => { setAreaId(next); setShiftId(0); }}
+          />
+          {rateTab === "SHIFT" && (
+            <AdminSelectField
+              label="Turno"
+              icon="time-outline"
+              value={shiftId}
+              disabled={!areaId}
+              disabledText="Selecciona un área primero"
+              options={[{ id: 0, name: "Todos los turnos" }, ...shiftOptions.map((shift) => ({ id: shift.id, name: shift.name }))]}
+              onChange={setShiftId}
+            />
+          )}
+          {rateTab === "UNIT" && (
+            <AdminSelectField
+              label="Tipo de unidad"
+              icon="cube-outline"
+              value={unitTypeId}
+              options={[{ id: 0, name: "Todos los tipos" }, ...adminData.serviceUnitTypes.map((unit) => ({ id: unit.id, name: unit.name }))]}
+              onChange={setUnitTypeId}
+            />
+          )}
+          <AdminSelectField
+            label="Estado"
+            icon="options-outline"
+            value={rateStatus === "ALL" ? 0 : rateStatus === "ACTIVE" ? 1 : 2}
+            options={[{ id: 0, name: "Todas" }, { id: 1, name: "Vigentes" }, { id: 2, name: "Históricas" }]}
+            onChange={(next) => setRateStatus(next === 0 ? "ALL" : next === 1 ? "ACTIVE" : "HISTORICAL")}
+          />
+        </View>
+        <View style={styles.between}>
+          <Text style={styles.caption}>{visibleRates.length} resultados</Text>
+          <Pressable style={styles.smallActionButton} onPress={resetFilters}>
+            <Ionicons name="refresh-outline" size={16} color={C.navy} />
+            <Text style={styles.smallActionText}>Limpiar filtros</Text>
+          </Pressable>
+        </View>
+      </FormCard>
+      )}
+
+      {rateTab === "UNIT_TYPES" ? (
+        <AdminCatalogList
+          title="Tipos de unidad de descargue"
+          rows={adminData.serviceUnitTypes}
+          onNew={() => setUnitType("new")}
+          onEdit={setUnitType}
+          subtitle={(item) => item.description ?? item.code}
+          active={(item) => item.isActive}
+          emptyText="No hay tipos de unidad registrados."
+        />
+      ) : (
+      <FormCard title={rateTab === "SHIFT" ? "Tarifas por turno" : rateTab === "EXTRA" ? "Horas extra por área" : "Tarifas de descargue"}>
+        <View style={styles.between}>
+          <Text style={styles.caption}>{visibleRates.length} registros</Text>
+          <Pressable style={styles.smallActionButton} onPress={() => rateTab === "SHIFT" ? setShiftRate("new") : rateTab === "EXTRA" ? setExtraRate("new") : setUnitRate("new")}>
+            <Ionicons name="add-circle-outline" size={16} color={C.navy} />
+            <Text style={styles.smallActionText}>Crear tarifa</Text>
+          </Pressable>
+        </View>
+        {visibleRates.length === 0 ? (
+          <EmptyState icon="cash-outline" text="No hay tarifas para los filtros seleccionados." />
+        ) : rateTab === "SHIFT" ? (
+          visibleShiftRates.map((rate) => (
+            <AdminRateCard key={rate.id} title={rate.shiftName} context={`${rate.clientName} ⋅ ${rate.areaName}`} salePrice={rate.salePrice} costPrice={rate.costPrice} validFrom={rate.validFrom} validTo={rate.validTo} onPress={() => setShiftRate(rate)} />
+          ))
+        ) : rateTab === "EXTRA" ? (
+          visibleExtraRates.map((rate) => (
+            <AdminRateCard key={rate.id} title={rate.areaName} context={rate.clientName} salePrice={rate.salePrice} validFrom={rate.validFrom} validTo={rate.validTo} onPress={() => setExtraRate(rate)} />
+          ))
+        ) : (
+          visibleUnitRates.map((rate) => (
+            <AdminRateCard key={rate.id} title={rate.serviceUnitTypeName} context={`${rate.clientName} ⋅ ${rate.areaName}`} salePrice={rate.salePrice} costPrice={rate.costPrice} validFrom={rate.validFrom} validTo={rate.validTo} onPress={() => setUnitRate(rate)} />
+          ))
+        )}
+      </FormCard>
+      )}
+
+      <AdminServiceRateModal item={shiftRate === "new" ? null : shiftRate} clients={adminData.clients} areas={adminData.areas} shifts={adminData.shifts} initialClientId={clientId} initialAreaId={areaId} visible={shiftRate !== null} onClose={() => setShiftRate(null)} onSaved={async () => { setShiftRate(null); await onChanged(); }} />
+      <AdminExtraRateModal item={extraRate === "new" ? null : extraRate} clients={adminData.clients} areas={adminData.areas} initialClientId={clientId} initialAreaId={areaId} visible={extraRate !== null} onClose={() => setExtraRate(null)} onSaved={async () => { setExtraRate(null); await onChanged(); }} />
+      <AdminServiceUnitRateModal item={unitRate === "new" ? null : unitRate} clients={adminData.clients} areas={adminData.areas} unitTypes={adminData.serviceUnitTypes} initialClientId={clientId} initialAreaId={areaId} visible={unitRate !== null} onClose={() => setUnitRate(null)} onSaved={async () => { setUnitRate(null); await onChanged(); }} />
+      <AdminServiceUnitTypeModal item={unitType === "new" ? null : unitType} visible={unitType !== null} onClose={() => setUnitType(null)} onSaved={async () => { setUnitType(null); await onChanged(); }} />
     </>
+  );
+}
+
+function AdminRateTab({ label, icon, selected, onPress }: { label: string; icon: IconName; selected: boolean; onPress: () => void }) {
+  return (
+    <Pressable style={[styles.adminRateTab, selected && styles.adminRateTabActive]} onPress={onPress}>
+      <Ionicons name={icon} size={18} color={selected ? C.white : C.navy} />
+      <Text style={[styles.adminRateTabText, selected && styles.adminRateTabTextActive]}>{label}</Text>
+    </Pressable>
+  );
+}
+
+function AdminSelectField({ label, icon, value, options, disabled, disabledText = "Selecciona una empresa primero", onChange }: { label: string; icon: IconName; value: number; options: { id: number; name: string }[]; disabled?: boolean; disabledText?: string; onChange: (value: number) => void }) {
+  const [visible, setVisible] = useState(false);
+  const selected = options.find((option) => option.id === value);
+  return (
+    <View style={styles.adminRateFilterField}>
+      <Choice label={label} icon={icon} value={disabled ? disabledText : selected?.name ?? "Seleccionar"} disabled={disabled} onPress={() => setVisible(true)} />
+      <DropdownModal visible={visible} title={`Selecciona ${label.toLocaleLowerCase("es")}`} options={options} selectedId={value} searchable={options.length > 8} onClose={() => setVisible(false)} onSelect={(next) => { onChange(next); setVisible(false); }} />
+    </View>
+  );
+}
+
+function AdminRateCard({ title, context, salePrice, costPrice, validFrom, validTo, onPress }: { title: string; context: string; salePrice: number; costPrice?: number; validFrom: string; validTo: string | null; onPress: () => void }) {
+  const active = !validTo;
+  return (
+    <Pressable style={styles.adminRateCard} onPress={onPress}>
+      <View style={styles.adminRateIcon}>
+        <Ionicons name="cash-outline" size={20} color={C.navy} />
+      </View>
+      <View style={styles.flex}>
+        <Text style={styles.adminCellMain}>{title}</Text>
+        <Text style={styles.caption}>{context}</Text>
+        <Text style={styles.adminRateValidity}>Desde {validFrom}{validTo ? ` hasta ${validTo}` : " ⋅ Sin fecha final"}</Text>
+      </View>
+      <View style={styles.adminRateAmounts}>
+        <Text style={styles.adminRateSale}>{formatCurrency(salePrice)}</Text>
+        <Text style={styles.caption}>{costPrice === undefined ? "Hora extra" : `${formatCurrency(costPrice)} costo`}</Text>
+        <StatusPill good={active} text={active ? "VIGENTE" : "HISTÓRICA"} />
+      </View>
+      <Ionicons name="chevron-forward" size={18} color={C.muted} />
+    </Pressable>
   );
 }
 
@@ -5309,20 +6469,176 @@ function AdminCostConceptsModule({ adminData, onChanged }: { adminData: AdminDat
 }
 
 function AdminCostRulesModule({ adminData, contractTypes, onChanged }: { adminData: AdminData; contractTypes: AppData["contractTypes"]; onChanged: () => void }) {
+  const [contractTypeFilterId, setContractTypeFilterId] = useState(0);
   const [selected, setSelected] = useState<AdminData["costRules"][number] | null | "new">(null);
+  const visibleRules = adminData.costRules.filter((rule) => !contractTypeFilterId || rule.contractTypeId === contractTypeFilterId);
   return (
     <>
-      <AdminCatalogList title="Reglas de costos" rows={adminData.costRules.map((rule) => ({ ...rule, name: `${rule.contractTypeName} / ${rule.costConceptName}` }))} onNew={() => setSelected("new")} onEdit={setSelected as any} subtitle={(item) => `${item.calculationType} ${item.value} ⋅ desde ${item.validFrom}`} active={(item) => item.status === "ACTIVO"} />
-      <AdminCostRuleModal item={selected === "new" ? null : selected} contractTypes={contractTypes} concepts={adminData.costConcepts} visible={selected !== null} onClose={() => setSelected(null)} onSaved={async () => { setSelected(null); await onChanged(); }} />
+      <FormCard title="Filtros">
+        <View style={styles.adminRateFilterGrid}>
+          <AdminSelectField
+            label="Tipo de contrato"
+            icon="briefcase-outline"
+            value={contractTypeFilterId}
+            options={[{ id: 0, name: "Todos los tipos" }, ...contractTypes.map((type) => ({ id: type.id, name: type.name }))]}
+            onChange={setContractTypeFilterId}
+          />
+        </View>
+        <View style={styles.between}>
+          <Text style={styles.caption}>{visibleRules.length} resultados</Text>
+          <Pressable style={styles.smallActionButton} onPress={() => setContractTypeFilterId(0)}>
+            <Ionicons name="refresh-outline" size={16} color={C.navy} />
+            <Text style={styles.smallActionText}>Limpiar filtros</Text>
+          </Pressable>
+        </View>
+      </FormCard>
+
+      <FormCard title="Reglas de costos">
+        <View style={styles.between}>
+          <Text style={styles.caption}>{visibleRules.length} registros</Text>
+          <Pressable style={styles.smallActionButton} onPress={() => setSelected("new")}>
+            <Ionicons name="add-circle-outline" size={16} color={C.navy} />
+            <Text style={styles.smallActionText}>Crear regla</Text>
+          </Pressable>
+        </View>
+        {visibleRules.length === 0 ? (
+          <EmptyState icon="calculator-outline" text="No hay reglas de costos para los filtros seleccionados." />
+        ) : (
+          <View style={styles.adminCompactTable}>
+            <View style={[styles.adminCompactRow, styles.adminCompactHeader]}>
+              <Text style={styles.adminCompactHead}>Tipo contrato</Text>
+              <Text style={styles.adminCompactHead}>Concepto</Text>
+              <Text style={styles.adminCompactHead}>Cálculo</Text>
+              <Text style={styles.adminCompactHead}>Valor</Text>
+              <Text style={styles.adminCompactHead}>Vigencia</Text>
+              <Text style={styles.adminCompactHead}>Estado</Text>
+              <Text style={styles.adminCompactActionHead}>Editar</Text>
+            </View>
+            {visibleRules.map((rule) => (
+              <Pressable key={rule.id} style={styles.adminCompactRow} onPress={() => setSelected(rule)}>
+                <Text style={styles.adminCompactCell}>{rule.contractTypeName}</Text>
+                <Text style={styles.adminCompactCell}>{rule.costConceptName}</Text>
+                <Text style={styles.adminCompactCell}>{adminCalculationLabel(rule.calculationType)}</Text>
+                <Text style={styles.adminCompactCell}>{adminCostRuleValue(rule)}</Text>
+                <Text style={styles.adminCompactCell}>{rule.validFrom}{rule.validTo ? ` a ${rule.validTo}` : " en adelante"}</Text>
+                <View style={styles.adminCompactCell}>
+                  <StatusPill good={rule.status === "ACTIVO"} text={rule.status} />
+                </View>
+                <View style={styles.adminCompactAction}>
+                  <Ionicons name="create-outline" size={18} color={C.navy} />
+                </View>
+              </Pressable>
+            ))}
+          </View>
+        )}
+      </FormCard>
+      <AdminCostRuleModal item={selected === "new" ? null : selected} initialContractTypeId={contractTypeFilterId} contractTypes={contractTypes} concepts={adminData.costConcepts} visible={selected !== null} onClose={() => setSelected(null)} onSaved={async () => { setSelected(null); await onChanged(); }} />
     </>
   );
 }
 
+function adminCalculationLabel(type: AdminData["costRules"][number]["calculationType"]) {
+  if (type === "FIXED_AMOUNT") return "Valor fijo";
+  if (type === "PERCENTAGE_OF_SALE") return "% venta";
+  return "% costo base";
+}
+
+function adminCostRuleValue(rule: AdminData["costRules"][number]) {
+  return rule.calculationType === "FIXED_AMOUNT" ? formatCurrency(rule.value) : `${rule.value}%`;
+}
+
 function AdminWorkwearModule({ adminData, onChanged }: { adminData: AdminData; onChanged: () => void }) {
+  const [workwearTab, setWorkwearTab] = useState<"TYPES" | "HISTORY">("TYPES");
   const [selected, setSelected] = useState<AdminData["workwearTypes"][number] | null | "new">(null);
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [contractorFilterId, setContractorFilterId] = useState(0);
+  const [workwearTypeFilterId, setWorkwearTypeFilterId] = useState(0);
+  const contractorOptions = Array.from(
+    new Map(adminData.workwearMovements.map((movement) => [movement.contractorId, movement.contractorName])).entries(),
+  )
+    .map(([id, name]) => ({ id, name }))
+    .sort((a, b) => a.name.localeCompare(b.name, "es"));
+  const visibleMovements = adminData.workwearMovements.filter((movement) =>
+    (!fromDate || movement.movementDate >= fromDate)
+    && (!toDate || movement.movementDate <= toDate)
+    && (!contractorFilterId || movement.contractorId === contractorFilterId)
+    && (!workwearTypeFilterId || movement.workwearTypeId === workwearTypeFilterId),
+  );
   return (
     <>
-      <AdminCatalogList title="Tipos de dotación" rows={adminData.workwearTypes} onNew={() => setSelected("new")} onEdit={setSelected} subtitle={(item) => item.description ?? "Sin descripción"} active={(item) => item.isActive} />
+      <View style={styles.adminRateTabs}>
+        <AdminRateTab label="Tipos de dotación" icon="shirt-outline" selected={workwearTab === "TYPES"} onPress={() => setWorkwearTab("TYPES")} />
+        <AdminRateTab label="Historial de dotación" icon="list-outline" selected={workwearTab === "HISTORY"} onPress={() => setWorkwearTab("HISTORY")} />
+      </View>
+
+      {workwearTab === "TYPES" && (
+        <AdminCatalogList title="Tipos de dotación" rows={adminData.workwearTypes} onNew={() => setSelected("new")} onEdit={setSelected} subtitle={(item) => item.description ?? "Sin descripción"} active={(item) => item.isActive} />
+      )}
+
+      {workwearTab === "HISTORY" && (
+        <>
+          <FormCard title="Filtros">
+            <View style={styles.adminRateFilterGrid}>
+              <View style={styles.adminRateFilterField}>
+                <AdminField label="Desde" value={fromDate} onChangeText={setFromDate} icon="calendar-outline" />
+              </View>
+              <View style={styles.adminRateFilterField}>
+                <AdminField label="Hasta" value={toDate} onChangeText={setToDate} icon="calendar-outline" />
+              </View>
+              <AdminSelectField
+                label="Contratista"
+                icon="person-outline"
+                value={contractorFilterId}
+                options={[{ id: 0, name: "Todos los contratistas" }, ...contractorOptions]}
+                onChange={setContractorFilterId}
+              />
+              <AdminSelectField
+                label="Tipo de dotación"
+                icon="shirt-outline"
+                value={workwearTypeFilterId}
+                options={[{ id: 0, name: "Todos los tipos" }, ...adminData.workwearTypes.map((type) => ({ id: type.id, name: type.name }))]}
+                onChange={setWorkwearTypeFilterId}
+              />
+            </View>
+            <View style={styles.between}>
+              <Text style={styles.caption}>{visibleMovements.length} resultados</Text>
+              <Pressable style={styles.smallActionButton} onPress={() => { setFromDate(""); setToDate(""); setContractorFilterId(0); setWorkwearTypeFilterId(0); }}>
+                <Ionicons name="refresh-outline" size={16} color={C.navy} />
+                <Text style={styles.smallActionText}>Limpiar filtros</Text>
+              </Pressable>
+            </View>
+          </FormCard>
+
+          <FormCard title="Historial de dotación">
+            {visibleMovements.length === 0 ? (
+              <EmptyState icon="list-outline" text="No hay movimientos de dotación para los filtros seleccionados." />
+            ) : (
+              <View style={styles.adminCompactTable}>
+                <View style={[styles.adminCompactRow, styles.adminCompactHeader]}>
+                  <Text style={styles.adminCompactHead}>Fecha</Text>
+                  <Text style={styles.adminCompactHead}>Contratista</Text>
+                  <Text style={styles.adminCompactHead}>Dotación</Text>
+                  <Text style={styles.adminCompactHead}>Movimiento</Text>
+                  <Text style={styles.adminCompactHead}>Cantidad</Text>
+                  <Text style={styles.adminCompactWideHead}>Observación</Text>
+                </View>
+                {visibleMovements.map((movement) => (
+                  <View key={movement.id} style={styles.adminCompactRow}>
+                    <Text style={styles.adminCompactCell}>{movement.movementDate}</Text>
+                    <Text style={styles.adminCompactCell}>{movement.contractorName}</Text>
+                    <Text style={styles.adminCompactCell}>{movement.workwearTypeName}</Text>
+                    <Text style={styles.adminCompactCell}>{workwearMovementLabel(movement.movementType)}</Text>
+                    <Text style={styles.adminCompactCell}>{movement.quantity}</Text>
+                    <Text style={styles.adminCompactWideCell}>{movement.observations ?? "Sin observación"}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+          </FormCard>
+        </>
+      )}
+
       <AdminWorkwearModal item={selected === "new" ? null : selected} visible={selected !== null} onClose={() => setSelected(null)} onSaved={async () => { setSelected(null); await onChanged(); }} />
     </>
   );
@@ -5722,7 +7038,7 @@ function AdminClientModal({ visible, item, onClose, onSaved }: { visible: boolea
   );
 }
 
-function AdminAreaModal({ visible, item, clients, onClose, onSaved }: { visible: boolean; item: AdminData["areas"][number] | null; clients: AdminData["clients"]; onClose: () => void; onSaved: () => void }) {
+function AdminAreaModal({ visible, item, clients, initialClientId = 0, onClose, onSaved }: { visible: boolean; item: AdminData["areas"][number] | null; clients: AdminData["clients"]; initialClientId?: number; onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState("");
   const [clientId, setClientId] = useState(0);
   const [isActive, setIsActive] = useState(true);
@@ -5730,9 +7046,10 @@ function AdminAreaModal({ visible, item, clients, onClose, onSaved }: { visible:
   useEffect(() => {
     if (!visible) return;
     setName(item?.name ?? "");
-    setClientId(item?.clientId ?? clients[0]?.id ?? 0);
+    const selectedClientId = item?.clientId ?? (initialClientId && clients.some((client) => client.id === initialClientId) ? initialClientId : clients[0]?.id ?? 0);
+    setClientId(selectedClientId);
     setIsActive(item?.isActive ?? true);
-  }, [clients, item, visible]);
+  }, [clients, initialClientId, item, visible]);
   return (
     <AdminModalShell visible={visible} title={item ? "Editar área" : "Crear área"} saving={saving} onClose={onClose} onSave={async () => {
       setSaving(true);
@@ -5752,17 +7069,26 @@ function AdminAreaModal({ visible, item, clients, onClose, onSaved }: { visible:
   );
 }
 
-function AdminShiftModal({ visible, item, areas, onClose, onSaved }: { visible: boolean; item: AdminData["shifts"][number] | null; areas: AdminData["areas"]; onClose: () => void; onSaved: () => void }) {
+function AdminShiftModal({ visible, item, clients, areas, initialClientId = 0, initialAreaId = 0, onClose, onSaved }: { visible: boolean; item: AdminData["shifts"][number] | null; clients: AdminData["clients"]; areas: AdminData["areas"]; initialClientId?: number; initialAreaId?: number; onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState("");
+  const [clientId, setClientId] = useState(0);
   const [areaId, setAreaId] = useState(0);
   const [isActive, setIsActive] = useState(true);
   const [saving, setSaving] = useState(false);
   useEffect(() => {
     if (!visible) return;
     setName(item?.name ?? "");
-    setAreaId(item?.areaId ?? areas[0]?.id ?? 0);
+    const itemArea = item ? areas.find((area) => area.id === item.areaId) : null;
+    const nextClientId = itemArea?.clientId
+      ?? (initialClientId && clients.some((client) => client.id === initialClientId) ? initialClientId : clients[0]?.id ?? 0);
+    const availableAreas = areas.filter((area) => area.clientId === nextClientId);
+    const nextAreaId = item?.areaId
+      ?? (initialAreaId && availableAreas.some((area) => area.id === initialAreaId) ? initialAreaId : availableAreas[0]?.id ?? 0);
+    setClientId(nextClientId);
+    setAreaId(nextAreaId);
     setIsActive(item?.isActive ?? true);
-  }, [areas, item, visible]);
+  }, [areas, clients, initialAreaId, initialClientId, item, visible]);
+  const availableAreas = areas.filter((area) => area.clientId === clientId);
   return (
     <AdminModalShell visible={visible} title={item ? "Editar turno" : "Crear turno"} saving={saving} onClose={onClose} onSave={async () => {
       setSaving(true);
@@ -5776,13 +7102,34 @@ function AdminShiftModal({ visible, item, areas, onClose, onSaved }: { visible: 
       }
     }}>
       <AdminField label="Nombre" value={name} onChangeText={setName} icon="time-outline" />
-      <AdminOptionChips label="Área" value={areaId} options={areas.map((area) => ({ id: area.id, name: `${area.clientName} / ${area.name}` }))} onChange={setAreaId} />
+      <AdminSelectField
+        label="Empresa"
+        icon="business-outline"
+        value={clientId}
+        options={clients.map((client) => ({ id: client.id, name: client.name }))}
+        onChange={(next) => {
+          const nextAreas = areas.filter((area) => area.clientId === next);
+          setClientId(next);
+          setAreaId(nextAreas[0]?.id ?? 0);
+        }}
+      />
+      <AdminSelectField
+        label="Área"
+        icon="location-outline"
+        value={areaId}
+        disabled={!clientId}
+        disabledText="Selecciona una empresa primero"
+        options={availableAreas.map((area) => ({ id: area.id, name: area.name }))}
+        onChange={setAreaId}
+      />
       <AdminSwitch label="Estado" value={isActive} onValueChange={setIsActive} />
     </AdminModalShell>
   );
 }
 
-function AdminServiceRateModal({ visible, item, shifts, onClose, onSaved }: { visible: boolean; item: AdminData["serviceRates"][number] | null; shifts: AdminData["shifts"]; onClose: () => void; onSaved: () => void }) {
+function AdminServiceRateModal({ visible, item, clients, areas, shifts, initialClientId, initialAreaId, onClose, onSaved }: { visible: boolean; item: AdminData["serviceRates"][number] | null; clients: AdminData["clients"]; areas: AdminData["areas"]; shifts: AdminData["shifts"]; initialClientId: number; initialAreaId: number; onClose: () => void; onSaved: () => void }) {
+  const [clientId, setClientId] = useState(0);
+  const [areaId, setAreaId] = useState(0);
   const [shiftId, setShiftId] = useState(0);
   const [salePrice, setSalePrice] = useState("");
   const [costPrice, setCostPrice] = useState("");
@@ -5791,16 +7138,25 @@ function AdminServiceRateModal({ visible, item, shifts, onClose, onSaved }: { vi
   const [saving, setSaving] = useState(false);
   useEffect(() => {
     if (!visible) return;
-    setShiftId(item?.shiftId ?? shifts[0]?.id ?? 0);
+    const nextClientId = item?.clientId || initialClientId || clients[0]?.id || 0;
+    const availableAreas = areas.filter((area) => area.clientId === nextClientId);
+    const nextAreaId = item?.areaId ?? (initialAreaId && availableAreas.some((area) => area.id === initialAreaId) ? initialAreaId : availableAreas[0]?.id ?? 0);
+    const availableShifts = shifts.filter((shift) => shift.areaId === nextAreaId);
+    setClientId(nextClientId);
+    setAreaId(nextAreaId);
+    setShiftId(item?.shiftId ?? availableShifts[0]?.id ?? 0);
     setSalePrice(String(item?.salePrice ?? ""));
     setCostPrice(String(item?.costPrice ?? ""));
     setValidFrom(item?.validFrom ?? todayIso());
     setValidTo(item?.validTo ?? "");
-  }, [item, shifts, visible]);
+  }, [areas, clients, initialAreaId, initialClientId, item, shifts, visible]);
+  const availableAreas = areas.filter((area) => area.clientId === clientId);
+  const availableShifts = shifts.filter((shift) => shift.areaId === areaId);
   return (
     <AdminModalShell visible={visible} title={item ? "Editar tarifa" : "Crear tarifa"} saving={saving} onClose={onClose} onSave={async () => {
       setSaving(true);
       try {
+        if (!clientId || !areaId || !shiftId) throw new Error("Selecciona empresa, área y turno.");
         await saveAdminServiceRate({ id: item?.id, shiftId, salePrice: Number(salePrice), costPrice: Number(costPrice), validFrom, validTo: validTo || null });
         await onSaved();
       } catch (cause) {
@@ -5809,7 +7165,15 @@ function AdminServiceRateModal({ visible, item, shifts, onClose, onSaved }: { vi
         setSaving(false);
       }
     }}>
-      <AdminOptionChips label="Turno" value={shiftId} options={shifts.map((shift) => ({ id: shift.id, name: `${shift.clientName} / ${shift.areaName} / ${shift.name}` }))} onChange={setShiftId} />
+      <AdminSelectField label="Empresa" icon="business-outline" value={clientId} options={clients.map((client) => ({ id: client.id, name: client.name }))} onChange={(next) => {
+        const nextAreas = areas.filter((area) => area.clientId === next);
+        const nextArea = nextAreas[0]?.id ?? 0;
+        setClientId(next);
+        setAreaId(nextArea);
+        setShiftId(shifts.find((shift) => shift.areaId === nextArea)?.id ?? 0);
+      }} />
+      <AdminSelectField label="Área" icon="location-outline" value={areaId} disabled={!clientId} options={availableAreas.map((area) => ({ id: area.id, name: area.name }))} onChange={(next) => { setAreaId(next); setShiftId(shifts.find((shift) => shift.areaId === next)?.id ?? 0); }} />
+      <AdminSelectField label="Turno" icon="time-outline" value={shiftId} disabled={!areaId} disabledText="Selecciona un área primero" options={availableShifts.map((shift) => ({ id: shift.id, name: shift.name }))} onChange={setShiftId} />
       <AdminField label="Precio venta" value={salePrice} onChangeText={setSalePrice} icon="cash-outline" keyboardType="numeric" />
       <AdminField label="Costo" value={costPrice} onChangeText={setCostPrice} icon="receipt-outline" keyboardType="numeric" />
       <AdminField label="Válido desde" value={validFrom} onChangeText={setValidFrom} icon="calendar-outline" />
@@ -5818,7 +7182,8 @@ function AdminServiceRateModal({ visible, item, shifts, onClose, onSaved }: { vi
   );
 }
 
-function AdminExtraRateModal({ visible, item, areas, onClose, onSaved }: { visible: boolean; item: AdminData["extraHourRates"][number] | null; areas: AdminData["areas"]; onClose: () => void; onSaved: () => void }) {
+function AdminExtraRateModal({ visible, item, clients, areas, initialClientId, initialAreaId, onClose, onSaved }: { visible: boolean; item: AdminData["extraHourRates"][number] | null; clients: AdminData["clients"]; areas: AdminData["areas"]; initialClientId: number; initialAreaId: number; onClose: () => void; onSaved: () => void }) {
+  const [clientId, setClientId] = useState(0);
   const [areaId, setAreaId] = useState(0);
   const [salePrice, setSalePrice] = useState("");
   const [validFrom, setValidFrom] = useState(todayIso());
@@ -5826,15 +7191,20 @@ function AdminExtraRateModal({ visible, item, areas, onClose, onSaved }: { visib
   const [saving, setSaving] = useState(false);
   useEffect(() => {
     if (!visible) return;
-    setAreaId(item?.areaId ?? areas[0]?.id ?? 0);
+    const nextClientId = item?.clientId || initialClientId || clients[0]?.id || 0;
+    const availableAreas = areas.filter((area) => area.clientId === nextClientId);
+    setClientId(nextClientId);
+    setAreaId(item?.areaId ?? (initialAreaId && availableAreas.some((area) => area.id === initialAreaId) ? initialAreaId : availableAreas[0]?.id ?? 0));
     setSalePrice(String(item?.salePrice ?? ""));
     setValidFrom(item?.validFrom ?? todayIso());
     setValidTo(item?.validTo ?? "");
-  }, [areas, item, visible]);
+  }, [areas, clients, initialAreaId, initialClientId, item, visible]);
+  const availableAreas = areas.filter((area) => area.clientId === clientId);
   return (
     <AdminModalShell visible={visible} title={item ? "Editar hora extra" : "Crear hora extra"} saving={saving} onClose={onClose} onSave={async () => {
       setSaving(true);
       try {
+        if (!clientId || !areaId) throw new Error("Selecciona empresa y área.");
         await saveAdminExtraHourRate({ id: item?.id, areaId, salePrice: Number(salePrice), validFrom, validTo: validTo || null });
         await onSaved();
       } catch (cause) {
@@ -5843,10 +7213,91 @@ function AdminExtraRateModal({ visible, item, areas, onClose, onSaved }: { visib
         setSaving(false);
       }
     }}>
-      <AdminOptionChips label="Área" value={areaId} options={areas.map((area) => ({ id: area.id, name: `${area.clientName} / ${area.name}` }))} onChange={setAreaId} />
+      <AdminSelectField label="Empresa" icon="business-outline" value={clientId} options={clients.map((client) => ({ id: client.id, name: client.name }))} onChange={(next) => { setClientId(next); setAreaId(areas.find((area) => area.clientId === next)?.id ?? 0); }} />
+      <AdminSelectField label="Área" icon="location-outline" value={areaId} disabled={!clientId} options={availableAreas.map((area) => ({ id: area.id, name: area.name }))} onChange={setAreaId} />
       <AdminField label="Precio venta hora extra" value={salePrice} onChangeText={setSalePrice} icon="cash-outline" keyboardType="numeric" />
       <AdminField label="Válido desde" value={validFrom} onChangeText={setValidFrom} icon="calendar-outline" />
       <AdminField label="Válido hasta" value={validTo} onChangeText={setValidTo} icon="calendar-outline" />
+    </AdminModalShell>
+  );
+}
+
+function AdminServiceUnitRateModal({ visible, item, clients, areas, unitTypes, initialClientId, initialAreaId, onClose, onSaved }: { visible: boolean; item: AdminData["serviceUnitRates"][number] | null; clients: AdminData["clients"]; areas: AdminData["areas"]; unitTypes: AdminData["serviceUnitTypes"]; initialClientId: number; initialAreaId: number; onClose: () => void; onSaved: () => void }) {
+  const [clientId, setClientId] = useState(0);
+  const [areaId, setAreaId] = useState(0);
+  const [serviceUnitTypeId, setServiceUnitTypeId] = useState(0);
+  const [salePrice, setSalePrice] = useState("");
+  const [costPrice, setCostPrice] = useState("");
+  const [validFrom, setValidFrom] = useState(todayIso());
+  const [validTo, setValidTo] = useState("");
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (!visible) return;
+    const nextClientId = item?.clientId || initialClientId || clients[0]?.id || 0;
+    const availableAreas = areas.filter((area) => area.clientId === nextClientId);
+    setClientId(nextClientId);
+    setAreaId(item?.areaId ?? (initialAreaId && availableAreas.some((area) => area.id === initialAreaId) ? initialAreaId : availableAreas[0]?.id ?? 0));
+    setServiceUnitTypeId(item?.serviceUnitTypeId ?? unitTypes[0]?.id ?? 0);
+    setSalePrice(String(item?.salePrice ?? ""));
+    setCostPrice(String(item?.costPrice ?? ""));
+    setValidFrom(item?.validFrom ?? todayIso());
+    setValidTo(item?.validTo ?? "");
+  }, [areas, clients, initialAreaId, initialClientId, item, unitTypes, visible]);
+  const availableAreas = areas.filter((area) => area.clientId === clientId);
+  return (
+    <AdminModalShell visible={visible} title={item ? "Editar tarifa de descargue" : "Crear tarifa de descargue"} saving={saving} onClose={onClose} onSave={async () => {
+      setSaving(true);
+      try {
+        if (!clientId || !areaId || !serviceUnitTypeId) throw new Error("Selecciona empresa, área y tipo de unidad.");
+        await saveAdminServiceUnitRate({ id: item?.id, areaId, serviceUnitTypeId, salePrice: Number(salePrice), costPrice: Number(costPrice), validFrom, validTo: validTo || null });
+        await onSaved();
+      } catch (cause) {
+        Alert.alert("No fue posible guardar", errorMessage(cause));
+      } finally {
+        setSaving(false);
+      }
+    }}>
+      <AdminSelectField label="Empresa" icon="business-outline" value={clientId} options={clients.map((client) => ({ id: client.id, name: client.name }))} onChange={(next) => { setClientId(next); setAreaId(areas.find((area) => area.clientId === next)?.id ?? 0); }} />
+      <AdminSelectField label="Área" icon="location-outline" value={areaId} disabled={!clientId} options={availableAreas.map((area) => ({ id: area.id, name: area.name }))} onChange={setAreaId} />
+      <AdminSelectField label="Tipo de unidad" icon="cube-outline" value={serviceUnitTypeId} options={unitTypes.map((unit) => ({ id: unit.id, name: unit.name }))} onChange={setServiceUnitTypeId} />
+      <AdminField label="Precio de venta por unidad" value={salePrice} onChangeText={setSalePrice} icon="cash-outline" keyboardType="numeric" />
+      <AdminField label="Costo por unidad" value={costPrice} onChangeText={setCostPrice} icon="receipt-outline" keyboardType="numeric" />
+      <AdminField label="Válido desde" value={validFrom} onChangeText={setValidFrom} icon="calendar-outline" />
+      <AdminField label="Válido hasta" value={validTo} onChangeText={setValidTo} icon="calendar-outline" />
+    </AdminModalShell>
+  );
+}
+
+function AdminServiceUnitTypeModal({ visible, item, onClose, onSaved }: { visible: boolean; item: AdminData["serviceUnitTypes"][number] | null; onClose: () => void; onSaved: () => void }) {
+  const [code, setCode] = useState("");
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [isActive, setIsActive] = useState(true);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (!visible) return;
+    setCode(item?.code ?? "");
+    setName(item?.name ?? "");
+    setDescription(item?.description ?? "");
+    setIsActive(item?.isActive ?? true);
+  }, [item, visible]);
+  return (
+    <AdminModalShell visible={visible} title={item ? "Editar tipo de unidad" : "Crear tipo de unidad"} saving={saving} onClose={onClose} onSave={async () => {
+      setSaving(true);
+      try {
+        if (!code.trim() || !name.trim()) throw new Error("Código y nombre son obligatorios.");
+        await saveAdminServiceUnitType({ id: item?.id, code, name, description, isActive });
+        await onSaved();
+      } catch (cause) {
+        Alert.alert("No fue posible guardar", errorMessage(cause));
+      } finally {
+        setSaving(false);
+      }
+    }}>
+      <AdminField label="Código" value={code} onChangeText={setCode} icon="code-outline" />
+      <AdminField label="Nombre" value={name} onChangeText={setName} icon="cube-outline" />
+      <AdminField label="Descripción" value={description} onChangeText={setDescription} icon="document-text-outline" />
+      <AdminSwitch label="Estado" value={isActive} onValueChange={setIsActive} />
     </AdminModalShell>
   );
 }
@@ -5887,7 +7338,7 @@ function AdminCostConceptModal({ visible, item, onClose, onSaved }: { visible: b
   );
 }
 
-function AdminCostRuleModal({ visible, item, contractTypes, concepts, onClose, onSaved }: { visible: boolean; item: AdminData["costRules"][number] | null; contractTypes: AppData["contractTypes"]; concepts: AdminData["costConcepts"]; onClose: () => void; onSaved: () => void }) {
+function AdminCostRuleModal({ visible, item, initialContractTypeId = 0, contractTypes, concepts, onClose, onSaved }: { visible: boolean; item: AdminData["costRules"][number] | null; initialContractTypeId?: number; contractTypes: AppData["contractTypes"]; concepts: AdminData["costConcepts"]; onClose: () => void; onSaved: () => void }) {
   const [contractTypeId, setContractTypeId] = useState(0);
   const [costConceptId, setCostConceptId] = useState(0);
   const [calculationType, setCalculationType] = useState("FIXED_AMOUNT");
@@ -5898,14 +7349,15 @@ function AdminCostRuleModal({ visible, item, contractTypes, concepts, onClose, o
   const [saving, setSaving] = useState(false);
   useEffect(() => {
     if (!visible) return;
-    setContractTypeId(item?.contractTypeId ?? contractTypes[0]?.id ?? 0);
+    const nextContractTypeId = item?.contractTypeId ?? (initialContractTypeId && contractTypes.some((type) => type.id === initialContractTypeId) ? initialContractTypeId : contractTypes[0]?.id ?? 0);
+    setContractTypeId(nextContractTypeId);
     setCostConceptId(item?.costConceptId ?? concepts[0]?.id ?? 0);
     setCalculationType(item?.calculationType ?? "FIXED_AMOUNT");
     setValue(String(item?.value ?? ""));
     setValidFrom(item?.validFrom ?? todayIso());
     setValidTo(item?.validTo ?? "");
     setStatus(item?.status ?? "ACTIVO");
-  }, [concepts, contractTypes, item, visible]);
+  }, [concepts, contractTypes, initialContractTypeId, item, visible]);
   return (
     <AdminModalShell visible={visible} title={item ? "Editar regla" : "Crear regla"} saving={saving} onClose={onClose} onSave={async () => {
       setSaving(true);
@@ -6567,9 +8019,30 @@ const styles = StyleSheet.create({
   adminMain: { flex: 1 },
   adminTopbar: { minHeight: 84, paddingHorizontal: 24, paddingVertical: 14, backgroundColor: C.bg, borderBottomWidth: 1, borderBottomColor: C.line, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },
   adminContent: { padding: 24, gap: 14, paddingBottom: 48 },
+  adminRateTabs: { flexDirection: "row", gap: 10, padding: 5, borderRadius: 17, backgroundColor: C.white, borderWidth: 1, borderColor: C.line },
+  adminRateTab: { flex: 1, minHeight: 44, borderRadius: 13, paddingHorizontal: 14, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
+  adminRateTabActive: { backgroundColor: C.navy },
+  adminRateTabText: { color: C.navy, fontSize: 11, fontWeight: "800" },
+  adminRateTabTextActive: { color: C.white },
+  adminRateFilterGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  adminRateFilterField: { flex: 1, minWidth: 210 },
+  adminRateCard: { minHeight: 82, padding: 14, borderRadius: 16, backgroundColor: "#FBFCFE", borderWidth: 1, borderColor: C.line, flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 8 },
+  adminRateIcon: { width: 42, height: 42, borderRadius: 13, backgroundColor: C.blueBg, alignItems: "center", justifyContent: "center" },
+  adminRateValidity: { color: C.muted, fontSize: 9, fontWeight: "600", marginTop: 4 },
+  adminRateAmounts: { minWidth: 138, alignItems: "flex-end", gap: 4 },
+  adminRateSale: { color: C.navy, fontSize: 14, fontWeight: "900" },
   adminTableRow: { minHeight: 58, paddingHorizontal: 14, paddingVertical: 11, borderRadius: 15, backgroundColor: C.white, borderWidth: 1, borderColor: C.line, flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 8 },
   adminCellMain: { flex: 1.3, color: C.ink, fontSize: 13, fontWeight: "900" },
   adminCell: { flex: 1, color: C.muted, fontSize: 11, fontWeight: "700" },
+  adminCompactTable: { borderWidth: 1, borderColor: C.line, borderRadius: 14, overflow: "hidden", backgroundColor: C.white },
+  adminCompactRow: { minHeight: 48, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 10, paddingVertical: 9, borderBottomWidth: 1, borderBottomColor: C.line },
+  adminCompactHeader: { minHeight: 42, backgroundColor: C.bg },
+  adminCompactHead: { flex: 1, color: C.ink, fontSize: 9, fontWeight: "900", textTransform: "uppercase" },
+  adminCompactWideHead: { flex: 1.4, color: C.ink, fontSize: 9, fontWeight: "900", textTransform: "uppercase" },
+  adminCompactActionHead: { width: 44, color: C.ink, fontSize: 9, fontWeight: "900", textTransform: "uppercase", textAlign: "center" },
+  adminCompactCell: { flex: 1, color: C.muted, fontSize: 10, fontWeight: "700" },
+  adminCompactWideCell: { flex: 1.4, color: C.muted, fontSize: 10, fontWeight: "700" },
+  adminCompactAction: { width: 44, alignItems: "center", justifyContent: "center" },
   adminModalCard: { width: "100%", maxWidth: 620, maxHeight: "88%", borderRadius: 22, padding: 18, backgroundColor: C.white, gap: 14 },
   adminModalContent: { gap: 12, paddingBottom: 4 },
   adminActions: { gap: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: C.line },
@@ -6585,6 +8058,14 @@ const styles = StyleSheet.create({
   statCard: { width: "48.4%", backgroundColor: C.white, borderRadius: 17, padding: 14, borderWidth: 1, borderColor: C.line },
   statIcon: { width: 34, height: 34, borderRadius: 11, backgroundColor: C.blueBg, alignItems: "center", justifyContent: "center", marginBottom: 10 },
   statValue: { color: C.ink, fontSize: 21, fontWeight: "900" },
+  reportFilterGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  reportFilterField: { flex: 1, minWidth: 210 },
+  reportGrid: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
+  reportGridItem: { flex: 1, minWidth: 290 },
+  reportRankingRow: { minHeight: 62, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: "#F0F2F6", flexDirection: "row", alignItems: "center", gap: 11 },
+  reportRankingIndex: { width: 32, height: 32, borderRadius: 11, backgroundColor: C.blueBg, alignItems: "center", justifyContent: "center" },
+  reportRankingIndexText: { color: C.navy, fontSize: 12, fontWeight: "900" },
+  reportRankingMetric: { minWidth: 96, alignItems: "flex-end" },
   chartCard: { backgroundColor: C.white, borderRadius: 19, padding: 16, borderWidth: 1, borderColor: C.line, gap: 8 },
   barChart: { minHeight: 150, flexDirection: "row", alignItems: "flex-end", justifyContent: "space-around", marginTop: 12 },
   barGroup: { alignItems: "center", gap: 5 },
