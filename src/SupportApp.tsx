@@ -6398,7 +6398,7 @@ function AdminRatesModule({ adminData, onChanged }: { adminData: AdminData; onCh
           ))
         ) : rateTab === "EXTRA" ? (
           visibleExtraRates.map((rate) => (
-            <AdminRateCard key={rate.id} title={rate.areaName} context={rate.clientName} salePrice={rate.salePrice} validFrom={rate.validFrom} validTo={rate.validTo} onPress={() => setExtraRate(rate)} />
+            <AdminRateCard key={rate.id} title={rate.areaName} context={rate.clientName} salePrice={rate.salePrice} costPrice={rate.costPrice} validFrom={rate.validFrom} validTo={rate.validTo} onPress={() => setExtraRate(rate)} />
           ))
         ) : (
           visibleUnitRates.map((rate) => (
@@ -6436,7 +6436,7 @@ function AdminSelectField({ label, icon, value, options, disabled, disabledText 
   );
 }
 
-function AdminRateCard({ title, context, salePrice, costPrice, validFrom, validTo, onPress }: { title: string; context: string; salePrice: number; costPrice?: number; validFrom: string; validTo: string | null; onPress: () => void }) {
+function AdminRateCard({ title, context, salePrice, costPrice, validFrom, validTo, onPress }: { title: string; context: string; salePrice: number; costPrice?: number | null; validFrom: string; validTo: string | null; onPress: () => void }) {
   const active = !validTo;
   return (
     <Pressable style={styles.adminRateCard} onPress={onPress}>
@@ -6450,7 +6450,9 @@ function AdminRateCard({ title, context, salePrice, costPrice, validFrom, validT
       </View>
       <View style={styles.adminRateAmounts}>
         <Text style={styles.adminRateSale}>{formatCurrency(salePrice)}</Text>
-        <Text style={styles.caption}>{costPrice === undefined ? "Hora extra" : `${formatCurrency(costPrice)} costo`}</Text>
+        <Text style={styles.caption}>
+          {costPrice === null ? "Costo sin configurar" : costPrice === undefined ? "Hora extra" : `${formatCurrency(costPrice)} costo`}
+        </Text>
         <StatusPill good={active} text={active ? "VIGENTE" : "HISTÓRICA"} />
       </View>
       <Ionicons name="chevron-forward" size={18} color={C.muted} />
@@ -7186,6 +7188,7 @@ function AdminExtraRateModal({ visible, item, clients, areas, initialClientId, i
   const [clientId, setClientId] = useState(0);
   const [areaId, setAreaId] = useState(0);
   const [salePrice, setSalePrice] = useState("");
+  const [costPrice, setCostPrice] = useState("");
   const [validFrom, setValidFrom] = useState(todayIso());
   const [validTo, setValidTo] = useState("");
   const [saving, setSaving] = useState(false);
@@ -7196,6 +7199,7 @@ function AdminExtraRateModal({ visible, item, clients, areas, initialClientId, i
     setClientId(nextClientId);
     setAreaId(item?.areaId ?? (initialAreaId && availableAreas.some((area) => area.id === initialAreaId) ? initialAreaId : availableAreas[0]?.id ?? 0));
     setSalePrice(String(item?.salePrice ?? ""));
+    setCostPrice(item?.costPrice === null || item?.costPrice === undefined ? "" : String(item.costPrice));
     setValidFrom(item?.validFrom ?? todayIso());
     setValidTo(item?.validTo ?? "");
   }, [areas, clients, initialAreaId, initialClientId, item, visible]);
@@ -7205,7 +7209,15 @@ function AdminExtraRateModal({ visible, item, clients, areas, initialClientId, i
       setSaving(true);
       try {
         if (!clientId || !areaId) throw new Error("Selecciona empresa y área.");
-        await saveAdminExtraHourRate({ id: item?.id, areaId, salePrice: Number(salePrice), validFrom, validTo: validTo || null });
+        const parsedSalePrice = Number(salePrice);
+        const parsedCostPrice = Number(costPrice);
+        if (salePrice.trim() === "" || !Number.isFinite(parsedSalePrice) || parsedSalePrice < 0) {
+          throw new Error("Ingresa un precio de venta válido.");
+        }
+        if (costPrice.trim() === "" || !Number.isFinite(parsedCostPrice) || parsedCostPrice < 0) {
+          throw new Error("Ingresa un precio de costo válido.");
+        }
+        await saveAdminExtraHourRate({ id: item?.id, areaId, salePrice: parsedSalePrice, costPrice: parsedCostPrice, validFrom, validTo: validTo || null });
         await onSaved();
       } catch (cause) {
         Alert.alert("No fue posible guardar", errorMessage(cause));
@@ -7216,6 +7228,7 @@ function AdminExtraRateModal({ visible, item, clients, areas, initialClientId, i
       <AdminSelectField label="Empresa" icon="business-outline" value={clientId} options={clients.map((client) => ({ id: client.id, name: client.name }))} onChange={(next) => { setClientId(next); setAreaId(areas.find((area) => area.clientId === next)?.id ?? 0); }} />
       <AdminSelectField label="Área" icon="location-outline" value={areaId} disabled={!clientId} options={availableAreas.map((area) => ({ id: area.id, name: area.name }))} onChange={setAreaId} />
       <AdminField label="Precio venta hora extra" value={salePrice} onChangeText={setSalePrice} icon="cash-outline" keyboardType="numeric" />
+      <AdminField label="Costo hora extra" value={costPrice} onChangeText={setCostPrice} icon="receipt-outline" keyboardType="numeric" />
       <AdminField label="Válido desde" value={validFrom} onChangeText={setValidFrom} icon="calendar-outline" />
       <AdminField label="Válido hasta" value={validTo} onChangeText={setValidTo} icon="calendar-outline" />
     </AdminModalShell>

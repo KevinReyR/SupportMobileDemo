@@ -230,6 +230,7 @@ export interface AdminExtraHourRate {
   areaName: string;
   clientName: string;
   salePrice: number;
+  costPrice: number | null;
   validFrom: string;
   validTo: string | null;
 }

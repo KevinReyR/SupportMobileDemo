@@ -1309,7 +1309,7 @@ export async function loadAdminData(): Promise<AdminData> {
       .order("valid_from", { ascending: false }),
     supabase
       .from("area_extra_hour_rates")
-      .select("id,area_id,sale_price,valid_from,valid_to,area(name,client_id,clients(name))")
+      .select("id,area_id,sale_price,cost_price,valid_from,valid_to,area(name,client_id,clients(name))")
       .order("valid_from", { ascending: false }),
     supabase.from("service_unit_type").select("id,code,name,description,is_active").order("name"),
     supabase
@@ -1400,6 +1400,7 @@ export async function loadAdminData(): Promise<AdminData> {
         areaName: cleanText(area?.name),
         clientName: cleanText(firstRelation<any>(area?.clients)?.name),
         salePrice: Number(row.sale_price ?? 0),
+        costPrice: row.cost_price === null ? null : Number(row.cost_price),
         validFrom: row.valid_from,
         validTo: row.valid_to,
       };
@@ -1561,12 +1562,14 @@ export async function saveAdminExtraHourRate(input: {
   id?: number;
   areaId: number;
   salePrice: number;
+  costPrice: number;
   validFrom: string;
   validTo: string | null;
 }) {
   const payload = {
     area_id: input.areaId,
     sale_price: input.salePrice,
+    cost_price: input.costPrice,
     valid_from: input.validFrom,
     valid_to: input.validTo || null,
   };
