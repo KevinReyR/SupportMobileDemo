@@ -137,6 +137,25 @@ type Screen =
   | "users";
 type IconName = React.ComponentProps<typeof Ionicons>["name"];
 
+function showMessage(title: string, message: string) {
+  if (Platform.OS === "web" && typeof window !== "undefined") {
+    window.alert(`${title}\n\n${message}`);
+    return;
+  }
+  Alert.alert(title, message);
+}
+
+function confirmAction(title: string, message: string, confirmLabel: string, onConfirm: () => void) {
+  if (Platform.OS === "web" && typeof window !== "undefined") {
+    if (window.confirm(`${title}\n\n${message}`)) onConfirm();
+    return;
+  }
+  Alert.alert(title, message, [
+    { text: "Cancelar", style: "cancel" },
+    { text: confirmLabel, onPress: onConfirm },
+  ]);
+}
+
 const C = {
   navy: "#15285A",
   navy2: "#203A78",
@@ -2080,13 +2099,13 @@ function OperationDetail({
   useEffect(() => {
     loadOperationAssignments(operation.id)
       .then(setAssignments)
-      .catch((cause) => Alert.alert("No fue posible cargar", errorMessage(cause)))
+      .catch((cause) => showMessage("No fue posible cargar", errorMessage(cause)))
       .finally(() => setLoading(false));
   }, [operation.id]);
 
   const decide = async (decision: "CERRADO" | "CAMBIOS_SOLICITADOS") => {
     if (decision === "CAMBIOS_SOLICITADOS" && !reviewText.trim()) {
-      Alert.alert("Observación requerida", "Describe el cambio que debe realizar el coordinador.");
+      showMessage("Observación requerida", "Describe el cambio que debe realizar el coordinador.");
       return;
     }
     setSaving(true);
@@ -2099,7 +2118,7 @@ function OperationDetail({
       setReviewing(false);
       await onChanged();
     } catch (cause) {
-      Alert.alert("No fue posible guardar", errorMessage(cause));
+      showMessage("No fue posible guardar", errorMessage(cause));
     } finally {
       setSaving(false);
     }
@@ -2173,10 +2192,12 @@ function OperationDetail({
             icon="checkmark"
             disabled={saving}
             onPress={() =>
-              Alert.alert("Aprobar operación", "¿Confirmas que la información es correcta?", [
-                { text: "Cancelar", style: "cancel" },
-                { text: "Aprobar", onPress: () => decide("CERRADO") },
-              ])
+              confirmAction(
+                "Aprobar operación",
+                "¿Confirmas que la información es correcta?",
+                "Aprobar",
+                () => void decide("CERRADO"),
+              )
             }
           />
         </View>
@@ -2536,46 +2557,41 @@ function FinalOperation({
       const total = Number(actualUnits);
       const assignedCents = Math.round(assignments.reduce((sum, item) => sum + item.dischargedUnits, 0) * 100);
       if (!/^\d+(\.\d{1,2})?$/.test(actualUnits) || total < 0) {
-        Alert.alert("Unidades inválidas", "Ingresa un valor positivo con máximo dos decimales.");
+        showMessage("Unidades inválidas", "Ingresa un valor positivo con máximo dos decimales.");
         return;
       }
       if (total === 0 && !observations.trim()) {
-        Alert.alert("Observación requerida", "Explica por qué el descargue terminó con cero unidades.");
+        showMessage("Observación requerida", "Explica por qué el descargue terminó con cero unidades.");
         return;
       }
       if (total > 0 && !assignments.some((item) => item.attendanceStatus !== "AUSENTE")) {
-        Alert.alert("Asistencia requerida", "Debe existir al menos un contratista asistente.");
+        showMessage("Asistencia requerida", "Debe existir al menos un contratista asistente.");
         return;
       }
       if (Math.round(total * 100) !== assignedCents) {
-        Alert.alert("Distribución incompleta", "La suma de unidades por contratista debe coincidir con el total descargado.");
+        showMessage("Distribución incompleta", "La suma de unidades por contratista debe coincidir con el total descargado.");
         return;
       }
     }
-    Alert.alert(
+    confirmAction(
       "Enviar para aprobación",
       "La operación quedará PENDIENTE hasta la revisión del Director/Gerente.",
-      [
-        { text: "Cancelar", style: "cancel" },
-        {
-          text: "Enviar",
-          onPress: async () => {
-            setSaving(true);
-            try {
-              if (isDischarge) {
-                await finalizeDischargeOperation(operation.id, Number(actualUnits), assignments, observations);
-              } else {
-                await finalizeOperation(operation.id, assignments, observations);
-              }
-              await onSaved();
-            } catch (cause) {
-              Alert.alert("No fue posible enviar", errorMessage(cause));
-            } finally {
-              setSaving(false);
-            }
-          },
-        },
-      ],
+      "Enviar",
+      () => void (async () => {
+        setSaving(true);
+        try {
+          if (isDischarge) {
+            await finalizeDischargeOperation(operation.id, Number(actualUnits), assignments, observations);
+          } else {
+            await finalizeOperation(operation.id, assignments, observations);
+          }
+          await onSaved();
+        } catch (cause) {
+          showMessage("No fue posible enviar", errorMessage(cause));
+        } finally {
+          setSaving(false);
+        }
+      })(),
     );
   };
 
