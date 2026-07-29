@@ -2242,6 +2242,8 @@ function InitialOperation({
 }) {
   const firstClient = context.clients[0];
   const activeContractors = data.contractors.filter((contractor) => contractor.active);
+  const [operationDate, setOperationDate] = useState(todayIso());
+  const [calendarVisible, setCalendarVisible] = useState(false);
   const [operationType, setOperationType] = useState<"TURNO" | "DESCARGUE">("TURNO");
   const [clientId, setClientId] = useState(firstClient?.id ?? 0);
   const availableAreas = data.areas.filter((area) => area.clientId === clientId);
@@ -2268,13 +2270,17 @@ function InitialOperation({
 
   useEffect(() => {
     if (operationType !== "DESCARGUE" || !areaId) return;
-    loadAvailableServiceUnits(areaId, todayIso())
+    loadAvailableServiceUnits(areaId, operationDate)
       .then((rows) => {
         setServiceUnitTypes(rows);
         setServiceUnitTypeId((current) => rows.some((item) => item.id === current) ? current : rows[0]?.id ?? 0);
       })
-      .catch((cause) => Alert.alert("No fue posible cargar las unidades", errorMessage(cause)));
-  }, [areaId, operationType]);
+      .catch((cause) => {
+        setServiceUnitTypes([]);
+        setServiceUnitTypeId(0);
+        Alert.alert("No fue posible cargar las unidades", errorMessage(cause));
+      });
+  }, [areaId, operationDate, operationType]);
 
   useEffect(() => {
     if (!activeContractors.some((contractor) => contractor.id === contractorId)) {
@@ -2302,12 +2308,12 @@ function InitialOperation({
     try {
       if (operationType === "DESCARGUE") {
         await createDischargeOperation({
-          date: todayIso(), clientId, areaId, serviceUnitTypeId,
+          date: operationDate, clientId, areaId, serviceUnitTypeId,
           plannedUnits: unitCount, contractorIds: added.map((item) => item.id),
         });
       } else {
         await createOperation({
-          date: todayIso(), clientId, areaId, shiftId,
+          date: operationDate, clientId, areaId, shiftId,
           contractorIds: added.map((item) => item.id),
         });
       }
@@ -2323,7 +2329,12 @@ function InitialOperation({
   return (
     <Page>
       <FormCard title="Información de la operación">
-        <Choice label="Fecha" value={formatDate(todayIso())} icon="calendar-outline" disabled />
+        <Choice
+          label="Fecha"
+          value={formatDate(operationDate)}
+          icon="calendar-outline"
+          onPress={() => setCalendarVisible(true)}
+        />
         <Choice
           label="Tipo de operación *"
           value={operationType === "TURNO" ? "Turno" : "Descargue"}
@@ -2410,6 +2421,17 @@ function InitialOperation({
         </ScrollView>
       </View>
       <PrimaryButton label={saving ? "Guardando..." : "Guardar registro inicial"} icon="save-outline" disabled={saving} onPress={save} />
+      <CalendarModal
+        visible={calendarVisible}
+        selectedDate={operationDate}
+        title="Fecha de la operación"
+        subtitle="Selecciona la fecha en la que se realizará la operación."
+        onClose={() => setCalendarVisible(false)}
+        onSelect={(date) => {
+          setOperationDate(date);
+          setCalendarVisible(false);
+        }}
+      />
       <DropdownModal
         visible={openSelector === "operationType"}
         title="Tipo de operación"
