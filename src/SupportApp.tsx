@@ -470,13 +470,16 @@ export default function SupportApp() {
   const [selectedHistory, setSelectedHistory] = useState<ContractorHistory | null>(null);
   const mountedRef = useRef(true);
   const hydrationIdRef = useRef(0);
+  const hydratedUserIdRef = useRef<string | null>(null);
 
   const hydrate = useCallback(async (nextSession: Session | null) => {
     const hydrationId = ++hydrationIdRef.current;
+    hydratedUserIdRef.current = nextSession?.user.id ?? null;
     setSession(nextSession);
     if (!nextSession) {
       setContext(null);
       setData(EMPTY_DATA);
+      setLoading(false);
       setBooting(false);
       return;
     }
@@ -503,6 +506,7 @@ export default function SupportApp() {
       if (!mountedRef.current || hydrationId !== hydrationIdRef.current) return;
       const message = errorMessage(cause);
       setError(message);
+      hydratedUserIdRef.current = null;
       setSession(null);
       setContext(null);
       setData(EMPTY_DATA);
@@ -526,15 +530,49 @@ export default function SupportApp() {
 
     const { data: listener } = supabase.auth.onAuthStateChange((event, nextSession) => {
       if (!mountedRef.current) return;
+
+      const scheduleHydration = () => {
+        // Reserve the user immediately so repeated SIGNED_IN events cannot
+        // enqueue duplicate initial loads before the first one starts.
+        hydratedUserIdRef.current = nextSession?.user.id ?? null;
+        setTimeout(() => {
+          if (mountedRef.current) void hydrate(nextSession);
+        }, 0);
+      };
+
       if (event === "INITIAL_SESSION") {
         initialSessionHandled = true;
         clearTimeout(fallbackTimer);
+        scheduleHydration();
+        return;
       }
 
-      // Let the auth callback release its internal lock before querying Supabase.
-      setTimeout(() => {
-        if (mountedRef.current) void hydrate(nextSession);
-      }, 0);
+      if (event === "SIGNED_OUT") {
+        scheduleHydration();
+        return;
+      }
+
+      if (event === "SIGNED_IN") {
+        if (nextSession && hydratedUserIdRef.current !== nextSession.user.id) {
+          scheduleHydration();
+        } else {
+          setSession(nextSession);
+        }
+        return;
+      }
+
+      // Token refreshes and user metadata updates must not reload application
+      // data or reset the current screen. A different user is still hydrated
+      // defensively if an unexpected cross-tab event arrives.
+      if (
+        nextSession
+        && hydratedUserIdRef.current
+        && hydratedUserIdRef.current !== nextSession.user.id
+      ) {
+        scheduleHydration();
+      } else {
+        setSession(nextSession);
+      }
     });
 
     return () => {
@@ -6512,6 +6550,7 @@ function AdminCostRulesModule({ adminData, contractTypes, onChanged }: { adminDa
   const [contractTypeFilterId, setContractTypeFilterId] = useState(0);
   const [selected, setSelected] = useState<AdminData["costRules"][number] | null | "new">(null);
   const visibleRules = adminData.costRules.filter((rule) => !contractTypeFilterId || rule.contractTypeId === contractTypeFilterId);
+  const configurableConcepts = adminData.costConcepts.filter((concept) => concept.code !== "COSTO_TURNO");
   return (
     <>
       <FormCard title="Filtros">
@@ -6572,7 +6611,7 @@ function AdminCostRulesModule({ adminData, contractTypes, onChanged }: { adminDa
           </View>
         )}
       </FormCard>
-      <AdminCostRuleModal item={selected === "new" ? null : selected} initialContractTypeId={contractTypeFilterId} contractTypes={contractTypes} concepts={adminData.costConcepts} visible={selected !== null} onClose={() => setSelected(null)} onSaved={async () => { setSelected(null); await onChanged(); }} />
+      <AdminCostRuleModal item={selected === "new" ? null : selected} initialContractTypeId={contractTypeFilterId} contractTypes={contractTypes} concepts={configurableConcepts} visible={selected !== null} onClose={() => setSelected(null)} onSaved={async () => { setSelected(null); await onChanged(); }} />
     </>
   );
 }
