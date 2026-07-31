@@ -360,7 +360,6 @@ declare
   last_allocation_id bigint;
   closed_count bigint := 0;
   allocated_total numeric := 0;
-  replaced_count bigint := 0;
 begin
   if actor is null or not public.is_active_user() or not public.has_role('ADMIN') then
     raise exception 'No autorizado';
@@ -471,7 +470,8 @@ begin
           actor,
           actor
         )
-        returning id, allocated_amount into last_allocation_id, allocated_running;
+        returning contractor_payroll_allocations.id, contractor_payroll_allocations.allocated_amount
+        into last_allocation_id, allocated_running;
       end loop;
 
       select coalesce(sum(a.allocated_amount), 0)
@@ -479,8 +479,8 @@ begin
       from public.contractor_payroll_allocations a
       where a.payroll_period_id = target.id;
 
-      update public.contractor_payroll_allocations
-      set allocated_amount = allocated_amount + (target.base_salary_amount - allocated_running),
+      update public.contractor_payroll_allocations allocation
+      set allocated_amount = allocation.allocated_amount + (target.base_salary_amount - allocated_running),
           updated_by = actor
       where id = last_allocation_id;
     end if;
@@ -504,8 +504,6 @@ begin
         or o.operation_date <= (select cc.end_date from public.contractor_contract cc where cc.id = target.contractor_contract_id)
       )
     on conflict (shift_cost_id) do nothing;
-
-    get diagnostics replaced_count = row_count;
 
     update public.contractor_payroll_periods
     set status = 'CLOSED',
