@@ -307,6 +307,42 @@ export interface AdminContractRecord {
   observations: string | null;
 }
 
+export type PayrollMode = "PER_SHIFT" | "MONTHLY_FIXED";
+export type PayrollPeriodStatus = "DRAFT" | "CLOSED";
+
+export interface AdminPayrollRule {
+  id: number;
+  contractTypeId: number;
+  contractTypeName: string;
+  payrollMode: PayrollMode;
+  monthlySalary: number | null;
+  validFrom: string;
+  validTo: string | null;
+  status: "ACTIVO" | "INACTIVO";
+}
+
+export interface AdminPayrollPeriod {
+  id: number;
+  contractorId: number;
+  contractorName: string;
+  document: string;
+  contractId: number;
+  ruleId: number;
+  monthlySalary: number;
+  eligibleDays: number;
+  paidDays: number;
+  baseSalaryAmount: number;
+  status: PayrollPeriodStatus;
+  calculatedAt: string;
+  closedAt: string | null;
+}
+
+export interface AdminPayrollData {
+  periodStart: string;
+  periods: AdminPayrollPeriod[];
+  rules: AdminPayrollRule[];
+}
+
 export interface AdminData {
   clients: AdminClient[];
   areas: AdminArea[];

@@ -36,6 +36,8 @@ import { buildCedulaPdfFromPhotos } from "./lib/cedula-pdf";
 import { supabase } from "./lib/supabase";
 import {
   cancelPersonnelRequest,
+  calculateAdminDirectPayroll,
+  closeAdminDirectPayroll,
   createAdminUser,
   createContractorDraft,
   createContractorDocumentSignedUrl,
@@ -46,6 +48,7 @@ import {
   finalizeOperation,
   finalizeDischargeOperation,
   loadAdminData,
+  loadAdminPayroll,
   loadAppData,
   loadClientContractorProfile,
   loadClientContractorHistory,
@@ -71,6 +74,7 @@ import {
   saveAdminContract,
   saveAdminCostConcept,
   saveAdminCostRule,
+  saveAdminPayrollRule,
   saveAdminExtraHourRate,
   saveAdminServiceUnitRate,
   saveAdminServiceUnitType,
@@ -86,6 +90,7 @@ import {
   terminateContractor,
   toggleUserClient,
   updateAdminContractor,
+  updateAdminDirectPayrollPeriod,
   updateAdminUserProfile,
   uploadContractorActivationDocument,
   uploadContractorDocument,
@@ -93,6 +98,7 @@ import {
 import type { ContractorActivationDocumentType, ContractorDocumentTypeOption, ContractorPdfFile } from "./services/data";
 import type {
   AdminData,
+  AdminPayrollData,
   AppData,
   Assignment,
   ClientContractor,
@@ -5807,6 +5813,7 @@ type AdminModule =
   | "contracts"
   | "catalogs"
   | "rates"
+  | "payroll"
   | "costs"
   | "rules"
   | "workwear";
@@ -5818,6 +5825,7 @@ const adminModules: { id: AdminModule; title: string; icon: IconName; mobile?: b
   { id: "contracts", title: "Contratos", icon: "document-text-outline" },
   { id: "catalogs", title: "Clientes / Áreas / Turnos", icon: "business-outline", mobile: true },
   { id: "rates", title: "Tarifas", icon: "cash-outline" },
+  { id: "payroll", title: "Nómina", icon: "wallet-outline" },
   { id: "costs", title: "Conceptos de costos", icon: "receipt-outline" },
   { id: "rules", title: "Reglas de costos", icon: "calculator-outline" },
   { id: "workwear", title: "Dotación", icon: "shirt-outline", mobile: true },
@@ -6065,6 +6073,7 @@ function AdminWebPortal({
     if (module === "contracts") return <AdminContractsModule adminData={adminData} contractTypes={data.contractTypes} onChanged={refreshAll} />;
     if (module === "catalogs") return <AdminCatalogsModule adminData={adminData} onChanged={refreshAll} />;
     if (module === "rates") return <AdminRatesModule adminData={adminData} onChanged={refreshAll} />;
+    if (module === "payroll") return <AdminPayrollModule contractTypes={data.contractTypes} />;
     if (module === "costs") return <AdminCostConceptsModule adminData={adminData} onChanged={refreshAll} />;
     if (module === "rules") return <AdminCostRulesModule adminData={adminData} contractTypes={data.contractTypes} onChanged={refreshAll} />;
     return <AdminWorkwearModule adminData={adminData} onChanged={refreshAll} />;
@@ -6536,6 +6545,181 @@ function AdminRateCard({ title, context, salePrice, costPrice, validFrom, validT
   );
 }
 
+function AdminPayrollModule({ contractTypes }: { contractTypes: AppData["contractTypes"] }) {
+  const currentMonth = monthStartIso(todayIso());
+  const [periodStart, setPeriodStart] = useState(currentMonth);
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  const [data, setData] = useState<AdminPayrollData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [processing, setProcessing] = useState(false);
+  const [error, setError] = useState("");
+  const [editingPeriod, setEditingPeriod] = useState<AdminPayrollData["periods"][number] | null>(null);
+  const [editingRule, setEditingRule] = useState<AdminPayrollData["rules"][number] | null | "new">(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      setData(await loadAdminPayroll(periodStart));
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setLoading(false);
+    }
+  }, [periodStart]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const calculate = async () => {
+    setProcessing(true);
+    try {
+      await calculateAdminDirectPayroll(periodStart);
+      await load();
+      showMessage("Borrador calculado", "La nómina DIRECTO fue calculada sin cerrar el periodo.");
+    } catch (cause) {
+      showMessage("No fue posible calcular", errorMessage(cause));
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  const close = () => confirmAction(
+    "Cerrar periodo de nómina",
+    "Los periodos cerrados son inmutables. Confirma que revisaste los días pagables y los totales.",
+    "Cerrar periodo",
+    () => {
+      void (async () => {
+        setProcessing(true);
+        try {
+          await closeAdminDirectPayroll(periodStart);
+          await load();
+          showMessage("Periodo cerrado", "La nómina quedó cerrada y disponible en Informes.");
+        } catch (cause) {
+          showMessage("No fue posible cerrar", errorMessage(cause));
+        } finally {
+          setProcessing(false);
+        }
+      })();
+    },
+  );
+
+  const draftCount = data?.periods.filter((period) => period.status === "DRAFT").length ?? 0;
+  const closedCount = data?.periods.filter((period) => period.status === "CLOSED").length ?? 0;
+  const total = data?.periods.reduce((sum, period) => sum + period.baseSalaryAmount, 0) ?? 0;
+
+  return (
+    <>
+      <FormCard title="Periodo de nómina">
+        <View style={styles.adminRateFilterGrid}>
+          <View style={styles.adminRateFilterField}>
+            <Choice label="Mes" value={formatMonth(periodStart)} icon="calendar-outline" onPress={() => setCalendarOpen(true)} />
+          </View>
+        </View>
+        <View style={styles.actionRow}>
+          <SecondaryButton label={processing ? "Procesando..." : "Calcular borrador"} icon="calculator-outline" onPress={calculate} disabled={processing} />
+          <PrimaryButton label={processing ? "Procesando..." : "Cerrar periodo"} icon="lock-closed-outline" onPress={close} disabled={processing || draftCount === 0 || closedCount > 0 || periodStart >= currentMonth} />
+        </View>
+      </FormCard>
+
+      {error ? <Notice icon="cloud-offline-outline" tone="error" text={error} /> : loading ? (
+        <View style={styles.centerCard}><ActivityIndicator color={C.navy} /></View>
+      ) : (
+        <>
+          <View style={styles.statsGrid}>
+            <Stat value={String(data?.periods.length ?? 0)} label="Empleados DIRECTO" icon="people-outline" />
+            <Stat value={String(draftCount)} label="Borradores" icon="create-outline" />
+            <Stat value={String(closedCount)} label="Cerrados" icon="lock-closed-outline" />
+            <Stat value={formatCurrency(total)} label="Total del periodo" icon="wallet-outline" />
+          </View>
+          <FormCard title={`Nómina ${formatMonth(periodStart)}`}>
+            {!data?.periods.length ? (
+              <EmptyState icon="wallet-outline" text="No hay nómina calculada para este mes." />
+            ) : (
+              <View style={styles.adminCompactTable}>
+                <View style={[styles.adminCompactRow, styles.adminCompactHeader]}>
+                  <Text style={styles.adminCompactWideHead}>Contratista</Text>
+                  <Text style={styles.adminCompactHead}>Salario</Text>
+                  <Text style={styles.adminCompactHead}>Elegibles</Text>
+                  <Text style={styles.adminCompactHead}>Pagables</Text>
+                  <Text style={styles.adminCompactHead}>Total</Text>
+                  <Text style={styles.adminCompactHead}>Estado</Text>
+                  <Text style={styles.adminCompactActionHead}>Editar</Text>
+                </View>
+                {data.periods.map((period) => (
+                  <View key={period.id} style={styles.adminCompactRow}>
+                    <View style={styles.adminCompactWideCell}>
+                      <Text style={styles.cardTitle}>{period.contractorName}</Text>
+                      <Text style={styles.caption}>{period.document}</Text>
+                    </View>
+                    <Text style={styles.adminCompactCell}>{formatCurrency(period.monthlySalary)}</Text>
+                    <Text style={styles.adminCompactCell}>{period.eligibleDays}</Text>
+                    <Text style={styles.adminCompactCell}>{period.paidDays}</Text>
+                    <Text style={styles.adminCompactCell}>{formatCurrency(period.baseSalaryAmount)}</Text>
+                    <View style={styles.adminCompactCell}><StatusPill good={period.status === "CLOSED"} text={period.status} /></View>
+                    <Pressable style={styles.adminCompactAction} disabled={period.status !== "DRAFT"} onPress={() => setEditingPeriod(period)}>
+                      <Ionicons name="create-outline" size={18} color={period.status === "DRAFT" ? C.navy : C.muted} />
+                    </Pressable>
+                  </View>
+                ))}
+              </View>
+            )}
+          </FormCard>
+          <FormCard title="Reglas salariales">
+            <View style={styles.between}>
+              <Text style={styles.caption}>Salarios y modalidades versionados por tipo de contrato.</Text>
+              <Pressable style={styles.smallActionButton} onPress={() => setEditingRule("new")}>
+                <Ionicons name="add-circle-outline" size={16} color={C.navy} />
+                <Text style={styles.smallActionText}>Crear regla</Text>
+              </Pressable>
+            </View>
+            {(data?.rules ?? []).map((rule) => (
+              <Pressable key={rule.id} style={styles.adminTableRow} onPress={() => setEditingRule(rule)}>
+                <View style={styles.flex}>
+                  <Text style={styles.cardTitle}>{rule.contractTypeName}</Text>
+                  <Text style={styles.caption}>{rule.payrollMode === "MONTHLY_FIXED" ? "Salario mensual fijo" : "Pago por turno"} ⋅ desde {rule.validFrom}</Text>
+                </View>
+                <Text style={styles.adminRateSale}>{rule.monthlySalary === null ? "Por turno" : formatCurrency(rule.monthlySalary)}</Text>
+                <StatusPill good={rule.status === "ACTIVO"} text={rule.status} />
+              </Pressable>
+            ))}
+          </FormCard>
+        </>
+      )}
+      <CalendarModal
+        visible={calendarOpen}
+        selectedDate={periodStart}
+        title="Seleccionar mes de nómina"
+        subtitle="Puedes seleccionar cualquier día; se usará el mes correspondiente."
+        onClose={() => setCalendarOpen(false)}
+        onSelect={(date) => {
+          setPeriodStart(monthStartIso(date));
+          setCalendarOpen(false);
+        }}
+      />
+      <AdminPayrollDaysModal
+        period={editingPeriod}
+        onClose={() => setEditingPeriod(null)}
+        onSaved={async () => {
+          setEditingPeriod(null);
+          await load();
+        }}
+      />
+      <AdminPayrollRuleModal
+        visible={editingRule !== null}
+        item={editingRule === "new" ? null : editingRule}
+        contractTypes={contractTypes}
+        onClose={() => setEditingRule(null)}
+        onSaved={async () => {
+          setEditingRule(null);
+          await load();
+        }}
+      />
+    </>
+  );
+}
+
 function AdminCostConceptsModule({ adminData, onChanged }: { adminData: AdminData; onChanged: () => void }) {
   const [selected, setSelected] = useState<AdminData["costConcepts"][number] | null | "new">(null);
   return (
@@ -6836,6 +7020,146 @@ function AdminOptionChips<T extends string | number>({
         })}
       </View>
     </View>
+  );
+}
+
+function AdminPayrollDaysModal({
+  period,
+  onClose,
+  onSaved,
+}: {
+  period: AdminPayrollData["periods"][number] | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [paidDays, setPaidDays] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setPaidDays(period ? String(period.paidDays) : "");
+  }, [period]);
+
+  return (
+    <AdminModalShell
+      visible={Boolean(period)}
+      title="Editar días pagables"
+      saving={saving}
+      onClose={onClose}
+      onSave={async () => {
+        if (!period) return;
+        const value = Number(paidDays);
+        if (!Number.isFinite(value) || value < 0 || value > period.eligibleDays) {
+          showMessage("Días inválidos", `Ingresa un valor entre 0 y ${period.eligibleDays}.`);
+          return;
+        }
+        setSaving(true);
+        try {
+          await updateAdminDirectPayrollPeriod(period.id, value);
+          await onSaved();
+        } catch (cause) {
+          showMessage("No fue posible guardar", errorMessage(cause));
+        } finally {
+          setSaving(false);
+        }
+      }}
+    >
+      {period && (
+        <>
+          <View style={styles.payrollInfoBox}>
+            <Text style={styles.cardTitle}>{period.contractorName}</Text>
+            <Text style={styles.caption}>Días elegibles: {period.eligibleDays} ⋅ Salario: {formatCurrency(period.monthlySalary)}</Text>
+          </View>
+          <AdminField label="Días pagables" value={paidDays} onChangeText={setPaidDays} icon="calendar-outline" keyboardType="decimal-pad" />
+          <Text style={styles.caption}>Las ausencias operativas no descuentan días automáticamente.</Text>
+        </>
+      )}
+    </AdminModalShell>
+  );
+}
+
+function AdminPayrollRuleModal({
+  visible,
+  item,
+  contractTypes,
+  onClose,
+  onSaved,
+}: {
+  visible: boolean;
+  item: AdminPayrollData["rules"][number] | null;
+  contractTypes: AppData["contractTypes"];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [contractTypeId, setContractTypeId] = useState(0);
+  const [payrollMode, setPayrollMode] = useState<"PER_SHIFT" | "MONTHLY_FIXED">("PER_SHIFT");
+  const [monthlySalary, setMonthlySalary] = useState("");
+  const [validFrom, setValidFrom] = useState(monthStartIso(todayIso()));
+  const [validTo, setValidTo] = useState("");
+  const [status, setStatus] = useState<"ACTIVO" | "INACTIVO">("ACTIVO");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!visible) return;
+    setContractTypeId(item?.contractTypeId ?? contractTypes[0]?.id ?? 0);
+    setPayrollMode(item?.payrollMode ?? "PER_SHIFT");
+    setMonthlySalary(item?.monthlySalary === null || item?.monthlySalary === undefined ? "" : String(item.monthlySalary));
+    setValidFrom(item?.validFrom ?? monthStartIso(todayIso()));
+    setValidTo(item?.validTo ?? "");
+    setStatus(item?.status ?? "ACTIVO");
+  }, [contractTypes, item, visible]);
+
+  return (
+    <AdminModalShell
+      visible={visible}
+      title={item ? "Editar regla salarial" : "Crear regla salarial"}
+      saving={saving}
+      onClose={onClose}
+      onSave={async () => {
+        const salary = payrollMode === "MONTHLY_FIXED" ? Number(monthlySalary) : null;
+        if (!contractTypeId || !validFrom || (payrollMode === "MONTHLY_FIXED" && (!salary || salary <= 0))) {
+          showMessage("Información incompleta", "Selecciona el tipo, la modalidad, la vigencia y un salario válido.");
+          return;
+        }
+        if (isoToDate(validFrom).getDate() !== 1) {
+          showMessage("Vigencia inválida", "La fecha inicial debe ser el primer día del mes.");
+          return;
+        }
+        setSaving(true);
+        try {
+          await saveAdminPayrollRule({
+            id: item?.id,
+            contractTypeId,
+            payrollMode,
+            monthlySalary: salary,
+            validFrom,
+            validTo: validTo || null,
+            status,
+          });
+          await onSaved();
+        } catch (cause) {
+          showMessage("No fue posible guardar", errorMessage(cause));
+        } finally {
+          setSaving(false);
+        }
+      }}
+    >
+      <AdminSelectField label="Tipo de contrato" icon="briefcase-outline" value={contractTypeId} options={contractTypes} onChange={setContractTypeId} />
+      <AdminOptionChips
+        label="Modalidad"
+        value={payrollMode}
+        options={[
+          { id: "PER_SHIFT", name: "Por turno" },
+          { id: "MONTHLY_FIXED", name: "Mensual fijo" },
+        ]}
+        onChange={setPayrollMode}
+      />
+      {payrollMode === "MONTHLY_FIXED" && (
+        <AdminField label="Salario mensual" value={monthlySalary} onChangeText={setMonthlySalary} icon="cash-outline" keyboardType="numeric" />
+      )}
+      <AdminField label="Válido desde (primer día del mes)" value={validFrom} onChangeText={setValidFrom} icon="calendar-outline" />
+      <AdminField label="Válido hasta (último día del mes, opcional)" value={validTo} onChangeText={setValidTo} icon="calendar-outline" />
+      <AdminSwitch label="Regla activa" value={status === "ACTIVO"} onValueChange={(value) => setStatus(value ? "ACTIVO" : "INACTIVO")} />
+    </AdminModalShell>
   );
 }
 
@@ -8133,6 +8457,7 @@ const styles = StyleSheet.create({
   adminCompactCell: { flex: 1, color: C.muted, fontSize: 10, fontWeight: "700" },
   adminCompactWideCell: { flex: 1.4, color: C.muted, fontSize: 10, fontWeight: "700" },
   adminCompactAction: { width: 44, alignItems: "center", justifyContent: "center" },
+  payrollInfoBox: { gap: 4, padding: 13, borderRadius: 15, backgroundColor: C.blueBg, borderWidth: 1, borderColor: "#CED9F6" },
   adminModalCard: { width: "100%", maxWidth: 620, maxHeight: "88%", borderRadius: 22, padding: 18, backgroundColor: C.white, gap: 14 },
   adminModalContent: { gap: 12, paddingBottom: 4 },
   adminActions: { gap: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: C.line },

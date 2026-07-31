@@ -2,6 +2,7 @@ import { supabase } from "../lib/supabase";
 import type {
   AdminUser,
   AdminData,
+  AdminPayrollData,
   AppData,
   Assignment,
   ClientContractor,
@@ -1079,18 +1080,21 @@ export async function loadDirectorReports(input: {
     p_client_id: input.clientId || null,
     p_contractor_id: input.contractorId || null,
   };
-  const [result, dischargeResult, dischargeTrendResult, dischargeClientAttendanceResult] = await Promise.all([
+  const [result, dischargeResult, dischargeTrendResult, dischargeClientAttendanceResult, payrollResult] = await Promise.all([
     supabase.rpc("get_director_reports", args),
     supabase.rpc("get_discharge_report_metrics", args),
     supabase.rpc("get_discharge_attendance_trend", args),
     supabase.rpc("get_discharge_client_attendance", args),
+    supabase.rpc("get_direct_payroll_report_metrics", args),
   ]);
   fail(result.error);
   fail(dischargeResult.error);
   fail(dischargeTrendResult.error);
   fail(dischargeClientAttendanceResult.error);
+  fail(payrollResult.error);
   const row = Array.isArray(result.data) ? result.data[0] : result.data;
   const discharge = dischargeResult.data ?? {};
+  const payroll = payrollResult.data ?? {};
   const contractorOptions = new Map<number, StatisticsContractorOption>();
   [...(row?.contractor_options ?? []), ...(discharge?.contractor_options ?? [])].forEach((contractor: any) => {
     contractorOptions.set(Number(contractor.id), { id: Number(contractor.id), name: cleanText(contractor.name), document: cleanText(contractor.document) });
@@ -1112,13 +1116,36 @@ export async function loadDirectorReports(input: {
   });
   const dischargePayrollClients = (discharge?.client_ranking ?? []).filter((item: any) => Number(item.payrollTotal ?? 0) > 0);
   const dischargePayrollContractors = (discharge?.contractor_ranking ?? []).filter((item: any) => Number(item.payrollTotal ?? 0) > 0);
-  const payrollByClient = mergeReportRanking(mapDirectorRanking(row?.payroll_by_client ?? []), dischargePayrollClients, dischargeClientAttendance);
-  const payrollByContractor = mergeReportRanking(mapDirectorRanking(row?.payroll_by_contractor ?? []), dischargePayrollContractors);
+  const contractorsWorked = contractorOptions.size;
+  const payrollByClient = mergeReportRanking(
+    mergeReportRanking(mapDirectorRanking(row?.payroll_by_client ?? []), dischargePayrollClients, dischargeClientAttendance),
+    payroll?.clientAdjustments ?? [],
+  );
+  const payrollByContractor = mergeReportRanking(
+    mergeReportRanking(mapDirectorRanking(row?.payroll_by_contractor ?? []), dischargePayrollContractors),
+    payroll?.contractorAdjustments ?? [],
+  );
+  const clientRanking = mergeReportRanking(
+    mergeReportRanking(mapDirectorRanking(row?.client_ranking ?? []), discharge?.client_ranking ?? [], dischargeClientAttendance),
+    payroll?.clientAdjustments ?? [],
+  );
+  const contractorRanking = mergeReportRanking(
+    mergeReportRanking(mapDirectorRanking(row?.contractor_ranking ?? []), discharge?.contractor_ranking ?? []),
+    payroll?.contractorAdjustments ?? [],
+  );
+  (payroll?.contractorAdjustments ?? []).forEach((contractor: any) => {
+    contractorOptions.set(Number(contractor.id), {
+      id: Number(contractor.id),
+      name: cleanText(contractor.name),
+      document: cleanText(contractor.document),
+    });
+  });
+  const payrollAdjustment = Number(payroll?.salaryTotal ?? 0) - Number(payroll?.replacedShiftTotal ?? 0);
   return {
     saleTotal: Number(row?.sale_total ?? 0) + Number(discharge?.sale_total ?? 0),
-    costTotal: Number(row?.cost_total ?? 0) + Number(discharge?.cost_total ?? 0),
-    payrollTotal: Number(row?.payroll_total ?? 0) + Number(discharge?.payroll_total ?? 0),
-    contractorsWorked: contractorOptions.size,
+    costTotal: Number(row?.cost_total ?? 0) + Number(discharge?.cost_total ?? 0) + payrollAdjustment,
+    payrollTotal: Number(row?.payroll_total ?? 0) + Number(discharge?.payroll_total ?? 0) + payrollAdjustment,
+    contractorsWorked,
     payrollContractors: payrollByContractor.length,
     operationsClosed: Number(row?.operations_closed ?? 0),
     operationsPending: Number(row?.operations_pending ?? 0),
@@ -1133,12 +1160,85 @@ export async function loadDirectorReports(input: {
     coveragePercent: Number(row?.coverage_percent ?? 0),
     trendGranularity: row?.trend_granularity ?? "DAY",
     trendSeries,
-    clientRanking: mergeReportRanking(mapDirectorRanking(row?.client_ranking ?? []), discharge?.client_ranking ?? [], dischargeClientAttendance),
-    contractorRanking: mergeReportRanking(mapDirectorRanking(row?.contractor_ranking ?? []), discharge?.contractor_ranking ?? []),
+    clientRanking,
+    contractorRanking,
     payrollByClient,
     payrollByContractor,
     contractorOptions: [...contractorOptions.values()].sort((a, b) => a.name.localeCompare(b.name)),
   };
+}
+
+export async function loadAdminPayroll(periodStart: string): Promise<AdminPayrollData> {
+  const result = await supabase.rpc("get_admin_direct_payroll", { p_period_start: periodStart });
+  fail(result.error);
+  const raw = result.data ?? {};
+  return {
+    periodStart: raw.periodStart ?? periodStart,
+    periods: (raw.periods ?? []).map((item: any) => ({
+      id: Number(item.id),
+      contractorId: Number(item.contractorId),
+      contractorName: cleanText(item.contractorName),
+      document: cleanText(item.document),
+      contractId: Number(item.contractId),
+      ruleId: Number(item.ruleId),
+      monthlySalary: Number(item.monthlySalary ?? 0),
+      eligibleDays: Number(item.eligibleDays ?? 0),
+      paidDays: Number(item.paidDays ?? 0),
+      baseSalaryAmount: Number(item.baseSalaryAmount ?? 0),
+      status: item.status,
+      calculatedAt: item.calculatedAt,
+      closedAt: item.closedAt ?? null,
+    })),
+    rules: (raw.rules ?? []).map((item: any) => ({
+      id: Number(item.id),
+      contractTypeId: Number(item.contractTypeId),
+      contractTypeName: cleanText(item.contractTypeName),
+      payrollMode: item.payrollMode,
+      monthlySalary: item.monthlySalary === null ? null : Number(item.monthlySalary),
+      validFrom: item.validFrom,
+      validTo: item.validTo ?? null,
+      status: item.status,
+    })),
+  };
+}
+
+export async function calculateAdminDirectPayroll(periodStart: string) {
+  const result = await supabase.rpc("calculate_direct_payroll", { p_period_start: periodStart });
+  fail(result.error);
+}
+
+export async function updateAdminDirectPayrollPeriod(periodId: number, paidDays: number) {
+  const result = await supabase.rpc("update_direct_payroll_draft", {
+    p_period_id: periodId,
+    p_paid_days: paidDays,
+  });
+  fail(result.error);
+}
+
+export async function closeAdminDirectPayroll(periodStart: string) {
+  const result = await supabase.rpc("close_direct_payroll", { p_period_start: periodStart });
+  fail(result.error);
+}
+
+export async function saveAdminPayrollRule(input: {
+  id?: number;
+  contractTypeId: number;
+  payrollMode: "PER_SHIFT" | "MONTHLY_FIXED";
+  monthlySalary: number | null;
+  validFrom: string;
+  validTo: string | null;
+  status: "ACTIVO" | "INACTIVO";
+}) {
+  const result = await supabase.rpc("save_contract_type_payroll_rule", {
+    p_rule_id: input.id ?? null,
+    p_contract_type_id: input.contractTypeId,
+    p_payroll_mode: input.payrollMode,
+    p_monthly_salary: input.monthlySalary,
+    p_valid_from: input.validFrom,
+    p_valid_to: input.validTo,
+    p_status: input.status,
+  });
+  fail(result.error);
 }
 
 export async function createPersonnelRequest(input: {
