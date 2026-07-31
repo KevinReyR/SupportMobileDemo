@@ -1224,7 +1224,7 @@ function PublicContractorOnboarding({ token }: { token: string }) {
         <CalendarModal
           visible={calendarOpen}
           selectedDate={fields.birthDate || null}
-          defaultDate="1990-01-01"
+          defaultDate="2000-01-01"
           title="Fecha de nacimiento"
           onClose={() => setCalendarOpen(false)}
           onSelect={(date) => {
@@ -3175,7 +3175,7 @@ function CreateContractor({
       <CalendarModal
         visible={birthDateCalendarOpen}
         selectedDate={birthDate || null}
-        defaultDate="1990-01-01"
+        defaultDate="2000-01-01"
         title="Fecha de nacimiento"
         subtitle="Selecciona la fecha de nacimiento del contratista."
         onClose={() => setBirthDateCalendarOpen(false)}
@@ -4147,7 +4147,11 @@ function WorkwearMovementModal({
           style={styles.modalKeyboardAvoider}
           behavior={Platform.OS === "ios" ? "padding" : "height"}
         >
-          <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
+          <TouchableWithoutFeedback
+            onPress={Keyboard.dismiss}
+            accessible={false}
+            disabled={Platform.OS === "web"}
+          >
             <View style={styles.modalBackdrop}>
               <View style={styles.workwearModalCard}>
                 <ScrollView
