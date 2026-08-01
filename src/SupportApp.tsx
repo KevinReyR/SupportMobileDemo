@@ -1786,14 +1786,17 @@ function Operations({
 }) {
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [calendarVisible, setCalendarVisible] = useState(false);
+  const [changesRequestedOnly, setChangesRequestedOnly] = useState(false);
   const pending = operations.filter((item) => item.status === "PENDIENTE");
+  const changesRequested = operations.filter((item) => item.status === "CAMBIOS_SOLICITADOS");
   const today = todayIso();
   const threeDayStart = dateToIso(addDays(isoToDate(today), -2));
-  const visibleOperations = operations.filter((operation) =>
-    selectedDate
-      ? operation.date === selectedDate
-      : operation.date >= threeDayStart && operation.date <= today,
-  );
+  const visibleOperations = operations.filter((operation) => {
+    if (changesRequestedOnly && operation.status !== "CAMBIOS_SOLICITADOS") return false;
+    if (selectedDate) return operation.date === selectedDate;
+    if (changesRequestedOnly) return true;
+    return operation.date >= threeDayStart && operation.date <= today;
+  });
   const totalToday = operations
     .filter((item) => item.date === today)
     .reduce((total, item) => total + item.people, 0);
@@ -1831,6 +1834,24 @@ function Operations({
           <Ionicons name="chevron-forward" size={20} color={C.red} />
         </Pressable>
       )}
+      {context.role === "Coordinador" && changesRequested.length > 0 && (
+        <Pressable
+          style={styles.changesRequestedAlertCard}
+          onPress={() => {
+            setSelectedDate(null);
+            setChangesRequestedOnly(true);
+          }}
+        >
+          <Ionicons name="refresh-circle" size={23} color={C.orange} />
+          <View style={styles.flex}>
+            <Text style={styles.changesRequestedAlertTitle}>
+              Hay {changesRequested.length} {changesRequested.length === 1 ? "operación" : "operaciones"} con cambios solicitados
+            </Text>
+            <Text style={styles.caption}>Toca para verlas y realizar las correcciones.</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={20} color={C.orange} />
+        </Pressable>
+      )}
       {context.role === "Coordinador" && (
         <SecondaryButton label="Registro inicial" icon="add-circle-outline" onPress={onInitial} />
       )}
@@ -1847,11 +1868,24 @@ function Operations({
           <Ionicons name="chevron-down" size={15} color={C.navy} />
         </Pressable>
       </View>
+      {changesRequestedOnly && (
+        <View style={styles.operationFilterRow}>
+          <Pressable style={styles.operationFilterChip} onPress={() => setChangesRequestedOnly(false)}>
+            <Ionicons name="refresh-outline" size={14} color={C.orange} />
+            <Text style={styles.operationFilterChipText}>Cambios solicitados</Text>
+            <Ionicons name="close-circle" size={15} color={C.orange} />
+          </Pressable>
+        </View>
+      )}
       {visibleOperations.length === 0 ? (
         <EmptyState
           icon="calendar-outline"
           text={
-            selectedDate
+            changesRequestedOnly && selectedDate
+              ? `No hay operaciones con cambios solicitados para el ${formatDate(selectedDate)}.`
+              : changesRequestedOnly
+                ? "No hay operaciones con cambios solicitados."
+                : selectedDate
               ? `No hay operaciones para el ${formatDate(selectedDate)}.`
               : "No hay operaciones registradas en los últimos 3 días."
           }
@@ -8341,6 +8375,11 @@ const styles = StyleSheet.create({
   pillText: { fontSize: 8, fontWeight: "900" },
   alertCard: { borderRadius: 17, padding: 14, flexDirection: "row", alignItems: "center", gap: 11, backgroundColor: C.redBg, borderWidth: 1, borderColor: "#F5CDCD" },
   alertTitle: { color: C.red, fontSize: 13, fontWeight: "800" },
+  changesRequestedAlertCard: { borderRadius: 17, padding: 14, flexDirection: "row", alignItems: "center", gap: 11, backgroundColor: C.orangeBg, borderWidth: 1, borderColor: "#FFD4C4" },
+  changesRequestedAlertTitle: { color: C.orange, fontSize: 13, fontWeight: "800" },
+  operationFilterRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  operationFilterChip: { minHeight: 34, paddingHorizontal: 10, borderRadius: 99, flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: C.orangeBg, borderWidth: 1, borderColor: "#FFD4C4" },
+  operationFilterChipText: { color: C.orange, fontSize: 10, fontWeight: "800" },
   pendingContractorsCard: { borderRadius: 17, padding: 14, flexDirection: "row", alignItems: "center", gap: 11, backgroundColor: C.orangeBg, borderWidth: 1, borderColor: "#FFD4C4" },
   pendingContractorsTitle: { color: C.orange, fontSize: 13, fontWeight: "800" },
   heroCard: { backgroundColor: C.white, borderRadius: 20, padding: 18, gap: 18, borderWidth: 1, borderColor: C.line },
