@@ -258,13 +258,14 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
 
     const latestContracts = new Map<
       number,
-      { status: ContractStatus; typeId: number | null; typeName: string }
+      { status: ContractStatus; startDate: string | null; typeId: number | null; typeName: string }
     >();
     for (const row of contractResult.data ?? []) {
       const contractorId = Number((row as any).contractor_id);
       if (!latestContracts.has(contractorId)) {
         latestContracts.set(contractorId, {
           status: normalizeContractStatus(firstRelation<any>((row as any).contract_status)?.name),
+          startDate: (row as any).start_date ?? null,
           typeId: (row as any).contract_type ?? null,
           typeName: cleanText(firstRelation<any>((row as any).contract_type_ref)?.name) || "Sin tipo",
         });
@@ -307,6 +308,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
         terminationDate: row.termination_date,
         active: (latestContract?.status ?? "INACTIVO") === "ACTIVO",
         contractStatus: latestContract?.status ?? "INACTIVO",
+        contractStartDate: latestContract?.startDate ?? null,
         contractTypeId: latestContract?.typeId ?? null,
         contractTypeName: latestContract?.typeName ?? "Sin tipo",
         lastClient: cleanText(firstRelation<any>(latest?.clients)?.name) || "Sin operación",
@@ -517,6 +519,7 @@ export async function loadContractorProfile(contractorId: number): Promise<Contr
     terminationDate: row.termination_date,
     active: contractStatus === "ACTIVO",
     contractStatus,
+    contractStartDate: contract?.start_date ?? null,
     contractTypeId: contract?.contract_type ?? null,
     contractTypeName: cleanText(firstRelation<any>(contract?.contract_type_ref)?.name) || "Sin tipo",
     lastClient: cleanText(firstRelation<any>(latestAssignment?.clients)?.name) || "Sin operación",

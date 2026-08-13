@@ -104,6 +104,7 @@ export interface Contractor {
   terminationDate: string | null;
   active: boolean;
   contractStatus: ContractStatus;
+  contractStartDate: string | null;
   contractTypeId: number | null;
   contractTypeName: string;
   lastClient: string;

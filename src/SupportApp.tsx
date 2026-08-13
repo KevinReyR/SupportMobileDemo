@@ -308,6 +308,17 @@ function addDaysIso(value: string, days: number) {
   return dateToIso(addDays(isoToDate(value), days));
 }
 
+function addCalendarMonthsIso(value: string, months: number) {
+  const date = isoToDate(value);
+  const targetMonthStart = new Date(date.getFullYear(), date.getMonth() + months, 1);
+  const targetMonthEnd = new Date(targetMonthStart.getFullYear(), targetMonthStart.getMonth() + 1, 0);
+  return dateToIso(new Date(
+    targetMonthStart.getFullYear(),
+    targetMonthStart.getMonth(),
+    Math.min(date.getDate(), targetMonthEnd.getDate()),
+  ));
+}
+
 function monthStartIso(value: string) {
   const date = isoToDate(value);
   return dateToIso(new Date(date.getFullYear(), date.getMonth(), 1));
@@ -3571,13 +3582,51 @@ function Staff({
   onOpen: (id: number) => void;
   onCreate: () => void;
 }) {
+  type ContractStatusFilter = "TODOS" | "ACTIVO" | "INACTIVO";
+  type ContractAgeFilter = 0 | 3 | 6 | 12;
   const [query, setQuery] = useState("");
   const [pendingOnly, setPendingOnly] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<ContractStatusFilter>("TODOS");
+  const [ageFilter, setAgeFilter] = useState<ContractAgeFilter>(0);
+  const showQuickFilters = context.roleCode === "COORDINATOR" || context.roleCode === "DIRECTOR";
   const pendingCount = contractors.filter((contractor) => contractor.contractStatus === "PENDIENTE").length;
-  const visible = contractors.filter((contractor) =>
-    `${contractor.fullName} ${contractor.document}`.toLowerCase().includes(query.toLowerCase()) &&
-    (!pendingOnly || contractor.contractStatus === "PENDIENTE"),
-  );
+  const today = todayIso();
+  const normalizedQuery = query.trim().toLowerCase();
+  const visible = contractors.filter((contractor) => {
+    const matchesQuery = `${contractor.fullName} ${contractor.document} ${contractor.phone ?? ""} ${contractor.email ?? ""}`
+      .toLowerCase()
+      .includes(normalizedQuery);
+    if (!matchesQuery) return false;
+    if (pendingOnly) return contractor.contractStatus === "PENDIENTE";
+    if (statusFilter !== "TODOS" && contractor.contractStatus !== statusFilter) return false;
+    if (ageFilter === 0) return true;
+    return contractor.contractStatus === "ACTIVO" &&
+      Boolean(contractor.contractStartDate) &&
+      addCalendarMonthsIso(contractor.contractStartDate!, ageFilter) <= today;
+  });
+
+  const selectStatus = (status: ContractStatusFilter) => {
+    setPendingOnly(false);
+    setStatusFilter(status);
+    if (status === "INACTIVO") setAgeFilter(0);
+  };
+
+  const selectAge = (months: ContractAgeFilter) => {
+    setPendingOnly(false);
+    setAgeFilter(months);
+    if (months > 0) setStatusFilter("ACTIVO");
+  };
+
+  const togglePending = () => {
+    setPendingOnly((value) => {
+      const next = !value;
+      if (next) {
+        setStatusFilter("TODOS");
+        setAgeFilter(0);
+      }
+      return next;
+    });
+  };
   return (
     <Page>
       <View style={styles.between}>
@@ -3591,7 +3640,7 @@ function Staff({
         </Pressable>
       </View>
       {context.role === "Director" && pendingCount > 0 && (
-        <Pressable style={styles.pendingContractorsCard} onPress={() => setPendingOnly((value) => !value)}>
+        <Pressable style={styles.pendingContractorsCard} onPress={togglePending}>
           <Ionicons name="alert-circle-outline" size={22} color={C.orange} />
           <View style={styles.flex}>
             <Text style={styles.pendingContractorsTitle}>
@@ -3604,8 +3653,51 @@ function Staff({
           <Ionicons name={pendingOnly ? "close-circle-outline" : "chevron-forward"} size={19} color={C.orange} />
         </Pressable>
       )}
-      <Input icon="search-outline" value={query} onChangeText={setQuery} placeholder="Nombre o documento" />
-      {visible.length === 0 ? <EmptyState icon="people-outline" text="No encontramos contratistas." /> : visible.map((contractor) => (
+      <Input icon="search-outline" value={query} onChangeText={setQuery} placeholder="Nombre, cédula, teléfono o correo" />
+      {showQuickFilters && (
+        <View style={styles.staffFilters}>
+          <View style={styles.staffFilterGroup}>
+            <Text style={styles.staffFilterLabel}>Estado del contrato</Text>
+            <View style={styles.staffFilterRow}>
+              {(["TODOS", "ACTIVO", "INACTIVO"] as ContractStatusFilter[]).map((status) => (
+                <Pressable
+                  key={status}
+                  style={[styles.staffFilterChip, statusFilter === status && !pendingOnly && styles.staffFilterChipActive]}
+                  onPress={() => selectStatus(status)}
+                >
+                  <Text style={[styles.staffFilterChipText, statusFilter === status && !pendingOnly && styles.staffFilterChipTextActive]}>
+                    {status === "TODOS" ? "Todos" : status}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+          <View style={styles.staffFilterGroup}>
+            <Text style={styles.staffFilterLabel}>Antigüedad del contrato activo</Text>
+            <View style={styles.staffFilterRow}>
+              {([0, 3, 6, 12] as ContractAgeFilter[]).map((months) => (
+                <Pressable
+                  key={months}
+                  style={[styles.staffFilterChip, ageFilter === months && !pendingOnly && styles.staffFilterChipActive]}
+                  onPress={() => selectAge(months)}
+                >
+                  <Text style={[styles.staffFilterChipText, ageFilter === months && !pendingOnly && styles.staffFilterChipTextActive]}>
+                    {months === 0 ? "Todas" : `+ ${months} Meses`}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+        </View>
+      )}
+      {visible.length === 0 ? (
+        <EmptyState
+          icon="people-outline"
+          text={pendingOnly || statusFilter !== "TODOS" || ageFilter > 0
+            ? "No hay contratistas que cumplan los filtros seleccionados."
+            : "No encontramos contratistas."}
+        />
+      ) : visible.map((contractor) => (
         <Pressable key={contractor.id} style={styles.card} onPress={() => onOpen(contractor.id)}>
           <View style={styles.cardTop}>
             <Initials name={contractor.fullName} />
@@ -8382,6 +8474,14 @@ const styles = StyleSheet.create({
   operationFilterChipText: { color: C.orange, fontSize: 10, fontWeight: "800" },
   pendingContractorsCard: { borderRadius: 17, padding: 14, flexDirection: "row", alignItems: "center", gap: 11, backgroundColor: C.orangeBg, borderWidth: 1, borderColor: "#FFD4C4" },
   pendingContractorsTitle: { color: C.orange, fontSize: 13, fontWeight: "800" },
+  staffFilters: { gap: 12, padding: 13, borderRadius: 17, backgroundColor: C.white, borderWidth: 1, borderColor: C.line },
+  staffFilterGroup: { gap: 7 },
+  staffFilterLabel: { color: C.muted, fontSize: 10, fontWeight: "800", textTransform: "uppercase" },
+  staffFilterRow: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  staffFilterChip: { minHeight: 34, paddingHorizontal: 12, borderRadius: 99, alignItems: "center", justifyContent: "center", backgroundColor: "#F8FAFF", borderWidth: 1, borderColor: C.line },
+  staffFilterChipActive: { backgroundColor: C.navy, borderColor: C.navy },
+  staffFilterChipText: { color: C.navy, fontSize: 10, fontWeight: "800" },
+  staffFilterChipTextActive: { color: C.white },
   heroCard: { backgroundColor: C.white, borderRadius: 20, padding: 18, gap: 18, borderWidth: 1, borderColor: C.line },
   summaryRow: { flexDirection: "row", paddingTop: 14, borderTopWidth: 1, borderTopColor: C.line },
   miniStat: { flex: 1, alignItems: "center" },
@@ -8573,4 +8673,3 @@ const styles = StyleSheet.create({
   tabLabel: { color: C.muted, fontSize: 8, fontWeight: "600" },
   tabLabelActive: { color: C.navy, fontWeight: "800" },
 });
-
