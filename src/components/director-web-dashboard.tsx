@@ -1432,7 +1432,9 @@ const styles = StyleSheet.create({
   sidebarToggleText: { color: "#D7E9F8", fontSize: 12, fontWeight: "700" },
   content: { flex: 1 },
   contentInner: {
-    padding: 22,
+    paddingHorizontal: 22,
+    paddingTop: 22,
+    paddingBottom: 110,
     gap: 16,
     maxWidth: 1600,
     width: "100%",
