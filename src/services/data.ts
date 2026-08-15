@@ -16,6 +16,7 @@ import type {
   ContractorHistory,
   DirectorReportRankingItem,
   DirectorReportsSummary,
+  DirectorDashboard,
   Operation,
   PersonnelRequest,
   Role,
@@ -1168,6 +1169,83 @@ export async function loadDirectorReports(input: {
     payrollByClient,
     payrollByContractor,
     contractorOptions: [...contractorOptions.values()].sort((a, b) => a.name.localeCompare(b.name)),
+  };
+}
+
+function dashboardMetrics(raw: any): DirectorDashboard["current"] {
+  return {
+    saleTotal: Number(raw?.sale_total ?? raw?.saleTotal ?? 0),
+    costTotal: Number(raw?.cost_total ?? raw?.costTotal ?? 0),
+    payrollTotal: Number(raw?.payroll_total ?? raw?.payrollTotal ?? 0),
+    marginTotal: Number(raw?.margin_total ?? raw?.marginTotal ?? 0),
+    marginPercent: Number(raw?.margin_percent ?? raw?.marginPercent ?? 0),
+    operationsClosed: Number(raw?.operations_closed ?? raw?.operationsClosed ?? 0),
+    operationsPending: Number(raw?.operations_pending ?? raw?.operationsPending ?? 0),
+    plannedShifts: Number(raw?.planned_shifts ?? raw?.plannedShifts ?? 0),
+    workedShifts: Number(raw?.worked_shifts ?? raw?.workedShifts ?? 0),
+    extraHours: Number(raw?.extra_hours ?? raw?.extraHours ?? 0),
+    absences: Number(raw?.absences ?? 0),
+    dischargeOperations: Number(raw?.discharge_operations ?? raw?.dischargeOperations ?? 0),
+    dischargedUnits: Number(raw?.discharged_units ?? raw?.dischargedUnits ?? 0),
+    coveragePercent: Number(raw?.coverage_percent ?? raw?.coveragePercent ?? 0),
+  };
+}
+
+export async function loadDirectorDashboard(input: {
+  startDate: string;
+  endDate: string;
+  clientId: number | null;
+  areaId: number | null;
+  operationType: string | null;
+}): Promise<DirectorDashboard> {
+  const result = await supabase.rpc("get_director_dashboard", {
+    p_start_date: input.startDate,
+    p_end_date: input.endDate,
+    p_client_id: input.clientId,
+    p_area_id: input.areaId,
+    p_operation_type: input.operationType,
+  });
+  fail(result.error);
+  const raw: any = result.data ?? {};
+  const mapPoint = (item: any) => ({
+    date: String(item.date ?? ""),
+    saleTotal: Number(item.saleTotal ?? 0), costTotal: Number(item.costTotal ?? 0),
+    payrollTotal: Number(item.payrollTotal ?? 0), marginTotal: Number(item.marginTotal ?? 0),
+    plannedShifts: Number(item.plannedShifts ?? 0), workedShifts: Number(item.workedShifts ?? 0),
+    extraHours: Number(item.extraHours ?? 0), absences: Number(item.absences ?? 0),
+    closedOperations: Number(item.closedOperations ?? 0), dischargedUnits: Number(item.dischargedUnits ?? 0),
+  });
+  const mapBreakdown = (item: any) => ({ name: cleanText(item.name), value: Number(item.value ?? 0) });
+  return {
+    generatedAt: String(raw.generatedAt ?? ""),
+    period: raw.period ?? { startDate: input.startDate, endDate: input.endDate, previousStartDate: "", previousEndDate: "" },
+    current: dashboardMetrics(raw.current),
+    previous: dashboardMetrics(raw.previous),
+    dailySeries: (raw.dailySeries ?? []).map(mapPoint),
+    clients: (raw.clients ?? []).map((item: any) => ({
+      id: Number(item.id), name: cleanText(item.name), saleTotal: Number(item.sale_total ?? 0),
+      costTotal: Number(item.cost_total ?? 0), payrollTotal: Number(item.payroll_total ?? 0),
+      marginTotal: Number(item.margin_total ?? 0), marginPercent: Number(item.margin_percent ?? 0),
+      operations: Number(item.operations ?? 0), plannedShifts: Number(item.planned_shifts ?? 0),
+      workedShifts: Number(item.worked_shifts ?? 0), extraHours: Number(item.extra_hours ?? 0),
+      dischargeOperations: Number(item.discharge_operations ?? 0), dischargedUnits: Number(item.discharged_units ?? 0),
+      coveragePercent: Number(item.coverage_percent ?? 0), saleChangePercent: Number(item.sale_change_percent ?? 0),
+      marginChangePercent: Number(item.margin_change_percent ?? 0),
+    })),
+    costComposition: (raw.costComposition ?? []).map(mapBreakdown),
+    contractStatus: (raw.contractStatus ?? []).map(mapBreakdown),
+    contractTypes: (raw.contractTypes ?? []).map(mapBreakdown),
+    tenure: (raw.tenure ?? []).map(mapBreakdown),
+    operationTypes: (raw.operationTypes ?? []).map((item: any) => ({
+      operationType: item.operation_type, operationTypeName: cleanText(item.operation_type_name),
+      operations: Number(item.operations ?? 0), workedShifts: Number(item.worked_shifts ?? 0),
+      dischargedUnits: Number(item.discharged_units ?? 0),
+    })),
+    filters: {
+      clients: (raw.filters?.clients ?? []).map((item: any) => ({ id: Number(item.id), name: cleanText(item.name) })),
+      areas: (raw.filters?.areas ?? []).map((item: any) => ({ id: Number(item.id), name: cleanText(item.name), clientId: Number(item.clientId) })),
+      operationTypes: (raw.filters?.operationTypes ?? []).map((item: any) => ({ code: item.code, name: cleanText(item.name) })),
+    },
   };
 }
 

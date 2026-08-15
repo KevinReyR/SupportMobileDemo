@@ -430,6 +430,91 @@ export interface DirectorReportsSummary {
   contractorOptions: StatisticsContractorOption[];
 }
 
+export interface DirectorDashboardMetrics {
+  saleTotal: number;
+  costTotal: number;
+  payrollTotal: number;
+  marginTotal: number;
+  marginPercent: number;
+  operationsClosed: number;
+  operationsPending: number;
+  plannedShifts: number;
+  workedShifts: number;
+  extraHours: number;
+  absences: number;
+  dischargeOperations: number;
+  dischargedUnits: number;
+  coveragePercent: number;
+}
+
+export interface DirectorDashboardDailyPoint {
+  date: string;
+  saleTotal: number;
+  costTotal: number;
+  payrollTotal: number;
+  marginTotal: number;
+  plannedShifts: number;
+  workedShifts: number;
+  extraHours: number;
+  absences: number;
+  closedOperations: number;
+  dischargedUnits: number;
+}
+
+export interface DirectorDashboardClient extends NamedRecord {
+  saleTotal: number;
+  costTotal: number;
+  payrollTotal: number;
+  marginTotal: number;
+  marginPercent: number;
+  operations: number;
+  plannedShifts: number;
+  workedShifts: number;
+  extraHours: number;
+  dischargeOperations: number;
+  dischargedUnits: number;
+  coveragePercent: number;
+  saleChangePercent: number;
+  marginChangePercent: number;
+}
+
+export interface DirectorDashboardBreakdown {
+  name: string;
+  value: number;
+}
+
+export interface DirectorDashboardOperationType {
+  operationType: OperationTypeCode;
+  operationTypeName: string;
+  operations: number;
+  workedShifts: number;
+  dischargedUnits: number;
+}
+
+export interface DirectorDashboard {
+  generatedAt: string;
+  period: {
+    startDate: string;
+    endDate: string;
+    previousStartDate: string;
+    previousEndDate: string;
+  };
+  current: DirectorDashboardMetrics;
+  previous: DirectorDashboardMetrics;
+  dailySeries: DirectorDashboardDailyPoint[];
+  clients: DirectorDashboardClient[];
+  costComposition: DirectorDashboardBreakdown[];
+  contractStatus: DirectorDashboardBreakdown[];
+  contractTypes: DirectorDashboardBreakdown[];
+  tenure: DirectorDashboardBreakdown[];
+  operationTypes: DirectorDashboardOperationType[];
+  filters: {
+    clients: NamedRecord[];
+    areas: (NamedRecord & { clientId: number })[];
+    operationTypes: { code: OperationTypeCode; name: string }[];
+  };
+}
+
 export interface OnboardingOption {
   id: number;
   name: string;

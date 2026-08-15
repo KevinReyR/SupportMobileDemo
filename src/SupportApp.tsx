@@ -31,6 +31,7 @@ import Svg, { Line, Polyline, Rect, Text as SvgText } from "react-native-svg";
 import type { Session } from "@supabase/supabase-js";
 
 import PdfViewer from "./components/pdf-viewer";
+import DirectorWebDashboard from "./components/director-web-dashboard";
 import { COLOMBIA_DEPARTMENTS, COLOMBIA_MUNICIPALITIES_BY_DEPARTMENT } from "./data/colombia-locations";
 import { buildCedulaPdfFromPhotos } from "./lib/cedula-pdf";
 import { supabase } from "./lib/supabase";
@@ -5729,6 +5730,7 @@ function ReportRankingList({
 
 function Statistics({ context, data }: { context: UserContext; data: AppData }) {
   if (context.role === "Director") {
+    if (Platform.OS === "web") return <DirectorWebDashboard />;
     return <DirectorReports context={context} data={data} />;
   }
 
