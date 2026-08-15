@@ -1382,12 +1382,13 @@ export default function DirectorWebDashboard() {
 }
 
 const styles = StyleSheet.create({
-  shell: { flex: 1, flexDirection: "row", backgroundColor: BG, minHeight: 720 },
+  shell: { flex: 1, flexDirection: "row", backgroundColor: BG },
   sidebar: {
     width: 225,
     backgroundColor: NAVY,
     paddingHorizontal: 16,
     paddingVertical: 24,
+    alignSelf: "stretch",
   },
   sidebarCollapsed: { width: 68, paddingHorizontal: 8 },
   navList: { gap: 9 },
