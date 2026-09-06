@@ -515,6 +515,48 @@ export interface DirectorDashboard {
   };
 }
 
+export interface DirectorPayrollRow {
+  id: number;
+  documentType: string;
+  documentNumber: string;
+  fullName: string;
+  clientNames: string[];
+  contractTypeNames: string[];
+  dayShifts: number;
+  nightShifts: number;
+  halfShifts: number;
+  holidayShifts: number;
+  otherShifts: number;
+  totalShifts: number;
+  extraHours: number;
+  dischargedUnits: number;
+  shiftPay: number;
+  extraHourPay: number;
+  otherPayrollPay: number;
+  monthlySalaryPay: number;
+  totalPeriod: number;
+}
+
+export interface DirectorPayrollReport {
+  generatedAt: string;
+  period: {
+    startDate: string;
+    endDate: string;
+  };
+  summary: {
+    contractors: number;
+    totalShifts: number;
+    extraHours: number;
+    dischargedUnits: number;
+    shiftPay: number;
+    extraHourPay: number;
+    otherPayrollPay: number;
+    monthlySalaryPay: number;
+    totalPayable: number;
+  };
+  rows: DirectorPayrollRow[];
+}
+
 export interface OnboardingOption {
   id: number;
   name: string;

@@ -18,16 +18,21 @@ import Svg, {
   Text as SvgText,
 } from "react-native-svg";
 
-import { loadDirectorDashboard } from "../services/data";
+import {
+  loadDirectorDashboard,
+  loadDirectorPayrollReport,
+} from "../services/data";
 import type {
   DirectorDashboard,
   DirectorDashboardBreakdown,
   DirectorDashboardClient,
   DirectorDashboardDailyPoint,
+  DirectorPayrollReport,
+  DirectorPayrollRow,
 } from "../types";
 
-type DashboardPage = "executive" | "operations" | "clients";
-type SortKey = keyof Pick<
+type DashboardPage = "executive" | "operations" | "clients" | "payroll";
+type ClientSortKey = keyof Pick<
   DirectorDashboardClient,
   | "name"
   | "saleTotal"
@@ -37,6 +42,27 @@ type SortKey = keyof Pick<
   | "operations"
   | "workedShifts"
   | "coveragePercent"
+>;
+type PayrollSortKey = keyof Pick<
+  DirectorPayrollRow,
+  | "documentType"
+  | "documentNumber"
+  | "fullName"
+  | "clientNames"
+  | "contractTypeNames"
+  | "dayShifts"
+  | "nightShifts"
+  | "halfShifts"
+  | "holidayShifts"
+  | "otherShifts"
+  | "totalShifts"
+  | "extraHours"
+  | "dischargedUnits"
+  | "shiftPay"
+  | "extraHourPay"
+  | "otherPayrollPay"
+  | "monthlySalaryPay"
+  | "totalPeriod"
 >;
 
 const NAVY = "#062B55";
@@ -153,6 +179,35 @@ function DateControl({
   });
 }
 
+function SearchControl({
+  value,
+  onChange,
+  label,
+  placeholder,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  label: string;
+  placeholder: string;
+}) {
+  return React.createElement("input", {
+    type: "search",
+    value,
+    placeholder,
+    "aria-label": label,
+    onChange: (event: any) => onChange(event.target.value),
+    style: {
+      border: 0,
+      outline: "none",
+      width: "100%",
+      color: INK,
+      background: "transparent",
+      fontSize: 14,
+      fontWeight: 600,
+    },
+  });
+}
+
 function FilterBox({
   icon,
   label,
@@ -236,6 +291,33 @@ function KpiCard({
       <Text style={styles.kpiValue}>{value}</Text>
       <Delta value={delta} />
       <Sparkline values={series} color={color} />
+    </View>
+  );
+}
+
+function SummaryCard({
+  title,
+  value,
+  detail,
+  icon,
+  color,
+}: {
+  title: string;
+  value: string;
+  detail: string;
+  icon: React.ComponentProps<typeof Ionicons>["name"];
+  color: string;
+}) {
+  return (
+    <View style={styles.kpiCard}>
+      <View style={styles.kpiHeader}>
+        <View style={[styles.iconCircle, { backgroundColor: `${color}18` }]}>
+          <Ionicons name={icon} size={23} color={color} />
+        </View>
+        <Text style={styles.kpiTitle}>{title}</Text>
+      </View>
+      <Text style={styles.kpiValue}>{value}</Text>
+      <Text style={styles.summaryCardDetail}>{detail}</Text>
     </View>
   );
 }
@@ -356,7 +438,13 @@ function LineChart({
   );
 }
 
-function DonutChart({ data }: { data: DirectorDashboardBreakdown[] }) {
+function DonutChart({
+  data,
+  valueLabel = money,
+}: {
+  data: DirectorDashboardBreakdown[];
+  valueLabel?: (value: number) => string;
+}) {
   const total = data.reduce((sum, item) => sum + item.value, 0);
   const r = 58;
   const circumference = 2 * Math.PI * r;
@@ -395,7 +483,7 @@ function DonutChart({ data }: { data: DirectorDashboardBreakdown[] }) {
           fontWeight="700"
           fill={INK}
         >
-          {money(total)}
+          {valueLabel(total)}
         </SvgText>
       </Svg>
       <View style={styles.donutLegend}>
@@ -408,7 +496,7 @@ function DonutChart({ data }: { data: DirectorDashboardBreakdown[] }) {
               ]}
             />
             <Text style={styles.breakdownName}>{item.name}</Text>
-            <Text style={styles.breakdownValue}>{money(item.value)}</Text>
+            <Text style={styles.breakdownValue}>{valueLabel(item.value)}</Text>
             <Text style={styles.breakdownPercent}>
               {total ? percent((item.value * 100) / total) : "0%"}
             </Text>
@@ -549,7 +637,7 @@ function ScatterPlot({ clients }: { clients: DirectorDashboardClient[] }) {
   );
 }
 
-async function exportWorkbook(report: DirectorDashboard) {
+async function exportClientWorkbook(report: DirectorDashboard) {
   const ExcelJS = await import("exceljs");
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("Clientes y finanzas");
@@ -635,6 +723,272 @@ async function exportWorkbook(report: DirectorDashboard) {
   URL.revokeObjectURL(url);
 }
 
+async function exportPayrollWorkbook(
+  report: DirectorPayrollReport,
+  rows: DirectorPayrollRow[],
+  clientLabel: string,
+  documentQuery: string,
+) {
+  const ExcelJS = await import("exceljs");
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("Nómina");
+  sheet.addRow(["Support Colombia — Nómina"]);
+  sheet.addRow([
+    `Período: ${report.period.startDate} a ${report.period.endDate} · Cliente: ${clientLabel} · Documento: ${documentQuery.trim() || "Todos"}`,
+  ]);
+  sheet.addRow([]);
+  sheet.addRow([
+    "Tipo documento",
+    "Número de documento",
+    "Nombre completo",
+    "Cliente(s)",
+    "Tipo(s) de contrato",
+    "Diurnos",
+    "Nocturnos",
+    "Medios turnos",
+    "Festivos",
+    "Otros turnos",
+    "Total turnos",
+    "Horas extra",
+    "Unidades descargadas",
+    "Pago turnos",
+    "Pago horas extra",
+    "Otros nómina",
+    "Salario mensual",
+    "Total período",
+  ]);
+  rows.forEach((row) =>
+    sheet.addRow([
+      row.documentType,
+      row.documentNumber,
+      row.fullName,
+      row.clientNames.join(", "),
+      row.contractTypeNames.join(", "),
+      row.dayShifts,
+      row.nightShifts,
+      row.halfShifts,
+      row.holidayShifts,
+      row.otherShifts,
+      row.totalShifts,
+      row.extraHours,
+      row.dischargedUnits,
+      row.shiftPay,
+      row.extraHourPay,
+      row.otherPayrollPay,
+      row.monthlySalaryPay,
+      row.totalPeriod,
+    ]),
+  );
+  const totalRow = sheet.addRow([
+    "TOTAL",
+    "",
+    "",
+    "",
+    "",
+    rows.reduce((sum, row) => sum + row.dayShifts, 0),
+    rows.reduce((sum, row) => sum + row.nightShifts, 0),
+    rows.reduce((sum, row) => sum + row.halfShifts, 0),
+    rows.reduce((sum, row) => sum + row.holidayShifts, 0),
+    rows.reduce((sum, row) => sum + row.otherShifts, 0),
+    rows.reduce((sum, row) => sum + row.totalShifts, 0),
+    rows.reduce((sum, row) => sum + row.extraHours, 0),
+    rows.reduce((sum, row) => sum + row.dischargedUnits, 0),
+    rows.reduce((sum, row) => sum + row.shiftPay, 0),
+    rows.reduce((sum, row) => sum + row.extraHourPay, 0),
+    rows.reduce((sum, row) => sum + row.otherPayrollPay, 0),
+    rows.reduce((sum, row) => sum + row.monthlySalaryPay, 0),
+    rows.reduce((sum, row) => sum + row.totalPeriod, 0),
+  ]);
+  sheet.getRow(1).font = { bold: true, size: 16, color: { argb: "FF092653" } };
+  sheet.getRow(4).font = { bold: true, color: { argb: "FFFFFFFF" } };
+  sheet.getRow(4).fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FF0E4386" },
+  };
+  totalRow.font = { bold: true, color: { argb: "FF092653" } };
+  totalRow.fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FFEAF2FA" },
+  };
+  sheet.views = [{ state: "frozen", xSplit: 3, ySplit: 4 }];
+  sheet.autoFilter = { from: "A4", to: "R4" };
+  sheet.columns.forEach((column, index) => {
+    column.width = index === 0
+      ? 24
+      : index === 1
+        ? 22
+        : index === 2
+          ? 32
+          : index === 3
+            ? 30
+            : index === 4
+              ? 24
+              : 16;
+  });
+  sheet.getColumn(2).numFmt = "@";
+  [6, 7, 8, 9, 10, 11, 12, 13].forEach((column) => {
+    sheet.getColumn(column).numFmt = "#,##0.##";
+  });
+  [14, 15, 16, 17, 18].forEach((column) => {
+    sheet.getColumn(column).numFmt = '"$"#,##0';
+  });
+  const buffer = await workbook.xlsx.writeBuffer();
+  const blob = new Blob([buffer], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `support-colombia-nomina-${report.period.startDate}-${report.period.endDate}.xlsx`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+const payrollMoneyKeys = new Set<PayrollSortKey>([
+  "shiftPay",
+  "extraHourPay",
+  "otherPayrollPay",
+  "monthlySalaryPay",
+  "totalPeriod",
+]);
+const payrollNumericKeys = new Set<PayrollSortKey>([
+  "dayShifts",
+  "nightShifts",
+  "halfShifts",
+  "holidayShifts",
+  "otherShifts",
+  "totalShifts",
+  "extraHours",
+  "dischargedUnits",
+  ...payrollMoneyKeys,
+]);
+
+const payrollColumns: { key: PayrollSortKey; label: string; wide?: boolean }[] = [
+  { key: "documentType", label: "Tipo documento", wide: true },
+  { key: "documentNumber", label: "Documento", wide: true },
+  { key: "fullName", label: "Nombre completo", wide: true },
+  { key: "clientNames", label: "Cliente(s)", wide: true },
+  { key: "contractTypeNames", label: "Contrato", wide: true },
+  { key: "dayShifts", label: "Diurnos" },
+  { key: "nightShifts", label: "Nocturnos" },
+  { key: "halfShifts", label: "Medios" },
+  { key: "holidayShifts", label: "Festivos" },
+  { key: "otherShifts", label: "Otros" },
+  { key: "totalShifts", label: "Total turnos" },
+  { key: "extraHours", label: "Horas extra" },
+  { key: "dischargedUnits", label: "Unid. descargadas" },
+  { key: "shiftPay", label: "Pago turnos", wide: true },
+  { key: "extraHourPay", label: "Pago extras", wide: true },
+  { key: "otherPayrollPay", label: "Otros nómina", wide: true },
+  { key: "monthlySalaryPay", label: "Salario mensual", wide: true },
+  { key: "totalPeriod", label: "Total período", wide: true },
+];
+
+function payrollRawValue(row: DirectorPayrollRow, key: PayrollSortKey) {
+  const value = row[key];
+  return Array.isArray(value) ? value.join(", ") : value;
+}
+
+function payrollDisplayValue(row: DirectorPayrollRow, key: PayrollSortKey) {
+  const value = payrollRawValue(row, key);
+  if (typeof value === "number") {
+    return payrollMoneyKeys.has(key) ? money(value) : number(value, 2);
+  }
+  return value || "—";
+}
+
+function PayrollPrintTable({
+  report,
+  rows,
+  clientLabel,
+  documentQuery,
+}: {
+  report: DirectorPayrollReport;
+  rows: DirectorPayrollRow[];
+  clientLabel: string;
+  documentQuery: string;
+}) {
+  const headerStyle = {
+    background: BLUE,
+    color: "#fff",
+    padding: "5px",
+    fontSize: "8px",
+    textAlign: "left" as const,
+  };
+  const cellStyle = {
+    borderBottom: `1px solid ${BORDER}`,
+    padding: "4px 5px",
+    fontSize: "7px",
+    color: INK,
+    verticalAlign: "top" as const,
+  };
+  return React.createElement(
+    "div",
+    { "data-payroll-print": "true", style: { display: "none" } },
+    React.createElement("h1", { style: { color: INK, margin: 0 } }, "Nómina"),
+    React.createElement(
+      "p",
+      { style: { color: MUTED, fontSize: "10px" } },
+      `Período: ${dateLabel(report.period.startDate)} – ${dateLabel(report.period.endDate)} · Cliente: ${clientLabel} · Documento: ${documentQuery.trim() || "Todos"}`,
+    ),
+    React.createElement(
+      "table",
+      { style: { borderCollapse: "collapse", width: "100%" } },
+      React.createElement(
+        "thead",
+        null,
+        React.createElement(
+          "tr",
+          null,
+          ...payrollColumns.map((column) =>
+            React.createElement("th", { key: column.key, style: headerStyle }, column.label),
+          ),
+        ),
+      ),
+      React.createElement(
+        "tbody",
+        null,
+        ...rows.map((row) =>
+          React.createElement(
+            "tr",
+            { key: row.id },
+            ...payrollColumns.map((column) =>
+              React.createElement(
+                "td",
+                { key: column.key, style: cellStyle },
+                payrollDisplayValue(row, column.key),
+              ),
+            ),
+          ),
+        ),
+        React.createElement(
+          "tr",
+          { key: "total", style: { background: "#EAF2FA", fontWeight: 700 } },
+          ...payrollColumns.map((column, index) => {
+            const total = rows.reduce((sum, row) => {
+              const value = payrollRawValue(row, column.key);
+              return sum + (typeof value === "number" ? value : 0);
+            }, 0);
+            return React.createElement(
+              "td",
+              { key: column.key, style: cellStyle },
+              index === 0
+                ? "TOTAL"
+                : payrollMoneyKeys.has(column.key)
+                  ? money(total)
+                  : payrollNumericKeys.has(column.key)
+                    ? number(total, 2)
+                    : "",
+            );
+          }),
+        ),
+      ),
+    ),
+  );
+}
+
 export default function DirectorWebDashboard() {
   const today = isoToday();
   const [startDate, setStartDate] = useState(
@@ -649,9 +1003,18 @@ export default function DirectorWebDashboard() {
   const [report, setReport] = useState<DirectorDashboard | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [sortKey, setSortKey] = useState<SortKey>("saleTotal");
+  const [sortKey, setSortKey] = useState<ClientSortKey>("saleTotal");
   const [ascending, setAscending] = useState(false);
   const [tablePage, setTablePage] = useState(0);
+  const [payrollReport, setPayrollReport] =
+    useState<DirectorPayrollReport | null>(null);
+  const [payrollLoading, setPayrollLoading] = useState(false);
+  const [payrollError, setPayrollError] = useState("");
+  const [documentQuery, setDocumentQuery] = useState("");
+  const [payrollSortKey, setPayrollSortKey] =
+    useState<PayrollSortKey>("fullName");
+  const [payrollAscending, setPayrollAscending] = useState(true);
+  const [payrollTablePage, setPayrollTablePage] = useState(0);
   useEffect(() => {
     const style = document.createElement("style");
     style.setAttribute("data-opera360-print", "true");
@@ -664,6 +1027,10 @@ export default function DirectorWebDashboard() {
       [data-dashboard-print-root="true"] > div:last-child { overflow: visible !important; }
       [data-dashboard-print-root="true"] button { display: none !important; }
       [data-dashboard-print-root="true"] svg { break-inside: avoid; }
+      [data-payroll-print-active="true"] [data-dashboard-screen="true"] { display: none !important; }
+      [data-payroll-print-active="true"] [data-payroll-print="true"] { display: block !important; }
+      [data-payroll-print="true"] thead { display: table-header-group; }
+      [data-payroll-print="true"] tr { break-inside: avoid; }
     }`;
     document.head.appendChild(style);
     return () => style.remove();
@@ -698,6 +1065,34 @@ export default function DirectorWebDashboard() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+  const refreshPayroll = useCallback(async () => {
+    if (!startDate || !endDate || startDate > endDate) {
+      setPayrollError("La fecha inicial no puede ser posterior a la fecha final.");
+      return;
+    }
+    setPayrollLoading(true);
+    setPayrollError("");
+    try {
+      setPayrollReport(
+        await loadDirectorPayrollReport({
+          startDate,
+          endDate,
+          clientId: Number(clientId) || null,
+        }),
+      );
+    } catch (cause) {
+      setPayrollError(
+        cause instanceof Error
+          ? cause.message
+          : "No fue posible cargar la nómina.",
+      );
+    } finally {
+      setPayrollLoading(false);
+    }
+  }, [clientId, endDate, startDate]);
+  useEffect(() => {
+    if (page === "payroll") refreshPayroll();
+  }, [page, refreshPayroll]);
   useEffect(() => {
     setAreaId("0");
   }, [clientId]);
@@ -716,6 +1111,73 @@ export default function DirectorWebDashboard() {
   );
   const rows = sortedClients.slice(tablePage * 8, tablePage * 8 + 8);
   const totalPages = Math.max(1, Math.ceil(sortedClients.length / 8));
+  const normalizedDocumentQuery = documentQuery
+    .normalize("NFKD")
+    .replace(/[\s.\-]/g, "")
+    .toLocaleLowerCase("es");
+  const sortedPayrollRows = useMemo(() => {
+    const filtered = (payrollReport?.rows ?? []).filter((row) =>
+      row.documentNumber
+        .normalize("NFKD")
+        .replace(/[\s.\-]/g, "")
+        .toLocaleLowerCase("es")
+        .includes(normalizedDocumentQuery),
+    );
+    return filtered.sort((a, b) => {
+      const aValue = payrollRawValue(a, payrollSortKey);
+      const bValue = payrollRawValue(b, payrollSortKey);
+      const result =
+        typeof aValue === "number" && typeof bValue === "number"
+          ? aValue - bValue
+          : String(aValue).localeCompare(String(bValue), "es", {
+              sensitivity: "base",
+            });
+      if (result !== 0) return payrollAscending ? result : -result;
+      return a.fullName.localeCompare(b.fullName, "es", {
+        sensitivity: "base",
+      });
+    });
+  }, [normalizedDocumentQuery, payrollAscending, payrollReport, payrollSortKey]);
+  const payrollRows = sortedPayrollRows.slice(
+    payrollTablePage * 20,
+    payrollTablePage * 20 + 20,
+  );
+  const payrollTotalPages = Math.max(
+    1,
+    Math.ceil(sortedPayrollRows.length / 20),
+  );
+  const filteredPayrollSummary = useMemo(
+    () => ({
+      contractors: sortedPayrollRows.filter((row) => row.totalPeriod > 0).length,
+      totalShifts: sortedPayrollRows.reduce(
+        (sum, row) => sum + row.totalShifts,
+        0,
+      ),
+      extraHours: sortedPayrollRows.reduce(
+        (sum, row) => sum + row.extraHours,
+        0,
+      ),
+      dischargedUnits: sortedPayrollRows.reduce(
+        (sum, row) => sum + row.dischargedUnits,
+        0,
+      ),
+      totalPayable: sortedPayrollRows.reduce(
+        (sum, row) => sum + row.totalPeriod,
+        0,
+      ),
+    }),
+    [sortedPayrollRows],
+  );
+  useEffect(() => {
+    setPayrollTablePage(0);
+  }, [
+    clientId,
+    documentQuery,
+    endDate,
+    payrollAscending,
+    payrollSortKey,
+    startDate,
+  ]);
   const financeDelta = (
     key:
       | "saleTotal"
@@ -741,14 +1203,34 @@ export default function DirectorWebDashboard() {
       label: "Clientes y finanzas",
       icon: "business-outline" as const,
     },
+    {
+      id: "payroll" as const,
+      label: "Nómina",
+      icon: "wallet-outline" as const,
+    },
   ];
   const filters = report?.filters;
+  const selectedClientLabel =
+    filters?.clients.find((item) => String(item.id) === clientId)?.name ??
+    "Todos";
+  const activeLoading =
+    page === "payroll"
+      ? payrollLoading || (!payrollReport && !payrollError)
+      : loading;
+  const activeError = page === "payroll" ? payrollError : error;
+  const activeRefresh = page === "payroll" ? refreshPayroll : refresh;
+  const activeGeneratedAt =
+    page === "payroll" ? payrollReport?.generatedAt : report?.generatedAt;
   const DashboardRoot = View as any;
+  const ScreenContent = View as any;
 
   return (
     <DashboardRoot
       style={styles.shell}
-      dataSet={{ dashboardPrintRoot: "true" }}
+      dataSet={{
+        dashboardPrintRoot: "true",
+        payrollPrintActive: page === "payroll" ? "true" : "false",
+      }}
     >
       <View
         style={[styles.sidebar, sidebarCollapsed && styles.sidebarCollapsed]}
@@ -827,6 +1309,10 @@ export default function DirectorWebDashboard() {
         style={styles.content}
         contentContainerStyle={styles.contentInner}
       >
+        <ScreenContent
+          dataSet={{ dashboardScreen: "true" }}
+          style={styles.screenContent}
+        >
         <View style={styles.topRow}>
           <View>
             <Text style={styles.pageTitle}>
@@ -834,14 +1320,16 @@ export default function DirectorWebDashboard() {
                 ? "Resumen ejecutivo"
                 : page === "operations"
                   ? "Operación y personal"
-                  : "Clientes y finanzas"}
+                  : page === "clients"
+                    ? "Clientes y finanzas"
+                    : "Nómina"}
             </Text>
             <Text style={styles.periodText}>
               Período actual:{" "}
               <Text style={styles.linkText}>
                 {dateLabel(startDate)} – {dateLabel(endDate)}
               </Text>
-              {report
+              {report && page !== "payroll"
                 ? `  ·  Comparado con ${dateLabel(report.period.previousStartDate)} – ${dateLabel(report.period.previousEndDate)}`
                 : ""}
             </Text>
@@ -849,6 +1337,7 @@ export default function DirectorWebDashboard() {
           <View style={styles.actionRow}>
             <Pressable
               style={styles.actionButton}
+              disabled={page === "payroll" && !payrollReport}
               onPress={() => window.print()}
             >
               <Ionicons name="document-text-outline" size={17} color={BLUE} />
@@ -856,18 +1345,29 @@ export default function DirectorWebDashboard() {
             </Pressable>
             <Pressable
               style={styles.actionButton}
-              disabled={!report}
-              onPress={() => report && exportWorkbook(report)}
+              disabled={page === "payroll" ? !payrollReport : !report}
+              onPress={() => {
+                if (page === "payroll" && payrollReport) {
+                  exportPayrollWorkbook(
+                    payrollReport,
+                    sortedPayrollRows,
+                    selectedClientLabel,
+                    documentQuery,
+                  );
+                } else if (report) {
+                  exportClientWorkbook(report);
+                }
+              }}
             >
               <Ionicons name="grid-outline" size={17} color={GREEN} />
               <Text style={styles.actionText}>Excel</Text>
             </Pressable>
-            {report ? (
+            {activeGeneratedAt ? (
               <View style={styles.updated}>
                 <Ionicons name="refresh-outline" size={17} color={BLUE} />
                 <Text style={styles.updatedText}>
                   Actualizado{`\n`}
-                  {report.generatedAt.replace("T", " ")}
+                  {activeGeneratedAt.replace("T", " ")}
                 </Text>
               </View>
             ) : null}
@@ -902,50 +1402,198 @@ export default function DirectorWebDashboard() {
               ]}
             />
           </FilterBox>
-          <FilterBox icon="business-outline" label="Área">
-            <NativeWebControl
-              ariaLabel="Área"
-              value={areaId}
-              onChange={setAreaId}
-              options={[
-                { value: "0", label: "Todas" },
-                ...(filters?.areas ?? []).map((item) => ({
-                  value: String(item.id),
-                  label: item.name,
-                })),
-              ]}
-            />
-          </FilterBox>
-          <FilterBox icon="briefcase-outline" label="Tipo de operación">
-            <NativeWebControl
-              ariaLabel="Tipo de operación"
-              value={operationType}
-              onChange={setOperationType}
-              options={[
-                { value: "", label: "Todos" },
-                ...(filters?.operationTypes ?? []).map((item) => ({
-                  value: item.code,
-                  label: item.name,
-                })),
-              ]}
-            />
-          </FilterBox>
+          {page === "payroll" ? (
+            <FilterBox icon="card-outline" label="Documento">
+              <SearchControl
+                value={documentQuery}
+                onChange={setDocumentQuery}
+                label="Buscar por número de documento"
+                placeholder="Número de documento"
+              />
+            </FilterBox>
+          ) : (
+            <>
+              <FilterBox icon="business-outline" label="Área">
+                <NativeWebControl
+                  ariaLabel="Área"
+                  value={areaId}
+                  onChange={setAreaId}
+                  options={[
+                    { value: "0", label: "Todas" },
+                    ...(filters?.areas ?? []).map((item) => ({
+                      value: String(item.id),
+                      label: item.name,
+                    })),
+                  ]}
+                />
+              </FilterBox>
+              <FilterBox icon="briefcase-outline" label="Tipo de operación">
+                <NativeWebControl
+                  ariaLabel="Tipo de operación"
+                  value={operationType}
+                  onChange={setOperationType}
+                  options={[
+                    { value: "", label: "Todos" },
+                    ...(filters?.operationTypes ?? []).map((item) => ({
+                      value: item.code,
+                      label: item.name,
+                    })),
+                  ]}
+                />
+              </FilterBox>
+            </>
+          )}
         </View>
-        {loading ? (
+        {activeLoading ? (
           <View style={styles.state}>
             <ActivityIndicator size="large" color={BLUE} />
             <Text style={styles.stateText}>
               Preparando indicadores gerenciales…
             </Text>
           </View>
-        ) : error ? (
+        ) : activeError ? (
           <View style={styles.state}>
             <Ionicons name="cloud-offline-outline" size={38} color={RED} />
-            <Text style={styles.errorText}>{error}</Text>
-            <Pressable style={styles.retry} onPress={refresh}>
+            <Text style={styles.errorText}>{activeError}</Text>
+            <Pressable style={styles.retry} onPress={activeRefresh}>
               <Text style={styles.retryText}>Reintentar</Text>
             </Pressable>
           </View>
+        ) : page === "payroll" ? (
+          payrollReport ? (
+            <>
+              <View style={styles.kpiGrid}>
+                <SummaryCard
+                  title="Total a pagar"
+                  value={money(filteredPayrollSummary.totalPayable)}
+                  detail="Valores aprobados del período"
+                  icon="cash-outline"
+                  color={GREEN}
+                />
+                <SummaryCard
+                  title="Contratistas liquidados"
+                  value={number(filteredPayrollSummary.contractors)}
+                  detail={`${number(sortedPayrollRows.length)} registros visibles`}
+                  icon="people-outline"
+                  color={BLUE}
+                />
+                <SummaryCard
+                  title="Turnos realizados"
+                  value={number(filteredPayrollSummary.totalShifts, 2)}
+                  detail="Diurnos, nocturnos, medios y festivos"
+                  icon="calendar-outline"
+                  color={CYAN}
+                />
+                <SummaryCard
+                  title="Horas extra"
+                  value={number(filteredPayrollSummary.extraHours, 2)}
+                  detail={`${number(filteredPayrollSummary.dischargedUnits, 2)} unidades descargadas`}
+                  icon="time-outline"
+                  color={ORANGE}
+                />
+              </View>
+              <Card
+                title="Detalle de nómina"
+                subtitle="Selecciona un encabezado para ordenar. Los descargues son informativos y no forman parte del total de nómina."
+              >
+                {sortedPayrollRows.length ? (
+                  <>
+                    <ScrollView horizontal style={styles.payrollTableScroll}>
+                      <View style={styles.payrollTable}>
+                        <View style={[styles.tableRow, styles.tableHeader]}>
+                          {payrollColumns.map((column) => (
+                            <Pressable
+                              key={column.key}
+                              accessibilityRole="button"
+                              accessibilityLabel={`Ordenar por ${column.label}`}
+                              style={[
+                                styles.payrollTableCell,
+                                column.wide && styles.payrollWideCell,
+                              ]}
+                              onPress={() => {
+                                if (payrollSortKey === column.key) {
+                                  setPayrollAscending(!payrollAscending);
+                                } else {
+                                  setPayrollSortKey(column.key);
+                                  setPayrollAscending(true);
+                                }
+                              }}
+                            >
+                              <Text style={styles.tableHeaderText}>
+                                {column.label}
+                                {payrollSortKey === column.key
+                                  ? payrollAscending
+                                    ? " ↑"
+                                    : " ↓"
+                                  : ""}
+                              </Text>
+                            </Pressable>
+                          ))}
+                        </View>
+                        {payrollRows.map((row) => (
+                          <View key={row.id} style={styles.tableRow}>
+                            {payrollColumns.map((column) => (
+                              <Text
+                                key={column.key}
+                                numberOfLines={2}
+                                style={[
+                                  styles.payrollTableCellText,
+                                  column.wide && styles.payrollWideCell,
+                                  column.key === "totalPeriod" &&
+                                    styles.payrollTotalCell,
+                                ]}
+                              >
+                                {payrollDisplayValue(row, column.key)}
+                              </Text>
+                            ))}
+                          </View>
+                        ))}
+                      </View>
+                    </ScrollView>
+                    <View style={styles.pagination}>
+                      <Text style={styles.payrollResultCount}>
+                        {number(sortedPayrollRows.length)} contratistas
+                      </Text>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel="Página anterior"
+                        disabled={payrollTablePage === 0}
+                        onPress={() =>
+                          setPayrollTablePage(Math.max(0, payrollTablePage - 1))
+                        }
+                        style={styles.pageButton}
+                      >
+                        <Ionicons name="chevron-back" size={17} color={INK} />
+                      </Pressable>
+                      <Text style={styles.pageText}>
+                        Página {payrollTablePage + 1} de {payrollTotalPages}
+                      </Text>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel="Página siguiente"
+                        disabled={payrollTablePage + 1 >= payrollTotalPages}
+                        onPress={() =>
+                          setPayrollTablePage(
+                            Math.min(
+                              payrollTotalPages - 1,
+                              payrollTablePage + 1,
+                            ),
+                          )
+                        }
+                        style={styles.pageButton}
+                      >
+                        <Ionicons name="chevron-forward" size={17} color={INK} />
+                      </Pressable>
+                    </View>
+                  </>
+                ) : (
+                  <Text style={styles.empty}>
+                    No hay contratistas que coincidan con los filtros.
+                  </Text>
+                )}
+              </Card>
+            </>
+          ) : null
         ) : !report ? null : page === "executive" ? (
           <>
             <View style={styles.kpiGrid}>
@@ -1151,7 +1799,7 @@ export default function DirectorWebDashboard() {
             </View>
             <View style={styles.threeColumns}>
               <Card title="Estado contractual">
-                <DonutChart data={report.contractStatus} />
+                <DonutChart data={report.contractStatus} valueLabel={number} />
               </Card>
               <Card title="Antigüedad del contrato">
                 <HorizontalBars data={report.tenure} />
@@ -1291,7 +1939,7 @@ export default function DirectorWebDashboard() {
                       ["operations", "Operaciones"],
                       ["workedShifts", "Turnos"],
                       ["coveragePercent", "Cobertura"],
-                    ] as [SortKey, string][]
+                    ] as [ClientSortKey, string][]
                   ).map(([key, label]) => (
                     <Pressable
                       key={key}
@@ -1376,6 +2024,15 @@ export default function DirectorWebDashboard() {
           Valores en COP. Las cifras pueden variar por redondeo. Información
           gerencial de acceso restringido.
         </Text>
+        </ScreenContent>
+        {page === "payroll" && payrollReport ? (
+          <PayrollPrintTable
+            report={payrollReport}
+            rows={sortedPayrollRows}
+            clientLabel={selectedClientLabel}
+            documentQuery={documentQuery}
+          />
+        ) : null}
       </ScrollView>
     </DashboardRoot>
   );
@@ -1441,6 +2098,7 @@ const styles = StyleSheet.create({
     width: "100%",
     alignSelf: "center",
   },
+  screenContent: { gap: 16 },
   flex: { flex: 1 },
   topRow: {
     flexDirection: "row",
@@ -1533,6 +2191,7 @@ const styles = StyleSheet.create({
   },
   kpiTitle: { color: INK, fontWeight: "700", fontSize: 13 },
   kpiValue: { color: INK, fontWeight: "800", fontSize: 23, marginTop: 8 },
+  summaryCardDetail: { color: MUTED, fontSize: 11, marginTop: 9 },
   deltaRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -1645,6 +2304,22 @@ const styles = StyleSheet.create({
   tableCellText: { flex: 1, paddingHorizontal: 8, color: INK, fontSize: 11 },
   clientCell: { flex: 1.5 },
   tableHeaderText: { color: INK, fontWeight: "800", fontSize: 11 },
+  payrollTableScroll: { width: "100%", marginTop: 12 },
+  payrollTable: { minWidth: 2520 },
+  payrollTableCell: {
+    width: 112,
+    flexShrink: 0,
+    paddingHorizontal: 8,
+  },
+  payrollWideCell: { width: 180 },
+  payrollTableCellText: {
+    width: 112,
+    flexShrink: 0,
+    paddingHorizontal: 8,
+    color: INK,
+    fontSize: 11,
+  },
+  payrollTotalCell: { color: GREEN, fontWeight: "800" },
   pagination: {
     flexDirection: "row",
     justifyContent: "flex-end",
@@ -1662,5 +2337,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   pageText: { color: MUTED, fontSize: 11 },
+  payrollResultCount: { color: MUTED, fontSize: 11, marginRight: "auto" },
   footerNote: { color: MUTED, fontSize: 10, marginTop: 2, marginBottom: 16 },
 });

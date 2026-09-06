@@ -17,6 +17,7 @@ import type {
   DirectorReportRankingItem,
   DirectorReportsSummary,
   DirectorDashboard,
+  DirectorPayrollReport,
   Operation,
   PersonnelRequest,
   Role,
@@ -1246,6 +1247,64 @@ export async function loadDirectorDashboard(input: {
       areas: (raw.filters?.areas ?? []).map((item: any) => ({ id: Number(item.id), name: cleanText(item.name), clientId: Number(item.clientId) })),
       operationTypes: (raw.filters?.operationTypes ?? []).map((item: any) => ({ code: item.code, name: cleanText(item.name) })),
     },
+  };
+}
+
+export async function loadDirectorPayrollReport(input: {
+  startDate: string;
+  endDate: string;
+  clientId: number | null;
+}): Promise<DirectorPayrollReport> {
+  const result = await supabase.rpc("get_director_payroll_report", {
+    p_start_date: input.startDate,
+    p_end_date: input.endDate,
+    p_client_id: input.clientId,
+  });
+  fail(result.error);
+  const raw: any = result.data ?? {};
+  const summary = raw.summary ?? {};
+  return {
+    generatedAt: String(raw.generatedAt ?? ""),
+    period: raw.period ?? {
+      startDate: input.startDate,
+      endDate: input.endDate,
+    },
+    summary: {
+      contractors: Number(summary.contractors ?? 0),
+      totalShifts: Number(summary.totalShifts ?? 0),
+      extraHours: Number(summary.extraHours ?? 0),
+      dischargedUnits: Number(summary.dischargedUnits ?? 0),
+      shiftPay: Number(summary.shiftPay ?? 0),
+      extraHourPay: Number(summary.extraHourPay ?? 0),
+      otherPayrollPay: Number(summary.otherPayrollPay ?? 0),
+      monthlySalaryPay: Number(summary.monthlySalaryPay ?? 0),
+      totalPayable: Number(summary.totalPayable ?? 0),
+    },
+    rows: (raw.rows ?? []).map((item: any) => ({
+      id: Number(item.id),
+      documentType: cleanText(item.documentType),
+      documentNumber: cleanText(item.documentNumber),
+      fullName: cleanText(item.fullName),
+      clientNames: (item.clientNames ?? []).map((value: string) =>
+        cleanText(value),
+      ),
+      contractTypeNames: (item.contractTypeNames ?? []).map((value: string) =>
+        cleanText(value),
+      ),
+      dayShifts: Number(item.dayShifts ?? 0),
+      nightShifts: Number(item.nightShifts ?? 0),
+      halfShifts: Number(item.halfShifts ?? 0),
+      holidayShifts: Number(item.holidayShifts ?? 0),
+      otherShifts: Number(item.otherShifts ?? 0),
+      totalShifts: Number(item.totalShifts ?? 0),
+      extraHours: Number(item.extraHours ?? 0),
+      dischargedUnits: Number(item.dischargedUnits ?? 0),
+      shiftPay: Number(item.shiftPay ?? 0),
+      extraHourPay: Number(item.extraHourPay ?? 0),
+      otherPayrollPay: Number(item.otherPayrollPay ?? 0),
+      monthlySalaryPay: Number(item.monthlySalaryPay ?? 0),
+      totalPeriod: Number(item.totalPeriod ?? 0),
+    })),
   };
 }
 
