@@ -1,7 +1,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { Image } from "https://deno.land/x/imagescript@1.2.17/mod.ts";
 import { PDFDocument, StandardFonts, rgb } from "https://esm.sh/pdf-lib@1.17.1";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
+import { createCorporateProfilePhoto } from "../_shared/profile-photo.ts";
 import {
   colombiaNow,
   POLICY_BUCKET,
@@ -13,7 +13,6 @@ import {
 } from "../_shared/onboarding.ts";
 
 const MAX_SELFIE_BYTES = 2_097_152;
-const CONTRACT_BUCKET = "contractor-contracts";
 const CONTRACTOR_DOCUMENT_BUCKET = "contractor-documents";
 const PENDING_CONTRACT_DOCUMENT_CODE = "CONTRATO_PENDIENTE";
 const SIGNED_CONTRACT_DOCUMENT_CODE = "CONTRATO_FIRMADO";
@@ -208,29 +207,6 @@ async function registerAppFile(
   return data.id as string;
 }
 
-async function normalizeSelfieForOpenAi(selfieBytes: Uint8Array) {
-  const source = await Image.decode(selfieBytes);
-  const normalized = source.width === 1024 && source.height === 1024 ? source : source.cover(1024, 1024);
-  return await normalized.encodeJPEG(78);
-}
-
-function blendChannel(source: number, target: number, alpha: number) {
-  return Math.round(source * alpha + target * (1 - alpha));
-}
-
-function smoothstep(edge0: number, edge1: number, value: number) {
-  const ratio = Math.min(1, Math.max(0, (value - edge0) / (edge1 - edge0)));
-  return ratio * ratio * (3 - 2 * ratio);
-}
-
-function facePatchAlpha(x: number, y: number, width: number, height: number) {
-  const faceDistance = Math.sqrt(((x - width * 0.5) / (width * 0.42)) ** 2 + ((y - height * 0.39) / (height * 0.38)) ** 2);
-  const faceAlpha = smoothstep(1.13, 0.82, faceDistance);
-  const neckDistance = Math.sqrt(((x - width * 0.5) / (width * 0.15)) ** 2 + ((y - height * 0.72) / (height * 0.16)) ** 2);
-  const neckAlpha = smoothstep(1.15, 0.62, neckDistance) * 0.82;
-  return Math.max(faceAlpha, neckAlpha);
-}
-
 async function loadShirtTemplate(serviceClient: any) {
   const { data, error } = await serviceClient.storage
     .from(POLICY_BUCKET)
@@ -241,165 +217,9 @@ async function loadShirtTemplate(serviceClient: any) {
   return new Uint8Array(await data.arrayBuffer());
 }
 
-function createShirtTemplateBase(template: Image) {
-  const width = 1024;
-  const height = 1024;
-  const templateWidth = 1024;
-  const templateHeight = Math.round(template.height * (templateWidth / template.width));
-  const resizedTemplate = template.resize(templateWidth, templateHeight);
-  const result = new Image(width, height);
-  const background = Image.rgbaToColor(235, 235, 235, 255);
-  const templateOffsetY = 110;
-
-  for (let y = 1; y <= height; y += 1) {
-    for (let x = 1; x <= width; x += 1) {
-      result.setPixelAt(x, y, background);
-    }
-  }
-
-  for (let sourceY = 1; sourceY <= resizedTemplate.height; sourceY += 1) {
-    const targetY = sourceY + templateOffsetY;
-    if (targetY < 1 || targetY > height) continue;
-    for (let sourceX = 1; sourceX <= resizedTemplate.width; sourceX += 1) {
-      if (sourceX > width) continue;
-      result.setPixelAt(sourceX, targetY, resizedTemplate.getPixelAt(sourceX, sourceY));
-    }
-  }
-
-  return result;
-}
-
-function composeFaceAndNeckOnTemplate(template: Image, selfie: Image) {
-  const base = createShirtTemplateBase(template);
-  const source = selfie.width === 1024 && selfie.height === 1024 ? selfie : selfie.cover(1024, 1024);
-  const cropX = Math.round(source.width * 0.22);
-  const cropY = 0;
-  const cropWidth = Math.round(source.width * 0.56);
-  const cropHeight = Math.round(source.height * 0.62);
-  const facePatch = source.clone().crop(cropX, cropY, cropWidth, cropHeight).resize(430, 495);
-  const offsetX = Math.round((base.width - facePatch.width) / 2);
-  const offsetY = 64;
-  const result = base.clone();
-
-  for (let patchY = 1; patchY <= facePatch.height; patchY += 1) {
-    const targetY = offsetY + patchY;
-    if (targetY < 1 || targetY > result.height) continue;
-    for (let patchX = 1; patchX <= facePatch.width; patchX += 1) {
-      const targetX = offsetX + patchX;
-      if (targetX < 1 || targetX > result.width) continue;
-      const alpha = facePatchAlpha(patchX - 1, patchY - 1, facePatch.width, facePatch.height);
-      if (alpha <= 0) continue;
-      const [sourceR, sourceG, sourceB] = Image.colorToRGBA(facePatch.getPixelAt(patchX, patchY));
-      const [targetR, targetG, targetB] = Image.colorToRGBA(result.getPixelAt(targetX, targetY));
-      result.setPixelAt(
-        targetX,
-        targetY,
-        Image.rgbaToColor(
-          blendChannel(sourceR, targetR, alpha),
-          blendChannel(sourceG, targetG, alpha),
-          blendChannel(sourceB, targetB, alpha),
-          255,
-        ),
-      );
-    }
-  }
-
-  return result;
-}
-
-async function createCorporatePhotoComposite(serviceClient: any, normalizedSelfieBytes: Uint8Array) {
-  const [templateBytes, selfie] = await Promise.all([
-    loadShirtTemplate(serviceClient),
-    Image.decode(normalizedSelfieBytes),
-  ]);
-  const template = await Image.decode(templateBytes);
-  return composeFaceAndNeckOnTemplate(template, selfie);
-}
-
-function buildPhotoHarmonizationForm(preliminaryBytes: Uint8Array, selfieBytes: Uint8Array, includeInputFidelity: boolean) {
-  const form = new FormData();
-  form.append("model", Deno.env.get("OPENAI_IMAGE_MODEL") ?? "gpt-image-1");
-  form.append("image[]", new File([preliminaryBytes], "shirt-template-composite.jpg", { type: "image/jpeg" }));
-  form.append("image[]", new File([selfieBytes], "selfie-reference.jpg", { type: "image/jpeg" }));
-  if (includeInputFidelity) form.append("input_fidelity", "high");
-  form.append(
-    "prompt",
-    [
-      "Improve only the natural integration of this already-composited corporate portrait.",
-      "Preserve the exact person's face, ears, eyes, mouth, nose, eyebrows, facial hair, skin tone, head shape, expression, age, and identity from the selfie reference.",
-      "Do not redraw, replace, beautify, retouch, smooth, reshape, age, de-age, or stylize the face.",
-      "Preserve the shirt template exactly: white Support Colombia shirt, logo, collar, buttons, proportions, and clean light background.",
-      "Only harmonize the seam between neck and shirt, subtle shadows, exposure, and lighting so the portrait looks natural.",
-      "Do not add a tie, do not change the logo, do not change the shirt color, and do not create a different person.",
-      "Final image must remain a centered head-and-shoulders employee profile photo with a clear professional background.",
-    ].join(" "),
-  );
-  form.append("size", "1024x1024");
-  form.append("quality", "low");
-  return form;
-}
-
-async function requestOpenAiPhotoHarmonization(openAiKey: string, preliminaryBytes: Uint8Array, selfieBytes: Uint8Array) {
-  const sendRequest = async (includeInputFidelity: boolean) => {
-    const response = await fetch("https://api.openai.com/v1/images/edits", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${openAiKey}` },
-      body: buildPhotoHarmonizationForm(preliminaryBytes, selfieBytes, includeInputFidelity),
-    });
-    const detail = await response.text();
-    return { ok: response.ok, detail };
-  };
-
-  let result = await sendRequest(true);
-  if (!result.ok && result.detail.toLowerCase().includes("input_fidelity")) {
-    result = await sendRequest(false);
-  }
-  if (!result.ok) {
-    throw new Error(`OpenAI image edit failed: ${result.detail}`);
-  }
-
-  const payload = JSON.parse(result.detail);
-  const imageBase64 = payload?.data?.[0]?.b64_json;
-  if (typeof imageBase64 !== "string" || !imageBase64) {
-    throw new Error("OpenAI no devolvio imagen generada.");
-  }
-  return base64ToBytes(imageBase64);
-}
-
 async function generateCorporateProfilePhoto(serviceClient: any, selfieBytes: Uint8Array) {
-  const normalizedSelfieBytes = await normalizeSelfieForOpenAi(selfieBytes);
-  const compositeImage = await createCorporatePhotoComposite(serviceClient, normalizedSelfieBytes);
-  const preliminaryBytes = await compositeImage.encodeJPEG(80);
-  const openAiKey = Deno.env.get("OPENAI_API_KEY") ?? "";
-  if (!openAiKey) return await encodeCompressedProfilePhoto(compositeImage);
-
-  try {
-    const generatedBytes = await requestOpenAiPhotoHarmonization(openAiKey, preliminaryBytes, normalizedSelfieBytes);
-    return await encodeCompressedProfilePhoto(await Image.decode(generatedBytes));
-  } catch (error) {
-    console.error("Corporate profile photo harmonization failed", error);
-    return await encodeCompressedProfilePhoto(compositeImage);
-  }
-}
-
-async function encodeCompressedProfilePhoto(image: Image) {
-  const attempts = [
-    { size: 768, quality: 78 },
-    { size: 640, quality: 70 },
-    { size: 512, quality: 66 },
-  ];
-  let current = image;
-  let lastBytes: Uint8Array | null = null;
-
-  for (const attempt of attempts) {
-    if (current.width > attempt.size || current.height > attempt.size) {
-      current = current.contain(attempt.size, attempt.size);
-    }
-    lastBytes = await current.encodeJPEG(attempt.quality);
-    if (lastBytes.byteLength <= 1_500_000) return lastBytes;
-  }
-
-  return lastBytes ?? await image.encodeJPEG(66);
+  const templateBytes = await loadShirtTemplate(serviceClient);
+  return await createCorporateProfilePhoto(templateBytes, selfieBytes);
 }
 
 function wrapText(text: string, font: any, fontSize: number, maxWidth: number) {
@@ -579,22 +399,25 @@ async function getContractValues(serviceClient: any, contractorId: number, invit
   };
 }
 
-async function uploadContractArtifact(
+async function uploadContractSignatureArtifact(
   serviceClient: any,
   contractorId: number,
-  folder: string,
   bytes: Uint8Array,
-  originalName: string,
-  mimeType: string,
 ) {
-  const extension = mimeType === "application/pdf" ? "pdf" : "png";
-  const path = `contractor/${contractorId}/contracts/${folder}/${crypto.randomUUID()}.${extension}`;
-  const upload = await serviceClient.storage.from(CONTRACT_BUCKET).upload(path, bytes, {
-    contentType: mimeType,
+  const path = `contractor/${contractorId}/FIRMA_CONTRATO/${crypto.randomUUID()}.png`;
+  const upload = await serviceClient.storage.from(CONTRACTOR_DOCUMENT_BUCKET).upload(path, bytes, {
+    contentType: "image/png",
     upsert: false,
   });
   if (upload.error) throw new Error(upload.error.message);
-  return await registerAppFile(serviceClient, CONTRACT_BUCKET, path, originalName, mimeType, bytes.byteLength);
+  return await registerAppFile(
+    serviceClient,
+    CONTRACTOR_DOCUMENT_BUCKET,
+    path,
+    "firma-contratista.png",
+    "image/png",
+    bytes.byteLength,
+  );
 }
 
 async function uploadContractPdfArtifact(
@@ -796,13 +619,10 @@ Deno.serve(async (req) => {
         CONTRACT_ACCEPTANCE_TEXT,
       ];
       const signedPdfBytes = await createContractPdf(serviceClient, contract.values, { bytes: signatureBytes, evidenceLines });
-      const signatureFileId = await uploadContractArtifact(
+      const signatureFileId = await uploadContractSignatureArtifact(
         serviceClient,
         invite.contractor_id,
-        "signatures",
         signatureBytes,
-        "firma-contratista.png",
-        "image/png",
       );
       const signedContractFileId = await uploadContractPdfArtifact(
         serviceClient,

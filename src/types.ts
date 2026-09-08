@@ -5,6 +5,7 @@ export type OperationStatus =
   | "PENDIENTE"
   | "CAMBIOS_SOLICITADOS"
   | "CERRADO";
+export type OperationTypeCode = "TURNO" | "DESCARGUE";
 export type RequestStatus = "ABIERTA" | "ASIGNADA" | "ATENDIDA" | "CANCELADA";
 
 export interface NamedRecord {
@@ -33,8 +34,14 @@ export interface Operation {
   client: string;
   areaId: number;
   area: string;
-  shiftId: number;
+  operationType: OperationTypeCode;
+  operationTypeName: string;
+  shiftId: number | null;
   shift: string;
+  serviceUnitTypeId: number | null;
+  serviceUnitType: string | null;
+  plannedUnits: number | null;
+  actualUnits: number | null;
   people: number;
   worked: number;
   extraHours: number;
@@ -51,6 +58,7 @@ export interface Assignment {
   attendanceStatus: string | null;
   workedQuantity: number;
   extraHours: number;
+  dischargedUnits: number;
   observations: string | null;
 }
 
@@ -75,11 +83,16 @@ export interface Contractor {
   document: string;
   profilePhotoFileId: string | null;
   birthDate: string;
+  birthPlace: string;
   phone: string | null;
   email: string | null;
+  emergencyContactName: string;
+  emergencyContactRelationship: string;
+  emergencyContactPhone: string;
   rh: string | null;
   eps: string | null;
   arl: string | null;
+  pensionFund: string | null;
   transport: string;
   civilState: string;
   city: string;
@@ -91,6 +104,7 @@ export interface Contractor {
   terminationDate: string | null;
   active: boolean;
   contractStatus: ContractStatus;
+  contractStartDate: string | null;
   contractTypeId: number | null;
   contractTypeName: string;
   lastClient: string;
@@ -189,6 +203,7 @@ export interface AdminArea extends NamedRecord {
 }
 
 export interface AdminShift extends NamedRecord {
+  clientId: number;
   areaId: number;
   areaName: string;
   clientName: string;
@@ -197,6 +212,8 @@ export interface AdminShift extends NamedRecord {
 
 export interface AdminServiceRate {
   id: number;
+  clientId: number;
+  areaId: number;
   shiftId: number;
   shiftName: string;
   areaName: string;
@@ -209,10 +226,32 @@ export interface AdminServiceRate {
 
 export interface AdminExtraHourRate {
   id: number;
+  clientId: number;
   areaId: number;
   areaName: string;
   clientName: string;
   salePrice: number;
+  costPrice: number | null;
+  validFrom: string;
+  validTo: string | null;
+}
+
+export interface AdminServiceUnitType extends NamedRecord {
+  code: string;
+  description: string | null;
+  isActive: boolean;
+}
+
+export interface AdminServiceUnitRate {
+  id: number;
+  clientId: number;
+  areaId: number;
+  serviceUnitTypeId: number;
+  serviceUnitTypeName: string;
+  areaName: string;
+  clientName: string;
+  salePrice: number;
+  costPrice: number;
   validFrom: string;
   validTo: string | null;
 }
@@ -244,6 +283,18 @@ export interface AdminWorkwearType extends NamedRecord {
   isActive: boolean;
 }
 
+export interface AdminWorkwearMovement {
+  id: number;
+  contractorId: number;
+  contractorName: string;
+  workwearTypeId: number;
+  workwearTypeName: string;
+  movementType: WorkwearMovementType;
+  movementDate: string;
+  quantity: number;
+  observations: string | null;
+}
+
 export interface AdminContractRecord {
   id: number;
   contractorId: number;
@@ -257,15 +308,54 @@ export interface AdminContractRecord {
   observations: string | null;
 }
 
+export type PayrollMode = "PER_SHIFT" | "MONTHLY_FIXED";
+export type PayrollPeriodStatus = "DRAFT" | "CLOSED";
+
+export interface AdminPayrollRule {
+  id: number;
+  contractTypeId: number;
+  contractTypeName: string;
+  payrollMode: PayrollMode;
+  monthlySalary: number | null;
+  validFrom: string;
+  validTo: string | null;
+  status: "ACTIVO" | "INACTIVO";
+}
+
+export interface AdminPayrollPeriod {
+  id: number;
+  contractorId: number;
+  contractorName: string;
+  document: string;
+  contractId: number;
+  ruleId: number;
+  monthlySalary: number;
+  eligibleDays: number;
+  paidDays: number;
+  baseSalaryAmount: number;
+  status: PayrollPeriodStatus;
+  calculatedAt: string;
+  closedAt: string | null;
+}
+
+export interface AdminPayrollData {
+  periodStart: string;
+  periods: AdminPayrollPeriod[];
+  rules: AdminPayrollRule[];
+}
+
 export interface AdminData {
   clients: AdminClient[];
   areas: AdminArea[];
   shifts: AdminShift[];
   serviceRates: AdminServiceRate[];
   extraHourRates: AdminExtraHourRate[];
+  serviceUnitTypes: AdminServiceUnitType[];
+  serviceUnitRates: AdminServiceUnitRate[];
   costConcepts: AdminCostConcept[];
   costRules: AdminCostRule[];
   workwearTypes: AdminWorkwearType[];
+  workwearMovements: AdminWorkwearMovement[];
   contracts: AdminContractRecord[];
 }
 
@@ -281,7 +371,190 @@ export interface StatisticsSummary {
   assignedOperations: number;
   workedShifts: number;
   extraHours: number;
+  dischargeOperations: number;
+  dischargedUnits: number;
   contractorOptions: StatisticsContractorOption[];
+}
+
+export interface DirectorReportSeries {
+  label: string;
+  date?: string;
+  saleTotal?: number;
+  contractors?: number;
+  workedShifts?: number;
+  extraHours?: number;
+  closedOperations?: number;
+  dischargeOperations?: number;
+  dischargedUnits?: number;
+}
+
+export type ReportTrendGranularity = "DAY" | "WEEK" | "MONTH";
+
+export interface DirectorReportRankingItem extends NamedRecord {
+  document?: string;
+  clientName?: string;
+  saleTotal?: number;
+  costTotal?: number;
+  payrollTotal?: number;
+  contractors?: number;
+  workedShifts?: number;
+  extraHours?: number;
+  absences?: number;
+  dischargeOperations?: number;
+  dischargedUnits?: number;
+}
+
+export interface DirectorReportsSummary {
+  saleTotal: number;
+  costTotal: number;
+  payrollTotal: number;
+  contractorsWorked: number;
+  payrollContractors: number;
+  operationsClosed: number;
+  operationsPending: number;
+  assignedOperations: number;
+  workedShifts: number;
+  plannedShifts: number;
+  extraHours: number;
+  dischargeOperations: number;
+  dischargedUnits: number;
+  absences: number;
+  clientsCount: number;
+  coveragePercent: number;
+  trendGranularity: ReportTrendGranularity;
+  trendSeries: DirectorReportSeries[];
+  clientRanking: DirectorReportRankingItem[];
+  contractorRanking: DirectorReportRankingItem[];
+  payrollByClient: DirectorReportRankingItem[];
+  payrollByContractor: DirectorReportRankingItem[];
+  contractorOptions: StatisticsContractorOption[];
+}
+
+export interface DirectorDashboardMetrics {
+  saleTotal: number;
+  costTotal: number;
+  payrollTotal: number;
+  marginTotal: number;
+  marginPercent: number;
+  operationsClosed: number;
+  operationsPending: number;
+  plannedShifts: number;
+  workedShifts: number;
+  extraHours: number;
+  absences: number;
+  dischargeOperations: number;
+  dischargedUnits: number;
+  coveragePercent: number;
+}
+
+export interface DirectorDashboardDailyPoint {
+  date: string;
+  saleTotal: number;
+  costTotal: number;
+  payrollTotal: number;
+  marginTotal: number;
+  plannedShifts: number;
+  workedShifts: number;
+  extraHours: number;
+  absences: number;
+  closedOperations: number;
+  dischargedUnits: number;
+}
+
+export interface DirectorDashboardClient extends NamedRecord {
+  saleTotal: number;
+  costTotal: number;
+  payrollTotal: number;
+  marginTotal: number;
+  marginPercent: number;
+  operations: number;
+  plannedShifts: number;
+  workedShifts: number;
+  extraHours: number;
+  dischargeOperations: number;
+  dischargedUnits: number;
+  coveragePercent: number;
+  saleChangePercent: number;
+  marginChangePercent: number;
+}
+
+export interface DirectorDashboardBreakdown {
+  name: string;
+  value: number;
+}
+
+export interface DirectorDashboardOperationType {
+  operationType: OperationTypeCode;
+  operationTypeName: string;
+  operations: number;
+  workedShifts: number;
+  dischargedUnits: number;
+}
+
+export interface DirectorDashboard {
+  generatedAt: string;
+  period: {
+    startDate: string;
+    endDate: string;
+    previousStartDate: string;
+    previousEndDate: string;
+  };
+  current: DirectorDashboardMetrics;
+  previous: DirectorDashboardMetrics;
+  dailySeries: DirectorDashboardDailyPoint[];
+  clients: DirectorDashboardClient[];
+  costComposition: DirectorDashboardBreakdown[];
+  contractStatus: DirectorDashboardBreakdown[];
+  contractTypes: DirectorDashboardBreakdown[];
+  tenure: DirectorDashboardBreakdown[];
+  operationTypes: DirectorDashboardOperationType[];
+  filters: {
+    clients: NamedRecord[];
+    areas: (NamedRecord & { clientId: number })[];
+    operationTypes: { code: OperationTypeCode; name: string }[];
+  };
+}
+
+export interface DirectorPayrollRow {
+  id: number;
+  documentType: string;
+  documentNumber: string;
+  fullName: string;
+  clientNames: string[];
+  contractTypeNames: string[];
+  dayShifts: number;
+  nightShifts: number;
+  halfShifts: number;
+  holidayShifts: number;
+  otherShifts: number;
+  totalShifts: number;
+  extraHours: number;
+  dischargedUnits: number;
+  shiftPay: number;
+  extraHourPay: number;
+  otherPayrollPay: number;
+  monthlySalaryPay: number;
+  totalPeriod: number;
+}
+
+export interface DirectorPayrollReport {
+  generatedAt: string;
+  period: {
+    startDate: string;
+    endDate: string;
+  };
+  summary: {
+    contractors: number;
+    totalShifts: number;
+    extraHours: number;
+    dischargedUnits: number;
+    shiftPay: number;
+    extraHourPay: number;
+    otherPayrollPay: number;
+    monthlySalaryPay: number;
+    totalPayable: number;
+  };
+  rows: DirectorPayrollRow[];
 }
 
 export interface OnboardingOption {
@@ -364,7 +637,7 @@ export interface AppData {
   clientContractors: ClientContractor[];
   areas: (NamedRecord & { clientId: number })[];
   shifts: (NamedRecord & { areaId: number })[];
-  services: { id: number; areaId: number }[];
+  serviceUnitTypes: NamedRecord[];
   attendanceStatuses: NamedRecord[];
   workwearTypes: NamedRecord[];
   terminationReasons: NamedRecord[];
