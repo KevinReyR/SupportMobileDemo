@@ -186,25 +186,25 @@ const MAX_CEDULA_PDF_BYTES = 1_048_576;
 
 type CedulaSide = "front" | "back";
 
-async function imageUriToBase64(uri: string) {
-  const measured = await manipulateAsync(uri, [], {
-    compress: 0.9,
-    format: SaveFormat.JPEG,
-  });
-  const squareSize = Math.min(measured.width, measured.height);
-  const originX = Math.max(0, Math.round((measured.width - squareSize) / 2));
-  const originY = Math.max(0, Math.round((measured.height - squareSize) / 2));
-  const manipulated = await manipulateAsync(measured.uri, [
+async function normalizeSelfieUri(uri: string, width: number, height: number) {
+  const squareSize = Math.min(width, height);
+  const originX = Math.max(0, Math.round((width - squareSize) / 2));
+  const originY = Math.max(0, Math.round((height - squareSize) / 2));
+  const normalized = await manipulateAsync(uri, [
     { crop: { originX, originY, width: squareSize, height: squareSize } },
     { resize: { width: 1024, height: 1024 } },
   ], {
     compress: 0.72,
     format: SaveFormat.JPEG,
   });
+  return normalized.uri;
+}
+
+async function imageUriToBase64(uri: string) {
   if (Platform.OS !== "web") {
-    return FileSystem.readAsStringAsync(manipulated.uri, { encoding: FileSystem.EncodingType.Base64 });
+    return FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
   }
-  const response = await fetch(manipulated.uri);
+  const response = await fetch(uri);
   const blob = await response.blob();
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -3485,7 +3485,8 @@ function SelfieCaptureModal({
         skipProcessing: false,
       });
       if (!photo?.uri) return;
-      setPreviewUri(photo.uri);
+      const normalizedUri = await normalizeSelfieUri(photo.uri, photo.width, photo.height);
+      setPreviewUri(normalizedUri);
       setCameraOpen(false);
     } catch (cause) {
       Alert.alert("No fue posible tomar la foto", errorMessage(cause));
@@ -3508,7 +3509,7 @@ function SelfieCaptureModal({
           <View style={styles.cameraStage}>
             {permission?.granted ? (
               <View style={styles.selfieCameraFrame}>
-                <CameraView ref={cameraRef} style={styles.cameraView} facing="front" mode="picture" />
+                <CameraView ref={cameraRef} style={styles.cameraView} facing="front" mode="picture" mirror />
                 <View pointerEvents="none" style={styles.selfieMaskOverlay}>
                   <View style={styles.selfieFaceGuide} />
                   <View style={styles.selfieNeckGuide} />
@@ -8505,13 +8506,13 @@ const styles = StyleSheet.create({
   sourceOption: { minHeight: 76, borderRadius: 16, padding: 13, flexDirection: "row", alignItems: "center", gap: 11, backgroundColor: "#FBFCFE", borderWidth: 1, borderColor: C.line },
   cameraShell: { flex: 1, backgroundColor: C.bg },
   cameraHeader: { minHeight: 76, paddingHorizontal: 18, paddingVertical: 12, flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: C.white, borderBottomWidth: 1, borderBottomColor: C.line },
-  cameraStage: { flex: 1, backgroundColor: "#080B12" },
+  cameraStage: { flex: 1, justifyContent: "center", backgroundColor: "#080B12" },
   cameraView: { flex: 1 },
-  selfieCameraFrame: { flex: 1, position: "relative", overflow: "hidden" },
+  selfieCameraFrame: { width: "100%", maxWidth: 560, aspectRatio: 1, alignSelf: "center", position: "relative", overflow: "hidden", backgroundColor: "#080B12" },
   selfieMaskOverlay: { ...StyleSheet.absoluteFillObject, alignItems: "center" },
-  selfieFaceGuide: { position: "absolute", left: "27%", top: "10%", width: "46%", height: "48%", borderRadius: 999, borderWidth: 3, borderColor: "rgba(255,255,255,0.96)", backgroundColor: "rgba(255,255,255,0.04)" },
-  selfieNeckGuide: { position: "absolute", left: "36%", top: "47%", width: "28%", height: "15%", borderRadius: 18, borderWidth: 2, borderColor: "rgba(255,255,255,0.72)", borderTopWidth: 0 },
-  selfieShoulderGuide: { position: "absolute", left: "16%", top: "61%", width: "68%", height: "18%", borderBottomWidth: 3, borderLeftWidth: 2, borderRightWidth: 2, borderColor: "rgba(255,255,255,0.76)", borderBottomLeftRadius: 90, borderBottomRightRadius: 90 },
+  selfieFaceGuide: { position: "absolute", left: "29%", top: "8%", width: "42%", height: "43%", borderRadius: 999, borderWidth: 3, borderColor: "rgba(255,255,255,0.96)", backgroundColor: "rgba(255,255,255,0.04)" },
+  selfieNeckGuide: { position: "absolute", left: "37%", top: "44%", width: "26%", height: "18%", borderRadius: 18, borderWidth: 2, borderColor: "rgba(255,255,255,0.72)", borderTopWidth: 0 },
+  selfieShoulderGuide: { position: "absolute", left: "10%", top: "58%", width: "80%", height: "20%", borderBottomWidth: 3, borderLeftWidth: 2, borderRightWidth: 2, borderColor: "rgba(255,255,255,0.76)", borderBottomLeftRadius: 90, borderBottomRightRadius: 90 },
   selfieMaskText: { position: "absolute", left: 22, right: 22, bottom: 24, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 16, overflow: "hidden", backgroundColor: "rgba(8,11,18,0.66)", color: C.white, fontSize: 13, fontWeight: "800", textAlign: "center" },
   cameraPermission: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12, padding: 24, backgroundColor: C.bg },
   cameraControls: { padding: 18, gap: 10, backgroundColor: C.white },

@@ -1,7 +1,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { Image } from "https://deno.land/x/imagescript@1.2.17/mod.ts";
 import { PDFDocument, StandardFonts, rgb } from "https://esm.sh/pdf-lib@1.17.1";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
+import { createCorporateProfilePhoto } from "../_shared/profile-photo.ts";
 import {
   colombiaNow,
   POLICY_BUCKET,
@@ -207,23 +207,6 @@ async function registerAppFile(
   return data.id as string;
 }
 
-function blendChannel(source: number, target: number, alpha: number) {
-  return Math.round(source * alpha + target * (1 - alpha));
-}
-
-function smoothstep(edge0: number, edge1: number, value: number) {
-  const ratio = Math.min(1, Math.max(0, (value - edge0) / (edge1 - edge0)));
-  return ratio * ratio * (3 - 2 * ratio);
-}
-
-function facePatchAlpha(x: number, y: number, width: number, height: number) {
-  const faceDistance = Math.sqrt(((x - width * 0.5) / (width * 0.42)) ** 2 + ((y - height * 0.39) / (height * 0.38)) ** 2);
-  const faceAlpha = smoothstep(1.08, 0.96, faceDistance);
-  const neckDistance = Math.sqrt(((x - width * 0.5) / (width * 0.15)) ** 2 + ((y - height * 0.72) / (height * 0.16)) ** 2);
-  const neckAlpha = smoothstep(1.1, 0.9, neckDistance);
-  return Math.max(faceAlpha, neckAlpha);
-}
-
 async function loadShirtTemplate(serviceClient: any) {
   const { data, error } = await serviceClient.storage
     .from(POLICY_BUCKET)
@@ -234,104 +217,9 @@ async function loadShirtTemplate(serviceClient: any) {
   return new Uint8Array(await data.arrayBuffer());
 }
 
-function createShirtTemplateBase(template: Image) {
-  const width = 1024;
-  const height = 1024;
-  const templateWidth = 1024;
-  const templateHeight = Math.round(template.height * (templateWidth / template.width));
-  const resizedTemplate = template.resize(templateWidth, templateHeight);
-  const result = new Image(width, height);
-  const background = Image.rgbaToColor(235, 235, 235, 255);
-  const templateOffsetY = 110;
-
-  for (let y = 1; y <= height; y += 1) {
-    for (let x = 1; x <= width; x += 1) {
-      result.setPixelAt(x, y, background);
-    }
-  }
-
-  for (let sourceY = 1; sourceY <= resizedTemplate.height; sourceY += 1) {
-    const targetY = sourceY + templateOffsetY;
-    if (targetY < 1 || targetY > height) continue;
-    for (let sourceX = 1; sourceX <= resizedTemplate.width; sourceX += 1) {
-      if (sourceX > width) continue;
-      result.setPixelAt(sourceX, targetY, resizedTemplate.getPixelAt(sourceX, sourceY));
-    }
-  }
-
-  return result;
-}
-
-function composeFaceAndNeckOnTemplate(template: Image, selfie: Image) {
-  const base = createShirtTemplateBase(template);
-  const source = selfie.width === 1024 && selfie.height === 1024 ? selfie : selfie.cover(1024, 1024);
-  const cropX = Math.round(source.width * 0.22);
-  const cropY = 0;
-  const cropWidth = Math.round(source.width * 0.56);
-  const cropHeight = Math.round(source.height * 0.62);
-  const facePatch = source.clone().crop(cropX, cropY, cropWidth, cropHeight).resize(430, 495);
-  const offsetX = Math.round((base.width - facePatch.width) / 2);
-  const offsetY = 64;
-  const result = base.clone();
-
-  for (let patchY = 1; patchY <= facePatch.height; patchY += 1) {
-    const targetY = offsetY + patchY;
-    if (targetY < 1 || targetY > result.height) continue;
-    for (let patchX = 1; patchX <= facePatch.width; patchX += 1) {
-      const targetX = offsetX + patchX;
-      if (targetX < 1 || targetX > result.width) continue;
-      const alpha = facePatchAlpha(patchX - 1, patchY - 1, facePatch.width, facePatch.height);
-      if (alpha <= 0) continue;
-      const [sourceR, sourceG, sourceB] = Image.colorToRGBA(facePatch.getPixelAt(patchX, patchY));
-      const [targetR, targetG, targetB] = Image.colorToRGBA(result.getPixelAt(targetX, targetY));
-      result.setPixelAt(
-        targetX,
-        targetY,
-        Image.rgbaToColor(
-          blendChannel(sourceR, targetR, alpha),
-          blendChannel(sourceG, targetG, alpha),
-          blendChannel(sourceB, targetB, alpha),
-          255,
-        ),
-      );
-    }
-  }
-
-  return result;
-}
-
-async function createCorporatePhotoComposite(serviceClient: any, selfieBytes: Uint8Array) {
-  const [templateBytes, selfie] = await Promise.all([
-    loadShirtTemplate(serviceClient),
-    Image.decode(selfieBytes),
-  ]);
-  const template = await Image.decode(templateBytes);
-  return composeFaceAndNeckOnTemplate(template, selfie);
-}
-
 async function generateCorporateProfilePhoto(serviceClient: any, selfieBytes: Uint8Array) {
-  const compositeImage = await createCorporatePhotoComposite(serviceClient, selfieBytes);
-  return await encodeCompressedProfilePhoto(compositeImage);
-}
-
-async function encodeCompressedProfilePhoto(image: Image) {
-  const attempts = [
-    { size: 768, quality: 78 },
-    { size: 640, quality: 70 },
-    { size: 512, quality: 66 },
-  ];
-  let current = image;
-  let lastBytes: Uint8Array | null = null;
-
-  for (const attempt of attempts) {
-    if (current.width > attempt.size || current.height > attempt.size) {
-      current = current.contain(attempt.size, attempt.size);
-    }
-    lastBytes = await current.encodeJPEG(attempt.quality);
-    if (lastBytes.byteLength <= 1_500_000) return lastBytes;
-  }
-
-  return lastBytes ?? await image.encodeJPEG(66);
+  const templateBytes = await loadShirtTemplate(serviceClient);
+  return await createCorporateProfilePhoto(templateBytes, selfieBytes);
 }
 
 function wrapText(text: string, font: any, fontSize: number, maxWidth: number) {
