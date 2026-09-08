@@ -4739,39 +4739,35 @@ function TerminateContractorModal({
 
   const selectedReason = reasons.find((reason) => reason.id === reasonId);
 
+  const executeTermination = async () => {
+    setSaving(true);
+    try {
+      await terminateContractor({
+        contractorId: contractor.id,
+        terminationDate,
+        reasonId,
+        observations,
+      });
+      showMessage("Contratista desvinculado", "El contrato quedó en estado INACTIVO.");
+      await onTerminated();
+    } catch (cause) {
+      showMessage("No fue posible desvincular", errorMessage(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const confirmTermination = async () => {
     if (!terminationDate || !reasonId || !observations.trim()) {
-      Alert.alert("Completa la desvinculación", "La fecha, la causa y la observación son obligatorias.");
+      showMessage("Completa la desvinculación", "La fecha, la causa y la observación son obligatorias.");
       return;
     }
 
-    Alert.alert(
+    confirmAction(
       "Confirmar desvinculación",
       `¿Deseas desvincular a ${contractor.fullName} y cancelar su contrato actual?`,
-      [
-        { text: "Cancelar", style: "cancel" },
-        {
-          text: "Desvincular",
-          style: "destructive",
-          onPress: async () => {
-            setSaving(true);
-            try {
-              await terminateContractor({
-                contractorId: contractor.id,
-                terminationDate,
-                reasonId,
-                observations,
-              });
-              Alert.alert("Contratista desvinculado", "El contrato quedó en estado INACTIVO.");
-              await onTerminated();
-            } catch (cause) {
-              Alert.alert("No fue posible desvincular", errorMessage(cause));
-            } finally {
-              setSaving(false);
-            }
-          },
-        },
-      ],
+      "Desvincular",
+      () => void executeTermination(),
     );
   };
 
