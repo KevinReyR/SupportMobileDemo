@@ -207,12 +207,6 @@ async function registerAppFile(
   return data.id as string;
 }
 
-async function normalizeSelfieForOpenAi(selfieBytes: Uint8Array) {
-  const source = await Image.decode(selfieBytes);
-  const normalized = source.width === 1024 && source.height === 1024 ? source : source.cover(1024, 1024);
-  return await normalized.encodeJPEG(78);
-}
-
 function blendChannel(source: number, target: number, alpha: number) {
   return Math.round(source * alpha + target * (1 - alpha));
 }
@@ -224,9 +218,9 @@ function smoothstep(edge0: number, edge1: number, value: number) {
 
 function facePatchAlpha(x: number, y: number, width: number, height: number) {
   const faceDistance = Math.sqrt(((x - width * 0.5) / (width * 0.42)) ** 2 + ((y - height * 0.39) / (height * 0.38)) ** 2);
-  const faceAlpha = smoothstep(1.13, 0.82, faceDistance);
+  const faceAlpha = smoothstep(1.08, 0.96, faceDistance);
   const neckDistance = Math.sqrt(((x - width * 0.5) / (width * 0.15)) ** 2 + ((y - height * 0.72) / (height * 0.16)) ** 2);
-  const neckAlpha = smoothstep(1.15, 0.62, neckDistance) * 0.82;
+  const neckAlpha = smoothstep(1.1, 0.9, neckDistance);
   return Math.max(faceAlpha, neckAlpha);
 }
 
@@ -306,79 +300,18 @@ function composeFaceAndNeckOnTemplate(template: Image, selfie: Image) {
   return result;
 }
 
-async function createCorporatePhotoComposite(serviceClient: any, normalizedSelfieBytes: Uint8Array) {
+async function createCorporatePhotoComposite(serviceClient: any, selfieBytes: Uint8Array) {
   const [templateBytes, selfie] = await Promise.all([
     loadShirtTemplate(serviceClient),
-    Image.decode(normalizedSelfieBytes),
+    Image.decode(selfieBytes),
   ]);
   const template = await Image.decode(templateBytes);
   return composeFaceAndNeckOnTemplate(template, selfie);
 }
 
-function buildPhotoHarmonizationForm(preliminaryBytes: Uint8Array, selfieBytes: Uint8Array, includeInputFidelity: boolean) {
-  const form = new FormData();
-  form.append("model", Deno.env.get("OPENAI_IMAGE_MODEL") ?? "gpt-image-1");
-  form.append("image[]", new File([preliminaryBytes], "shirt-template-composite.jpg", { type: "image/jpeg" }));
-  form.append("image[]", new File([selfieBytes], "selfie-reference.jpg", { type: "image/jpeg" }));
-  if (includeInputFidelity) form.append("input_fidelity", "high");
-  form.append(
-    "prompt",
-    [
-      "Improve only the natural integration of this already-composited corporate portrait.",
-      "Preserve the exact person's face, ears, eyes, mouth, nose, eyebrows, facial hair, skin tone, head shape, expression, age, and identity from the selfie reference.",
-      "Do not redraw, replace, beautify, retouch, smooth, reshape, age, de-age, or stylize the face.",
-      "Preserve the shirt template exactly: white Support Colombia shirt, logo, collar, buttons, proportions, and clean light background.",
-      "Only harmonize the seam between neck and shirt, subtle shadows, exposure, and lighting so the portrait looks natural.",
-      "Do not add a tie, do not change the logo, do not change the shirt color, and do not create a different person.",
-      "Final image must remain a centered head-and-shoulders employee profile photo with a clear professional background.",
-    ].join(" "),
-  );
-  form.append("size", "1024x1024");
-  form.append("quality", "low");
-  return form;
-}
-
-async function requestOpenAiPhotoHarmonization(openAiKey: string, preliminaryBytes: Uint8Array, selfieBytes: Uint8Array) {
-  const sendRequest = async (includeInputFidelity: boolean) => {
-    const response = await fetch("https://api.openai.com/v1/images/edits", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${openAiKey}` },
-      body: buildPhotoHarmonizationForm(preliminaryBytes, selfieBytes, includeInputFidelity),
-    });
-    const detail = await response.text();
-    return { ok: response.ok, detail };
-  };
-
-  let result = await sendRequest(true);
-  if (!result.ok && result.detail.toLowerCase().includes("input_fidelity")) {
-    result = await sendRequest(false);
-  }
-  if (!result.ok) {
-    throw new Error(`OpenAI image edit failed: ${result.detail}`);
-  }
-
-  const payload = JSON.parse(result.detail);
-  const imageBase64 = payload?.data?.[0]?.b64_json;
-  if (typeof imageBase64 !== "string" || !imageBase64) {
-    throw new Error("OpenAI no devolvio imagen generada.");
-  }
-  return base64ToBytes(imageBase64);
-}
-
 async function generateCorporateProfilePhoto(serviceClient: any, selfieBytes: Uint8Array) {
-  const normalizedSelfieBytes = await normalizeSelfieForOpenAi(selfieBytes);
-  const compositeImage = await createCorporatePhotoComposite(serviceClient, normalizedSelfieBytes);
-  const preliminaryBytes = await compositeImage.encodeJPEG(80);
-  const openAiKey = Deno.env.get("OPENAI_API_KEY") ?? "";
-  if (!openAiKey) return await encodeCompressedProfilePhoto(compositeImage);
-
-  try {
-    const generatedBytes = await requestOpenAiPhotoHarmonization(openAiKey, preliminaryBytes, normalizedSelfieBytes);
-    return await encodeCompressedProfilePhoto(await Image.decode(generatedBytes));
-  } catch (error) {
-    console.error("Corporate profile photo harmonization failed", error);
-    return await encodeCompressedProfilePhoto(compositeImage);
-  }
+  const compositeImage = await createCorporatePhotoComposite(serviceClient, selfieBytes);
+  return await encodeCompressedProfilePhoto(compositeImage);
 }
 
 async function encodeCompressedProfilePhoto(image: Image) {
