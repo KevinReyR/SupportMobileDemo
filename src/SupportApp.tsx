@@ -2471,7 +2471,7 @@ function InitialOperation({
       .catch((cause) => {
         setServiceUnitTypes([]);
         setServiceUnitTypeId(0);
-        Alert.alert("No fue posible cargar las unidades", errorMessage(cause));
+        showMessage("No fue posible cargar las unidades", errorMessage(cause));
       });
   }, [areaId, operationDate, operationType]);
 
@@ -2486,15 +2486,15 @@ function InitialOperation({
   const save = async () => {
     const unitCount = Number(plannedUnits);
     if (!clientId || !areaId || added.length === 0) {
-      Alert.alert("Completa el registro", "Selecciona cliente, área y al menos un contratista.");
+      showMessage("Completa el registro", "Selecciona cliente, área y al menos un contratista.");
       return;
     }
     if (operationType === "TURNO" && !shiftId) {
-      Alert.alert("Completa el registro", "Selecciona el turno.");
+      showMessage("Completa el registro", "Selecciona el turno.");
       return;
     }
     if (operationType === "DESCARGUE" && (!serviceUnitTypeId || !/^\d+(\.\d{1,2})?$/.test(plannedUnits) || unitCount <= 0)) {
-      Alert.alert("Unidades inválidas", "Selecciona el tipo de unidad e ingresa una cantidad positiva con máximo dos decimales.");
+      showMessage("Unidades inválidas", "Selecciona el tipo de unidad e ingresa una cantidad positiva con máximo dos decimales.");
       return;
     }
     setSaving(true);
@@ -2510,10 +2510,10 @@ function InitialOperation({
           contractorIds: added.map((item) => item.id),
         });
       }
-      Alert.alert("Registro guardado", "La operación quedó EN CURSO.");
+      showMessage("Registro guardado", "La operación quedó EN CURSO.");
       await onSaved();
     } catch (cause) {
-      Alert.alert("No fue posible guardar", errorMessage(cause));
+      showMessage("No fue posible guardar", errorMessage(cause));
     } finally {
       setSaving(false);
     }
