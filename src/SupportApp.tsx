@@ -60,7 +60,9 @@ import {
   loadContractorWorkwearSummary,
   loadAvailableContractorIds,
   loadAvailableDischargeContractorIds,
+  loadAvailableContractorsForOperationEdit,
   loadAvailableServiceUnits,
+  loadOperationChangeHistory,
   loadOperationAssignments,
   loadDirectorReports,
   loadStatisticsSummary,
@@ -90,6 +92,7 @@ import {
   submitContractorOnboardingForm,
   terminateContractor,
   toggleUserClient,
+  updateInProgressOperation,
   updateAdminContractor,
   updateAdminDirectPayrollPeriod,
   updateAdminUserProfile,
@@ -114,6 +117,7 @@ import type {
   DirectorReportSeries,
   DirectorReportsSummary,
   Operation,
+  OperationChangeHistoryItem,
   OperationStatus,
   PersonnelRequest,
   Role,
@@ -131,6 +135,7 @@ type Screen =
   | "admin-catalogs"
   | "operations"
   | "operation-detail"
+  | "operation-edit"
   | "initial"
   | "final"
   | "requests"
@@ -263,6 +268,7 @@ const tabsByRole: Record<Role, { label: string; icon: IconName; screen: Screen }
 
 const detailScreens: Screen[] = [
   "operation-detail",
+  "operation-edit",
   "initial",
   "final",
   "new-request",
@@ -276,6 +282,11 @@ function formatDate(value: string | null | undefined) {
   if (!value) return "Sin registro";
   const [year, month, day] = value.slice(0, 10).split("-");
   return `${day}/${month}/${year}`;
+}
+
+function formatColombiaDateTime(value: string) {
+  const [date, time = ""] = value.replace("T", " ").split(" ");
+  return `${formatDate(date)}${time ? ` ⋅ ${time.slice(0, 5)}` : ""}`;
 }
 
 function todayIso() {
@@ -673,7 +684,13 @@ export default function SupportApp() {
           context={context}
           screen={screen}
           canGoBack={!showTabs}
-          onBack={() => navigate(screen === "document-preview" ? "contractor" : activeTab)}
+          onBack={() => navigate(
+            screen === "document-preview"
+              ? "contractor"
+              : screen === "operation-edit"
+                ? "operation-detail"
+                : activeTab,
+          )}
           onLogout={() => supabase.auth.signOut()}
         />
         {error ? (
@@ -712,9 +729,21 @@ export default function SupportApp() {
                 context={context}
                 operation={selectedOperation}
                 onFinal={() => navigate("final")}
+                onEdit={() => navigate("operation-edit")}
                 onChanged={async () => {
                   await refresh();
                   navigate("operations");
+                }}
+              />
+            )}
+            {screen === "operation-edit" && selectedOperation && (
+              <EditOperation
+                context={context}
+                data={data}
+                operation={selectedOperation}
+                onSaved={async () => {
+                  await refresh();
+                  navigate("operation-detail");
                 }}
               />
             )}
@@ -1746,6 +1775,7 @@ function Header({
     "admin-catalogs": "Catálogos",
     operations: "Operaciones",
     "operation-detail": context.role === "Director" ? "Revisión de operación" : "Detalle de operación",
+    "operation-edit": "Editar operación",
     initial: "Registro inicial",
     final: "Registro final",
     requests: "Solicitudes",
@@ -2173,15 +2203,19 @@ function OperationDetail({
   context,
   operation,
   onFinal,
+  onEdit,
   onChanged,
 }: {
   context: UserContext;
   operation: Operation;
   onFinal: () => void;
+  onEdit: () => void;
   onChanged: () => void;
 }) {
   const [assignments, setAssignments] = useState<Assignment[]>([]);
+  const [changeHistory, setChangeHistory] = useState<OperationChangeHistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(context.roleCode === "DIRECTOR");
   const [reviewing, setReviewing] = useState(false);
   const [reviewText, setReviewText] = useState("");
   const [saving, setSaving] = useState(false);
@@ -2192,6 +2226,36 @@ function OperationDetail({
       .catch((cause) => showMessage("No fue posible cargar", errorMessage(cause)))
       .finally(() => setLoading(false));
   }, [operation.id]);
+
+  useEffect(() => {
+    if (context.roleCode !== "DIRECTOR") {
+      setChangeHistory([]);
+      setHistoryLoading(false);
+      return;
+    }
+    setHistoryLoading(true);
+    loadOperationChangeHistory(operation.id)
+      .then(setChangeHistory)
+      .catch((cause) => showMessage("No fue posible cargar el historial", errorMessage(cause)))
+      .finally(() => setHistoryLoading(false));
+  }, [context.roleCode, operation.id]);
+
+  const changeGroups = changeHistory.reduce<{
+    id: string;
+    changedByName: string;
+    changedAt: string;
+    entries: OperationChangeHistoryItem[];
+  }[]>((groups, entry) => {
+    const existing = groups.find((group) => group.id === entry.changeGroupId);
+    if (existing) existing.entries.push(entry);
+    else groups.push({
+      id: entry.changeGroupId,
+      changedByName: entry.changedByName,
+      changedAt: entry.changedAt,
+      entries: [entry],
+    });
+    return groups;
+  }, []);
 
   const decide = async (decision: "CERRADO" | "CAMBIOS_SOLICITADOS") => {
     if (decision === "CAMBIOS_SOLICITADOS" && !reviewText.trim()) {
@@ -2268,11 +2332,22 @@ function OperationDetail({
       <Notice icon="chatbubble-ellipses-outline" text={operation.observations || "Sin observaciones."} />
       {context.role === "Coordinador" &&
         (operation.status === "EN_CURSO" || operation.status === "CAMBIOS_SOLICITADOS") && (
-          <PrimaryButton
-            label="Registro final"
-            icon="checkmark-circle-outline"
-            onPress={onFinal}
-          />
+          operation.status === "EN_CURSO" ? (
+            <View style={styles.actionRow}>
+              <SecondaryButton label="Editar operación" icon="create-outline" onPress={onEdit} />
+              <PrimaryButton
+                label="Registro final"
+                icon="checkmark-circle-outline"
+                onPress={onFinal}
+              />
+            </View>
+          ) : (
+            <PrimaryButton
+              label="Registro final"
+              icon="checkmark-circle-outline"
+              onPress={onFinal}
+            />
+          )
         )}
       {context.role === "Director" && operation.status === "PENDIENTE" && (
         <View style={styles.actionRow}>
@@ -2291,6 +2366,34 @@ function OperationDetail({
             }
           />
         </View>
+      )}
+      {context.roleCode === "DIRECTOR" && (
+        <>
+          <SectionTitle title="Historial de cambios" action={`${changeHistory.length} cambios`} />
+          {historyLoading ? (
+            <ActivityIndicator color={C.navy} />
+          ) : changeGroups.length === 0 ? (
+            <EmptyState icon="time-outline" text="No se han realizado ediciones en esta operación." />
+          ) : (
+            changeGroups.map((group) => (
+              <View key={group.id} style={styles.card}>
+                <View style={styles.between}>
+                  <View style={styles.flex}>
+                    <Text style={styles.cardTitle}>{group.changedByName}</Text>
+                    <Text style={styles.caption}>{formatColombiaDateTime(group.changedAt)}</Text>
+                  </View>
+                  <Ionicons name="time-outline" size={20} color={C.navy} />
+                </View>
+                {group.entries.map((entry) => (
+                  <View key={entry.id} style={styles.auditEntry}>
+                    <View style={styles.auditDot} />
+                    <Text style={[styles.description, styles.flex]}>{entry.description}</Text>
+                  </View>
+                ))}
+              </View>
+            ))
+          )}
+        </>
       )}
       <Modal visible={reviewing} transparent animationType="fade" onRequestClose={() => setReviewing(false)}>
         <View style={styles.modalBackdrop}>
@@ -2592,6 +2695,402 @@ function InitialOperation({
         onClose={() => setOpenSelector(null)}
         onSelect={(id) => {
           setContractorId(id);
+          setOpenSelector(null);
+        }}
+      />
+    </Page>
+  );
+}
+
+function EditOperation({
+  context,
+  data,
+  operation,
+  onSaved,
+}: {
+  context: UserContext;
+  data: AppData;
+  operation: Operation;
+  onSaved: () => void;
+}) {
+  const [operationDate, setOperationDate] = useState(operation.date);
+  const [calendarVisible, setCalendarVisible] = useState(false);
+  const [operationType, setOperationType] = useState<"TURNO" | "DESCARGUE">(operation.operationType);
+  const [clientId, setClientId] = useState(operation.clientId);
+  const [areaId, setAreaId] = useState(operation.areaId);
+  const [shiftId, setShiftId] = useState(operation.shiftId ?? 0);
+  const [serviceUnitTypes, setServiceUnitTypes] = useState(data.serviceUnitTypes);
+  const [serviceUnitTypeId, setServiceUnitTypeId] = useState(operation.serviceUnitTypeId ?? 0);
+  const [plannedUnits, setPlannedUnits] = useState(
+    operation.plannedUnits === null ? "" : String(operation.plannedUnits),
+  );
+  const [selectedContractorIds, setSelectedContractorIds] = useState<number[]>([]);
+  const [originalContractorIds, setOriginalContractorIds] = useState<number[]>([]);
+  const [availableContractorIds, setAvailableContractorIds] = useState<number[]>([]);
+  const [selectedContractorId, setSelectedContractorId] = useState(0);
+  const [openSelector, setOpenSelector] = useState<
+    "operationType" | "client" | "area" | "shift" | "serviceUnitType" | "contractor" | null
+  >(null);
+  const [loading, setLoading] = useState(true);
+  const [loadingAvailability, setLoadingAvailability] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  const availableAreas = data.areas.filter((area) => area.clientId === clientId);
+  const availableShifts = data.shifts.filter((shift) => shift.areaId === areaId);
+  const activeContractors = data.contractors.filter((contractor) => contractor.active);
+
+  useEffect(() => {
+    loadOperationAssignments(operation.id)
+      .then((rows) => {
+        const ids = rows.map((row) => row.contractorId).sort((a, b) => a - b);
+        setSelectedContractorIds(ids);
+        setOriginalContractorIds(ids);
+      })
+      .catch((cause) => showMessage("No fue posible cargar la operación", errorMessage(cause)))
+      .finally(() => setLoading(false));
+  }, [operation.id]);
+
+  useEffect(() => {
+    if (!availableAreas.some((area) => area.id === areaId)) {
+      setAreaId(availableAreas[0]?.id ?? 0);
+    }
+  }, [areaId, availableAreas]);
+
+  useEffect(() => {
+    if (!availableShifts.some((shift) => shift.id === shiftId)) {
+      setShiftId(availableShifts[0]?.id ?? 0);
+    }
+  }, [availableShifts, shiftId]);
+
+  useEffect(() => {
+    if (operationType !== "DESCARGUE" || !areaId) return;
+    loadAvailableServiceUnits(areaId, operationDate)
+      .then((rows) => {
+        setServiceUnitTypes(rows);
+        setServiceUnitTypeId((current) => (
+          rows.some((item) => item.id === current) ? current : rows[0]?.id ?? 0
+        ));
+      })
+      .catch((cause) => {
+        setServiceUnitTypes([]);
+        setServiceUnitTypeId(0);
+        showMessage("No fue posible cargar las unidades", errorMessage(cause));
+      });
+  }, [areaId, operationDate, operationType]);
+
+  useEffect(() => {
+    setLoadingAvailability(true);
+    loadAvailableContractorsForOperationEdit(operation.id, operationDate, operationType)
+      .then((ids) => {
+        setAvailableContractorIds(ids);
+        setSelectedContractorId((current) => {
+          const selectable = activeContractors.find(
+            (contractor) => ids.includes(contractor.id) && !selectedContractorIds.includes(contractor.id),
+          );
+          return ids.includes(current) && !selectedContractorIds.includes(current)
+            ? current
+            : selectable?.id ?? 0;
+        });
+      })
+      .catch((cause) => {
+        setAvailableContractorIds([]);
+        showMessage("No fue posible validar el personal", errorMessage(cause));
+      })
+      .finally(() => setLoadingAvailability(false));
+  }, [data.contractors, operation.id, operationDate, operationType, selectedContractorIds]);
+
+  const conflictingContractors = selectedContractorIds
+    .filter((id) => !availableContractorIds.includes(id))
+    .map((id) => data.contractors.find((contractor) => contractor.id === id))
+    .filter(Boolean) as Contractor[];
+
+  const selectableContractors = activeContractors.filter(
+    (contractor) =>
+      availableContractorIds.includes(contractor.id)
+      && !selectedContractorIds.includes(contractor.id),
+  );
+
+  const buildChangeSummary = () => {
+    const changes: string[] = [];
+    if (operation.date !== operationDate) changes.push(`Fecha: ${formatDate(operation.date)} → ${formatDate(operationDate)}`);
+    if (operation.clientId !== clientId) {
+      changes.push(`Cliente: ${operation.client} → ${context.clients.find((item) => item.id === clientId)?.name ?? "Nuevo cliente"}`);
+    }
+    if (operation.areaId !== areaId) {
+      changes.push(`Área: ${operation.area} → ${availableAreas.find((item) => item.id === areaId)?.name ?? "Nueva área"}`);
+    }
+    if (operation.operationType !== operationType) {
+      changes.push(`Tipo: ${operation.operationType === "TURNO" ? "Turno" : "Descargue"} → ${operationType === "TURNO" ? "Turno" : "Descargue"}`);
+    }
+    if (operationType === "TURNO" && operation.shiftId !== shiftId) {
+      changes.push(`Turno: ${operation.shift} → ${availableShifts.find((item) => item.id === shiftId)?.name ?? "Nuevo turno"}`);
+    }
+    if (operationType === "DESCARGUE" && operation.serviceUnitTypeId !== serviceUnitTypeId) {
+      changes.push(`Tipo de unidad: ${operation.serviceUnitType ?? "Sin unidad"} → ${serviceUnitTypes.find((item) => item.id === serviceUnitTypeId)?.name ?? "Nueva unidad"}`);
+    }
+    if (operationType === "DESCARGUE" && Number(operation.plannedUnits ?? 0) !== Number(plannedUnits)) {
+      changes.push(`Unidades planeadas: ${operation.plannedUnits ?? 0} → ${plannedUnits}`);
+    }
+    const addedIds = selectedContractorIds.filter((id) => !originalContractorIds.includes(id));
+    const removedIds = originalContractorIds.filter((id) => !selectedContractorIds.includes(id));
+    if (addedIds.length) changes.push(`${addedIds.length} contratista(s) añadido(s)`);
+    if (removedIds.length) changes.push(`${removedIds.length} contratista(s) retirado(s)`);
+    return changes;
+  };
+
+  const save = () => {
+    const unitCount = Number(plannedUnits);
+    if (!clientId || !areaId || selectedContractorIds.length === 0) {
+      showMessage("Completa la operación", "Selecciona cliente, área y al menos un contratista.");
+      return;
+    }
+    if (operationType === "TURNO" && !shiftId) {
+      showMessage("Completa la operación", "Selecciona el turno.");
+      return;
+    }
+    if (
+      operationType === "DESCARGUE"
+      && (!serviceUnitTypeId || !/^\d+(\.\d{1,2})?$/.test(plannedUnits) || unitCount <= 0)
+    ) {
+      showMessage("Unidades inválidas", "Selecciona el tipo de unidad e ingresa una cantidad positiva con máximo dos decimales.");
+      return;
+    }
+    if (conflictingContractors.length > 0) {
+      showMessage(
+        "Personal no disponible",
+        "Retira los contratistas marcados como no disponibles antes de guardar.",
+      );
+      return;
+    }
+
+    const changes = buildChangeSummary();
+    if (changes.length === 0) {
+      showMessage("Sin cambios", "No realizaste cambios en la operación.");
+      return;
+    }
+
+    confirmAction(
+      "Guardar cambios",
+      `Se registrarán los siguientes cambios:\n\n${changes.map((item) => `• ${item}`).join("\n")}`,
+      "Guardar",
+      () => void (async () => {
+        setSaving(true);
+        try {
+          const changedItems = await updateInProgressOperation({
+            operationId: operation.id,
+            date: operationDate,
+            clientId,
+            areaId,
+            operationType,
+            shiftId: operationType === "TURNO" ? shiftId : null,
+            serviceUnitTypeId: operationType === "DESCARGUE" ? serviceUnitTypeId : null,
+            plannedUnits: operationType === "DESCARGUE" ? unitCount : null,
+            contractorIds: [...selectedContractorIds].sort((a, b) => a - b),
+          });
+          if (changedItems === 0) {
+            showMessage("Sin cambios", "La operación ya tenía estos valores.");
+            return;
+          }
+          showMessage("Operación actualizada", `Se registraron ${changedItems} cambios en el historial.`);
+          await onSaved();
+        } catch (cause) {
+          showMessage("No fue posible guardar", errorMessage(cause));
+        } finally {
+          setSaving(false);
+        }
+      })(),
+    );
+  };
+
+  return (
+    <Page>
+      <FormCard title="Información de la operación">
+        <Choice
+          label="Fecha *"
+          value={formatDate(operationDate)}
+          icon="calendar-outline"
+          onPress={() => setCalendarVisible(true)}
+        />
+        <Choice
+          label="Tipo de operación *"
+          value={operationType === "TURNO" ? "Turno" : "Descargue"}
+          icon="swap-horizontal-outline"
+          onPress={() => setOpenSelector("operationType")}
+        />
+        <Choice
+          label="Cliente *"
+          value={context.clients.find((item) => item.id === clientId)?.name ?? "Selecciona un cliente"}
+          icon="business-outline"
+          onPress={() => setOpenSelector("client")}
+        />
+        <Choice
+          label="Área *"
+          value={availableAreas.find((item) => item.id === areaId)?.name ?? "Selecciona un área"}
+          icon="location-outline"
+          disabled={!clientId || availableAreas.length === 0}
+          onPress={() => setOpenSelector("area")}
+        />
+        {operationType === "TURNO" ? (
+          <Choice
+            label="Turno *"
+            value={availableShifts.find((item) => item.id === shiftId)?.name ?? "Selecciona un turno"}
+            icon="time-outline"
+            disabled={!areaId || availableShifts.length === 0}
+            onPress={() => setOpenSelector("shift")}
+          />
+        ) : (
+          <>
+            <Choice
+              label="Tipo de unidad *"
+              value={serviceUnitTypes.find((item) => item.id === serviceUnitTypeId)?.name ?? "Selecciona una unidad"}
+              icon="cube-outline"
+              disabled={!areaId || serviceUnitTypes.length === 0}
+              onPress={() => setOpenSelector("serviceUnitType")}
+            />
+            <Text style={styles.fieldLabel}>Unidades planeadas *</Text>
+            <TextInput
+              value={plannedUnits}
+              onChangeText={(value) => /^\d*(\.\d{0,2})?$/.test(value) && setPlannedUnits(value)}
+              keyboardType="decimal-pad"
+              placeholder="0.00"
+              placeholderTextColor="#929BAD"
+              style={styles.input}
+            />
+          </>
+        )}
+      </FormCard>
+
+      <SectionTitle title={`Personal asignado (${selectedContractorIds.length})`} />
+      {loading ? (
+        <ActivityIndicator color={C.navy} />
+      ) : (
+        <View style={styles.boundedList}>
+          <ScrollView nestedScrollEnabled>
+            {selectedContractorIds.map((id) => {
+              const contractor = data.contractors.find((item) => item.id === id);
+              if (!contractor) return null;
+              const hasConflict = !availableContractorIds.includes(id);
+              return (
+                <View key={id} style={styles.personRow}>
+                  <Initials name={contractor.fullName} />
+                  <View style={styles.flex}>
+                    <Text style={styles.personName}>{contractor.fullName}</Text>
+                    <Text style={[styles.caption, hasConflict && { color: C.red }]}>
+                      {hasConflict ? "No disponible para la fecha o tipo seleccionado" : contractor.document}
+                    </Text>
+                  </View>
+                  <Pressable onPress={() => setSelectedContractorIds((ids) => ids.filter((item) => item !== id))}>
+                    <Ionicons name="trash-outline" size={20} color={C.red} />
+                  </Pressable>
+                </View>
+              );
+            })}
+          </ScrollView>
+        </View>
+      )}
+
+      {conflictingContractors.length > 0 && (
+        <Notice
+          icon="alert-circle-outline"
+          tone="error"
+          text={`Retira antes de guardar: ${conflictingContractors.map((item) => item.fullName).join(", ")}.`}
+        />
+      )}
+
+      <SecondaryButton
+        label={loadingAvailability ? "Validando disponibilidad..." : "Añadir contratista"}
+        icon="person-add-outline"
+        disabled={loadingAvailability || selectableContractors.length === 0}
+        onPress={() => setOpenSelector("contractor")}
+      />
+      <PrimaryButton
+        label={saving ? "Guardando..." : "Guardar cambios"}
+        icon="save-outline"
+        disabled={saving || loading || loadingAvailability || conflictingContractors.length > 0}
+        onPress={save}
+      />
+
+      <CalendarModal
+        visible={calendarVisible}
+        selectedDate={operationDate}
+        title="Fecha de la operación"
+        subtitle="Selecciona la nueva fecha de la operación."
+        onClose={() => setCalendarVisible(false)}
+        onSelect={(date) => {
+          setOperationDate(date);
+          setCalendarVisible(false);
+        }}
+      />
+      <DropdownModal
+        visible={openSelector === "operationType"}
+        title="Tipo de operación"
+        options={[{ id: 1, name: "Turno" }, { id: 2, name: "Descargue" }]}
+        selectedId={operationType === "TURNO" ? 1 : 2}
+        onClose={() => setOpenSelector(null)}
+        onSelect={(id) => {
+          setOperationType(id === 1 ? "TURNO" : "DESCARGUE");
+          setOpenSelector(null);
+        }}
+      />
+      <DropdownModal
+        visible={openSelector === "client"}
+        title="Seleccionar cliente"
+        options={context.clients}
+        selectedId={clientId}
+        onClose={() => setOpenSelector(null)}
+        onSelect={(id) => {
+          setClientId(id);
+          setOpenSelector(null);
+        }}
+      />
+      <DropdownModal
+        visible={openSelector === "area"}
+        title="Seleccionar área"
+        options={availableAreas}
+        selectedId={areaId}
+        onClose={() => setOpenSelector(null)}
+        onSelect={(id) => {
+          setAreaId(id);
+          setOpenSelector(null);
+        }}
+      />
+      <DropdownModal
+        visible={openSelector === "shift"}
+        title="Seleccionar turno"
+        options={availableShifts}
+        selectedId={shiftId}
+        onClose={() => setOpenSelector(null)}
+        onSelect={(id) => {
+          setShiftId(id);
+          setOpenSelector(null);
+        }}
+      />
+      <DropdownModal
+        visible={openSelector === "serviceUnitType"}
+        title="Seleccionar tipo de unidad"
+        options={serviceUnitTypes}
+        selectedId={serviceUnitTypeId}
+        onClose={() => setOpenSelector(null)}
+        onSelect={(id) => {
+          setServiceUnitTypeId(id);
+          setOpenSelector(null);
+        }}
+      />
+      <DropdownModal
+        visible={openSelector === "contractor"}
+        title="Añadir contratista"
+        options={selectableContractors.map((contractor) => ({
+          id: contractor.id,
+          name: contractor.fullName,
+          detail: contractor.document,
+        }))}
+        selectedId={selectedContractorId}
+        searchable
+        searchPlaceholder="Buscar contratista por nombre"
+        onClose={() => setOpenSelector(null)}
+        onSelect={(id) => {
+          setSelectedContractorIds((ids) => [...ids, id].sort((a, b) => a - b));
+          setSelectedContractorId(0);
           setOpenSelector(null);
         }}
       />
@@ -8448,6 +8947,8 @@ const styles = StyleSheet.create({
   destructiveButton: { borderColor: C.red },
   buttonDisabled: { opacity: 0.45 },
   actionRow: { flexDirection: "row", gap: 10 },
+  auditEntry: { flexDirection: "row", alignItems: "flex-start", gap: 9, marginTop: 12 },
+  auditDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: C.orange, marginTop: 7 },
   rowActions: { flexDirection: "row", gap: 10 },
   kpiRow: { flexDirection: "row", gap: 10 },
   kpi: { flex: 1, minHeight: 105, borderRadius: 17, padding: 13, backgroundColor: C.white, borderWidth: 1, borderColor: C.line, gap: 5 },
