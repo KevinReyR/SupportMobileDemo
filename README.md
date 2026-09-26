@@ -48,6 +48,14 @@ npm run export:web
 npx expo install --check
 ```
 
+## Publicación web
+
+- `main` es la única rama de producción y cada cambio debe entrar mediante un pull request.
+- Netlify crea un Deploy Preview para cada pull request; estos previews son solo para validación y no deben publicarse manualmente como producción.
+- Al integrar un pull request en `main`, Netlify debe generar el despliegue de producción desde el commit integrado.
+- Antes del merge deben aprobarse el check `quality` de GitHub Actions y el Deploy Preview de Netlify.
+- Las ramas `develop`, `codex/continue-support-mobile` y `agent/improve-admin-rates-ux` se conservan como referencias de trabajo hasta que se acuerde su retiro.
+
 ## Expo Go en iOS físico
 
 Permita el acceso de Expo Go a **Red local** en Ajustes de iOS. Si el dispositivo
