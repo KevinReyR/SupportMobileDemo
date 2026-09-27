@@ -19,6 +19,8 @@ import type {
   DirectorDashboard,
   DirectorPayrollReport,
   Operation,
+  OperationChangeHistoryItem,
+  OperationEditInput,
   PersonnelRequest,
   Role,
   RoleCode,
@@ -160,7 +162,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
     supabase
       .from("operation")
       .select(
-        "id,operation_date,client_id,area_id,operation_type_id,shift_id,service_unit_type_id,planned_units,actual_units,status,observations,review_observations,clients(name),area(name),operation_type(code,name),shift(name),service_unit_type(name),operation_assignment(id,contractor_id,planned_quantity,worked_quantity,extra_hours)",
+        "id,operation_date,client_id,area_id,operation_type_id,shift_id,service_unit_type_id,planned_units,actual_units,status,observations,review_observations,clients(name),area(name),operation_type(code,name),shift(name),service_unit_type(name),operation_assignment(id,contractor_id,planned_quantity,worked_quantity,extra_hours,deleted_at)",
       )
       .order("operation_date", { ascending: false })
       .order("id", { ascending: false }),
@@ -181,7 +183,9 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
   common.forEach((result) => fail(result.error));
 
   const operations: Operation[] = (common[2].data ?? []).map((row: any) => {
-    const assignments = row.operation_assignment ?? [];
+    const assignments = (row.operation_assignment ?? []).filter(
+      (assignment: any) => assignment.deleted_at === null,
+    );
     return {
       id: row.id,
       date: row.operation_date,
@@ -902,6 +906,57 @@ export async function createDischargeOperation(input: {
   });
   fail(result.error);
   return Number(result.data);
+}
+
+export async function loadAvailableContractorsForOperationEdit(
+  operationId: number,
+  date: string,
+  operationType: "TURNO" | "DESCARGUE",
+): Promise<number[]> {
+  const result = await supabase.rpc("get_available_contractors_for_operation_edit", {
+    p_operation_id: operationId,
+    p_operation_date: date,
+    p_operation_type_code: operationType,
+  });
+  fail(result.error);
+  return (result.data ?? []).map((row: any) => Number(row.contractor_id));
+}
+
+export async function updateInProgressOperation(input: OperationEditInput): Promise<number> {
+  const result = await supabase.rpc("update_in_progress_operation", {
+    p_operation_id: input.operationId,
+    p_operation_date: input.date,
+    p_client_id: input.clientId,
+    p_area_id: input.areaId,
+    p_operation_type_code: input.operationType,
+    p_shift_id: input.operationType === "TURNO" ? input.shiftId : null,
+    p_service_unit_type_id:
+      input.operationType === "DESCARGUE" ? input.serviceUnitTypeId : null,
+    p_planned_units: input.operationType === "DESCARGUE" ? input.plannedUnits : null,
+    p_contractor_ids: input.contractorIds,
+  });
+  fail(result.error);
+  return Number(result.data ?? 0);
+}
+
+export async function loadOperationChangeHistory(
+  operationId: number,
+): Promise<OperationChangeHistoryItem[]> {
+  const result = await supabase.rpc("get_operation_change_history", {
+    p_operation_id: operationId,
+  });
+  fail(result.error);
+  return (result.data ?? []).map((row: any) => ({
+    id: Number(row.history_id),
+    changeGroupId: row.change_group_id,
+    changeType: row.change_type,
+    description: cleanText(row.description),
+    oldValue: row.old_value ?? null,
+    newValue: row.new_value ?? null,
+    changedBy: row.changed_by,
+    changedByName: cleanText(row.changed_by_name) || "Coordinador",
+    changedAt: row.changed_at,
+  }));
 }
 
 export async function finalizeOperation(

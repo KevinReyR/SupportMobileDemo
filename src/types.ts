@@ -51,6 +51,30 @@ export interface Operation {
   reviewObservations: string | null;
 }
 
+export interface OperationEditInput {
+  operationId: number;
+  date: string;
+  clientId: number;
+  areaId: number;
+  operationType: OperationTypeCode;
+  shiftId: number | null;
+  serviceUnitTypeId: number | null;
+  plannedUnits: number | null;
+  contractorIds: number[];
+}
+
+export interface OperationChangeHistoryItem {
+  id: number;
+  changeGroupId: string;
+  changeType: string;
+  description: string;
+  oldValue: Record<string, unknown> | null;
+  newValue: Record<string, unknown> | null;
+  changedBy: string;
+  changedByName: string;
+  changedAt: string;
+}
+
 export interface Assignment {
   assignmentId: number;
   contractorId: number;
