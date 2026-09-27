@@ -71,6 +71,7 @@ export interface PersonnelRequest {
   quantity: number;
   description: string;
   requiredDate: string;
+  requiredEndDate: string;
   status: RequestStatus;
 }
 

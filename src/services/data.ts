@@ -166,7 +166,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       .order("id", { ascending: false }),
     supabase
       .from("personnel_request")
-      .select("id,client_id,area_id,required_quantity,description,required_date,status,clients(name),area(name)")
+      .select("id,client_id,area_id,required_quantity,description,required_date,required_end_date,status,clients(name),area(name)")
       .order("required_date", { ascending: false }),
     supabase.from("area").select("id,name,client_id").eq("is_active", true).order("id"),
     supabase.from("shift").select("id,name,area_id").eq("is_active", true).order("area_id").order("id"),
@@ -221,6 +221,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
     quantity: row.required_quantity,
       description: cleanText(row.description),
     requiredDate: row.required_date,
+    requiredEndDate: row.required_end_date,
     status: row.status,
   }));
 
@@ -1387,6 +1388,7 @@ export async function createPersonnelRequest(input: {
   quantity: number;
   description: string;
   requiredDate: string;
+  requiredEndDate: string;
   userId: string;
 }) {
   const result = await supabase.from("personnel_request").insert({
@@ -1395,6 +1397,7 @@ export async function createPersonnelRequest(input: {
     required_quantity: input.quantity,
     description: input.description,
     required_date: input.requiredDate,
+    required_end_date: input.requiredEndDate,
     status: "ABIERTA",
     created_by: input.userId,
   });

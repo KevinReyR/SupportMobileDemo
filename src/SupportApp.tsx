@@ -278,6 +278,12 @@ function formatDate(value: string | null | undefined) {
   return `${day}/${month}/${year}`;
 }
 
+function formatDateRange(startDate: string, endDate: string) {
+  return startDate === endDate
+    ? formatDate(startDate)
+    : `${formatDate(startDate)} – ${formatDate(endDate)}`;
+}
+
 function todayIso() {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Bogota",
@@ -2137,6 +2143,176 @@ function CalendarModal({
   );
 }
 
+function DateRangeCalendarModal({
+  visible,
+  startDate,
+  endDate,
+  minimumDate,
+  onClose,
+  onApply,
+}: {
+  visible: boolean;
+  startDate: string;
+  endDate: string;
+  minimumDate: string;
+  onClose: () => void;
+  onApply: (startDate: string, endDate: string) => void;
+}) {
+  const initialDate = isoToDate(startDate);
+  const [visibleMonth, setVisibleMonth] = useState(
+    new Date(initialDate.getFullYear(), initialDate.getMonth(), 1),
+  );
+  const [draftStartDate, setDraftStartDate] = useState(startDate);
+  const [draftEndDate, setDraftEndDate] = useState(endDate);
+  const [selectingEndDate, setSelectingEndDate] = useState(false);
+
+  useEffect(() => {
+    if (!visible) return;
+    const date = isoToDate(startDate);
+    setVisibleMonth(new Date(date.getFullYear(), date.getMonth(), 1));
+    setDraftStartDate(startDate);
+    setDraftEndDate(endDate);
+    setSelectingEndDate(false);
+  }, [endDate, startDate, visible]);
+
+  const monthLabel = new Intl.DateTimeFormat("es-CO", {
+    month: "long",
+    year: "numeric",
+  }).format(visibleMonth);
+  const firstWeekday = visibleMonth.getDay();
+  const daysInMonth = new Date(
+    visibleMonth.getFullYear(),
+    visibleMonth.getMonth() + 1,
+    0,
+  ).getDate();
+  const cells = Array.from({ length: firstWeekday + daysInMonth }, (_, index) =>
+    index < firstWeekday ? null : index - firstWeekday + 1,
+  );
+
+  const moveMonth = (offset: number) => {
+    setVisibleMonth(
+      new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() + offset, 1),
+    );
+  };
+  const moveYear = (offset: number) => {
+    setVisibleMonth(
+      new Date(visibleMonth.getFullYear() + offset, visibleMonth.getMonth(), 1),
+    );
+  };
+  const selectDate = (date: string) => {
+    if (date < minimumDate) return;
+    if (!selectingEndDate) {
+      setDraftStartDate(date);
+      setDraftEndDate(date);
+      setSelectingEndDate(true);
+      return;
+    }
+    if (date < draftStartDate) {
+      setDraftStartDate(date);
+      setDraftEndDate(date);
+      return;
+    }
+    setDraftEndDate(date);
+    setSelectingEndDate(false);
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.calendarCard}>
+          <View style={styles.between}>
+            <View style={styles.flex}>
+              <Text style={styles.formTitle}>Selecciona las fechas requeridas</Text>
+              <Text style={styles.caption}>
+                {selectingEndDate
+                  ? `Inicio: ${formatDate(draftStartDate)} · Selecciona la fecha final.`
+                  : `Rango: ${formatDateRange(draftStartDate, draftEndDate)}`}
+              </Text>
+            </View>
+            <Pressable style={styles.iconButton} onPress={onClose}>
+              <Ionicons name="close" size={20} color={C.ink} />
+            </Pressable>
+          </View>
+          <View style={styles.calendarNavigation}>
+            <Pressable style={styles.calendarArrowSmall} onPress={() => moveYear(-1)}>
+              <Ionicons name="play-back" size={17} color={C.navy} />
+            </Pressable>
+            <Pressable style={styles.calendarArrow} onPress={() => moveMonth(-1)}>
+              <Ionicons name="chevron-back" size={20} color={C.navy} />
+            </Pressable>
+            <View style={styles.calendarMonthButton}>
+              <Text style={styles.calendarMonth}>
+                {monthLabel.charAt(0).toUpperCase() + monthLabel.slice(1)}
+              </Text>
+              <Text style={styles.caption}>Primero inicio, luego fin</Text>
+            </View>
+            <Pressable style={styles.calendarArrow} onPress={() => moveMonth(1)}>
+              <Ionicons name="chevron-forward" size={20} color={C.navy} />
+            </Pressable>
+            <Pressable style={styles.calendarArrowSmall} onPress={() => moveYear(1)}>
+              <Ionicons name="play-forward" size={17} color={C.navy} />
+            </Pressable>
+          </View>
+          <View style={styles.calendarGrid}>
+            {["D", "L", "M", "M", "J", "V", "S"].map((day, index) => (
+              <Text key={`${day}-${index}`} style={styles.calendarWeekday}>
+                {day}
+              </Text>
+            ))}
+            {cells.map((day, index) => {
+              if (!day) {
+                return <View key={`empty-${index}`} style={styles.calendarDay} />;
+              }
+              const isoDate = dateToIso(
+                new Date(visibleMonth.getFullYear(), visibleMonth.getMonth(), day),
+              );
+              const disabled = isoDate < minimumDate;
+              const isToday = isoDate === todayIso();
+              const isEndpoint = isoDate === draftStartDate
+                || (!selectingEndDate && isoDate === draftEndDate);
+              const isInRange = !selectingEndDate
+                && isoDate >= draftStartDate
+                && isoDate <= draftEndDate;
+              return (
+                <Pressable
+                  key={isoDate}
+                  accessibilityLabel={`Fecha ${formatDate(isoDate)}${disabled ? ", no disponible" : ""}`}
+                  accessibilityState={{ disabled, selected: isEndpoint }}
+                  style={[
+                    styles.calendarDay,
+                    isToday && styles.calendarToday,
+                    isInRange && styles.calendarDayInRange,
+                    isEndpoint && styles.calendarDaySelected,
+                    disabled && styles.calendarDayDisabled,
+                  ]}
+                  disabled={disabled}
+                  onPress={() => selectDate(isoDate)}
+                >
+                  <Text
+                    style={[
+                      styles.calendarDayText,
+                      isToday && styles.calendarTodayText,
+                      isEndpoint && styles.calendarDayTextSelected,
+                      disabled && styles.calendarDayTextDisabled,
+                    ]}
+                  >
+                    {day}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          <PrimaryButton
+            label={selectingEndDate ? "Usar solo este día" : "Aplicar rango"}
+            icon="checkmark-circle-outline"
+            onPress={() => onApply(draftStartDate, draftEndDate)}
+          />
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 function OperationCard({
   operation,
   hideStatus,
@@ -2907,7 +3083,7 @@ function Requests({
           </View>
           <Text style={styles.description}>{request.description}</Text>
           <View style={styles.between}>
-            <Text style={styles.caption}>{request.quantity} personas ⋅ {formatDate(request.requiredDate)}</Text>
+            <Text style={styles.caption}>{request.quantity} personas ⋅ {formatDateRange(request.requiredDate, request.requiredEndDate)}</Text>
             {context.role === "Cliente" && request.status === "ABIERTA" && (
               <Pressable
                 onPress={() =>
@@ -2953,12 +3129,23 @@ function NewRequest({
   const [quantity, setQuantity] = useState("6");
   const [description, setDescription] = useState("Auxiliares con disponibilidad inmediata para apoyo operativo.");
   const [saving, setSaving] = useState(false);
+  const [calendarVisible, setCalendarVisible] = useState(false);
+  const [requiredDate, setRequiredDate] = useState(() => addDaysIso(todayIso(), 1));
+  const [requiredEndDate, setRequiredEndDate] = useState(() => addDaysIso(todayIso(), 1));
   const area = areas[areaIndex];
-  const requiredDate = addDaysIso(todayIso(), 2);
 
   const save = async () => {
     if (!client || !area || Number(quantity) <= 0 || !description.trim()) {
       Alert.alert("Completa la solicitud", "Todos los campos son obligatorios.");
+      return;
+    }
+    const minimumRequiredDate = addDaysIso(todayIso(), 1);
+    if (requiredDate < minimumRequiredDate) {
+      Alert.alert("Revisa las fechas", "La fecha inicial debe ser, como mínimo, mañana.");
+      return;
+    }
+    if (requiredEndDate < requiredDate) {
+      Alert.alert("Revisa las fechas", "La fecha final no puede ser anterior a la fecha inicial.");
       return;
     }
     setSaving(true);
@@ -2969,6 +3156,7 @@ function NewRequest({
         quantity: Number(quantity),
         description: description.trim(),
         requiredDate,
+        requiredEndDate,
         userId: context.id,
       });
       Alert.alert("Solicitud enviada", "El coordinador ya puede visualizarla.");
@@ -2988,11 +3176,28 @@ function NewRequest({
         <Choice label="Área *" value={area?.name ?? "Sin área"} icon="location-outline" onPress={() => setAreaIndex((value) => (value + 1) % Math.max(areas.length, 1))} />
         <Label text="Cantidad de personal *" />
         <Input icon="people-outline" value={quantity} onChangeText={setQuantity} keyboardType="number-pad" />
-        <Choice label="Fecha requerida" value={formatDate(requiredDate)} icon="calendar-outline" disabled />
+        <Choice
+          label="Fechas requeridas *"
+          value={formatDateRange(requiredDate, requiredEndDate)}
+          icon="calendar-outline"
+          onPress={() => setCalendarVisible(true)}
+        />
         <Label text="Descripción del perfil *" />
         <TextInput value={description} onChangeText={setDescription} multiline style={styles.textArea} />
       </FormCard>
       <PrimaryButton label={saving ? "Enviando..." : "Enviar solicitud"} icon="send" disabled={saving} onPress={save} />
+      <DateRangeCalendarModal
+        visible={calendarVisible}
+        startDate={requiredDate}
+        endDate={requiredEndDate}
+        minimumDate={addDaysIso(todayIso(), 1)}
+        onClose={() => setCalendarVisible(false)}
+        onApply={(startDate, endDate) => {
+          setRequiredDate(startDate);
+          setRequiredEndDate(endDate);
+          setCalendarVisible(false);
+        }}
+      />
     </Page>
   );
 }
@@ -8658,10 +8863,13 @@ const styles = StyleSheet.create({
   calendarWeekday: { width: "14.2857%", paddingVertical: 8, color: C.muted, fontSize: 10, fontWeight: "800", textAlign: "center" },
   calendarDay: { width: "14.2857%", aspectRatio: 1, alignItems: "center", justifyContent: "center", borderRadius: 12 },
   calendarToday: { borderWidth: 1, borderColor: C.navy },
+  calendarDayInRange: { backgroundColor: C.blueBg },
   calendarDaySelected: { backgroundColor: C.navy },
+  calendarDayDisabled: { opacity: 0.4 },
   calendarDayText: { color: C.ink, fontSize: 12, fontWeight: "700" },
   calendarTodayText: { color: C.navy, fontWeight: "900" },
   calendarDayTextSelected: { color: C.white },
+  calendarDayTextDisabled: { color: C.muted },
   yearGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   yearOption: { width: "31.8%", minHeight: 46, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: "#F8FAFF" },
   yearOptionText: { color: C.ink, fontSize: 13, fontWeight: "800" },
