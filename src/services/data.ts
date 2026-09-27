@@ -162,13 +162,13 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
     supabase
       .from("operation")
       .select(
-        "id,operation_date,client_id,area_id,operation_type_id,shift_id,service_unit_type_id,planned_units,actual_units,status,observations,review_observations,clients(name),area(name),operation_type(code,name),shift(name),service_unit_type(name),operation_assignment(id,planned_quantity,worked_quantity,extra_hours,deleted_at)",
+        "id,operation_date,client_id,area_id,operation_type_id,shift_id,service_unit_type_id,planned_units,actual_units,status,observations,review_observations,clients(name),area(name),operation_type(code,name),shift(name),service_unit_type(name),operation_assignment(id,contractor_id,planned_quantity,worked_quantity,extra_hours,deleted_at)",
       )
       .order("operation_date", { ascending: false })
       .order("id", { ascending: false }),
     supabase
       .from("personnel_request")
-      .select("id,client_id,area_id,required_quantity,description,required_date,status,clients(name),area(name)")
+      .select("id,client_id,area_id,shift_id,required_quantity,description,required_date,required_end_date,status,clients(name),area(name),shift(name)")
       .order("required_date", { ascending: false }),
     supabase.from("area").select("id,name,client_id").eq("is_active", true).order("id"),
     supabase.from("shift").select("id,name,area_id").eq("is_active", true).order("area_id").order("id"),
@@ -202,6 +202,9 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       plannedUnits: row.planned_units === null ? null : Number(row.planned_units),
       actualUnits: row.actual_units === null ? null : Number(row.actual_units),
       people: assignments.length,
+      contractorIds: assignments
+        .filter((assignment: any) => assignment.contractor_id !== null && assignment.contractor_id !== undefined)
+        .map((assignment: any) => Number(assignment.contractor_id)),
       worked: assignments.reduce(
         (total: number, assignment: any) => total + Number(assignment.worked_quantity ?? 0),
         0,
@@ -222,9 +225,12 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       client: cleanText(firstRelation<any>(row.clients)?.name),
     areaId: row.area_id,
       area: cleanText(firstRelation<any>(row.area)?.name),
+    shiftId: row.shift_id ?? null,
+    shift: cleanText(firstRelation<any>(row.shift)?.name) || null,
     quantity: row.required_quantity,
       description: cleanText(row.description),
     requiredDate: row.required_date,
+    requiredEndDate: row.required_end_date,
     status: row.status,
   }));
 
@@ -1439,17 +1445,21 @@ export async function saveAdminPayrollRule(input: {
 export async function createPersonnelRequest(input: {
   clientId: number;
   areaId: number;
+  shiftId: number;
   quantity: number;
   description: string;
   requiredDate: string;
+  requiredEndDate: string;
   userId: string;
 }) {
   const result = await supabase.from("personnel_request").insert({
     client_id: input.clientId,
     area_id: input.areaId,
+    shift_id: input.shiftId,
     required_quantity: input.quantity,
     description: input.description,
     required_date: input.requiredDate,
+    required_end_date: input.requiredEndDate,
     status: "ABIERTA",
     created_by: input.userId,
   });

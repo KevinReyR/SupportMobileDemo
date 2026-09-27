@@ -284,6 +284,12 @@ function formatDate(value: string | null | undefined) {
   return `${day}/${month}/${year}`;
 }
 
+function formatDateRange(startDate: string, endDate: string) {
+  return startDate === endDate
+    ? formatDate(startDate)
+    : `${formatDate(startDate)} – ${formatDate(endDate)}`;
+}
+
 function formatColombiaDateTime(value: string) {
   const [date, time = ""] = value.replace("T", " ").split(" ");
   return `${formatDate(date)}${time ? ` ⋅ ${time.slice(0, 5)}` : ""}`;
@@ -1832,6 +1838,11 @@ function Operations({
   const pending = operations.filter((item) => item.status === "PENDIENTE");
   const changesRequested = operations.filter((item) => item.status === "CAMBIOS_SOLICITADOS");
   const today = todayIso();
+  const todayOperations = operations.filter((item) => item.date === today);
+  const uniqueContractorsToday = new Set(
+    todayOperations.flatMap((item) => item.contractorIds),
+  ).size;
+  const inProgressToday = todayOperations.filter((item) => item.status === "EN_CURSO").length;
   const threeDayStart = dateToIso(addDays(isoToDate(today), -2));
   const visibleOperations = operations.filter((operation) => {
     if (changesRequestedOnly && operation.status !== "CAMBIOS_SOLICITADOS") return false;
@@ -1839,9 +1850,7 @@ function Operations({
     if (changesRequestedOnly) return true;
     return operation.date >= threeDayStart && operation.date <= today;
   });
-  const totalToday = operations
-    .filter((item) => item.date === today)
-    .reduce((total, item) => total + item.people, 0);
+  const totalToday = todayOperations.reduce((total, item) => total + item.people, 0);
   return (
     <Page loading={loading} onRefresh={onRefresh}>
       <View>
@@ -1855,6 +1864,22 @@ function Operations({
         </Text>
         <Text style={styles.subtitle}>Información protegida según tu perfil y clientes asignados.</Text>
       </View>
+      {context.role === "Cliente" && (
+        <View style={styles.clientKpiGrid}>
+          <View style={styles.clientKpiCell}>
+            <Kpi value={String(uniqueContractorsToday)} label="Contratistas hoy" icon="people" />
+          </View>
+          <View style={styles.clientKpiCell}>
+            <Kpi value={String(todayOperations.length)} label="Operaciones hoy" icon="briefcase" />
+          </View>
+          <View style={styles.clientKpiCell}>
+            <Kpi value={String(inProgressToday)} label="En curso hoy" icon="time" />
+          </View>
+          <View style={styles.clientKpiCell}>
+            <Kpi value={String(pending.length)} label="Pendientes de revisión" icon="alert-circle" />
+          </View>
+        </View>
+      )}
       {context.role !== "Cliente" && (
         <View style={styles.kpiRow}>
           <Kpi
@@ -2161,6 +2186,176 @@ function CalendarModal({
               onPress={onReset}
             />
           )}
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function DateRangeCalendarModal({
+  visible,
+  startDate,
+  endDate,
+  minimumDate,
+  onClose,
+  onApply,
+}: {
+  visible: boolean;
+  startDate: string;
+  endDate: string;
+  minimumDate: string;
+  onClose: () => void;
+  onApply: (startDate: string, endDate: string) => void;
+}) {
+  const initialDate = isoToDate(startDate);
+  const [visibleMonth, setVisibleMonth] = useState(
+    new Date(initialDate.getFullYear(), initialDate.getMonth(), 1),
+  );
+  const [draftStartDate, setDraftStartDate] = useState(startDate);
+  const [draftEndDate, setDraftEndDate] = useState(endDate);
+  const [selectingEndDate, setSelectingEndDate] = useState(false);
+
+  useEffect(() => {
+    if (!visible) return;
+    const date = isoToDate(startDate);
+    setVisibleMonth(new Date(date.getFullYear(), date.getMonth(), 1));
+    setDraftStartDate(startDate);
+    setDraftEndDate(endDate);
+    setSelectingEndDate(false);
+  }, [endDate, startDate, visible]);
+
+  const monthLabel = new Intl.DateTimeFormat("es-CO", {
+    month: "long",
+    year: "numeric",
+  }).format(visibleMonth);
+  const firstWeekday = visibleMonth.getDay();
+  const daysInMonth = new Date(
+    visibleMonth.getFullYear(),
+    visibleMonth.getMonth() + 1,
+    0,
+  ).getDate();
+  const cells = Array.from({ length: firstWeekday + daysInMonth }, (_, index) =>
+    index < firstWeekday ? null : index - firstWeekday + 1,
+  );
+
+  const moveMonth = (offset: number) => {
+    setVisibleMonth(
+      new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() + offset, 1),
+    );
+  };
+  const moveYear = (offset: number) => {
+    setVisibleMonth(
+      new Date(visibleMonth.getFullYear() + offset, visibleMonth.getMonth(), 1),
+    );
+  };
+  const selectDate = (date: string) => {
+    if (date < minimumDate) return;
+    if (!selectingEndDate) {
+      setDraftStartDate(date);
+      setDraftEndDate(date);
+      setSelectingEndDate(true);
+      return;
+    }
+    if (date < draftStartDate) {
+      setDraftStartDate(date);
+      setDraftEndDate(date);
+      return;
+    }
+    setDraftEndDate(date);
+    setSelectingEndDate(false);
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.calendarCard}>
+          <View style={styles.between}>
+            <View style={styles.flex}>
+              <Text style={styles.formTitle}>Selecciona las fechas requeridas</Text>
+              <Text style={styles.caption}>
+                {selectingEndDate
+                  ? `Inicio: ${formatDate(draftStartDate)} · Selecciona la fecha final.`
+                  : `Rango: ${formatDateRange(draftStartDate, draftEndDate)}`}
+              </Text>
+            </View>
+            <Pressable style={styles.iconButton} onPress={onClose}>
+              <Ionicons name="close" size={20} color={C.ink} />
+            </Pressable>
+          </View>
+          <View style={styles.calendarNavigation}>
+            <Pressable style={styles.calendarArrowSmall} onPress={() => moveYear(-1)}>
+              <Ionicons name="play-back" size={17} color={C.navy} />
+            </Pressable>
+            <Pressable style={styles.calendarArrow} onPress={() => moveMonth(-1)}>
+              <Ionicons name="chevron-back" size={20} color={C.navy} />
+            </Pressable>
+            <View style={styles.calendarMonthButton}>
+              <Text style={styles.calendarMonth}>
+                {monthLabel.charAt(0).toUpperCase() + monthLabel.slice(1)}
+              </Text>
+              <Text style={styles.caption}>Primero inicio, luego fin</Text>
+            </View>
+            <Pressable style={styles.calendarArrow} onPress={() => moveMonth(1)}>
+              <Ionicons name="chevron-forward" size={20} color={C.navy} />
+            </Pressable>
+            <Pressable style={styles.calendarArrowSmall} onPress={() => moveYear(1)}>
+              <Ionicons name="play-forward" size={17} color={C.navy} />
+            </Pressable>
+          </View>
+          <View style={styles.calendarGrid}>
+            {["D", "L", "M", "M", "J", "V", "S"].map((day, index) => (
+              <Text key={`${day}-${index}`} style={styles.calendarWeekday}>
+                {day}
+              </Text>
+            ))}
+            {cells.map((day, index) => {
+              if (!day) {
+                return <View key={`empty-${index}`} style={styles.calendarDay} />;
+              }
+              const isoDate = dateToIso(
+                new Date(visibleMonth.getFullYear(), visibleMonth.getMonth(), day),
+              );
+              const disabled = isoDate < minimumDate;
+              const isToday = isoDate === todayIso();
+              const isEndpoint = isoDate === draftStartDate
+                || (!selectingEndDate && isoDate === draftEndDate);
+              const isInRange = !selectingEndDate
+                && isoDate >= draftStartDate
+                && isoDate <= draftEndDate;
+              return (
+                <Pressable
+                  key={isoDate}
+                  accessibilityLabel={`Fecha ${formatDate(isoDate)}${disabled ? ", no disponible" : ""}`}
+                  accessibilityState={{ disabled, selected: isEndpoint }}
+                  style={[
+                    styles.calendarDay,
+                    isToday && styles.calendarToday,
+                    isInRange && styles.calendarDayInRange,
+                    isEndpoint && styles.calendarDaySelected,
+                    disabled && styles.calendarDayDisabled,
+                  ]}
+                  disabled={disabled}
+                  onPress={() => selectDate(isoDate)}
+                >
+                  <Text
+                    style={[
+                      styles.calendarDayText,
+                      isToday && styles.calendarTodayText,
+                      isEndpoint && styles.calendarDayTextSelected,
+                      disabled && styles.calendarDayTextDisabled,
+                    ]}
+                  >
+                    {day}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          <PrimaryButton
+            label={selectingEndDate ? "Usar solo este día" : "Aplicar rango"}
+            icon="checkmark-circle-outline"
+            onPress={() => onApply(draftStartDate, draftEndDate)}
+          />
         </View>
       </View>
     </Modal>
@@ -3400,13 +3595,13 @@ function Requests({
           <View style={styles.between}>
             <View>
               <Text style={styles.cardTitle}>{request.client}</Text>
-              <Text style={styles.cardMeta}>{request.area}</Text>
+              <Text style={styles.cardMeta}>{request.area} ⋅ {request.shift ?? "Sin turno"}</Text>
             </View>
             <RequestBadge status={request.status} />
           </View>
           <Text style={styles.description}>{request.description}</Text>
           <View style={styles.between}>
-            <Text style={styles.caption}>{request.quantity} personas ⋅ {formatDate(request.requiredDate)}</Text>
+            <Text style={styles.caption}>{request.quantity} personas ⋅ {formatDateRange(request.requiredDate, request.requiredEndDate)}</Text>
             {context.role === "Cliente" && request.status === "ABIERTA" && (
               <Pressable
                 onPress={() =>
@@ -3449,15 +3644,35 @@ function NewRequest({
   const client = context.clients[0];
   const areas = data.areas.filter((area) => area.clientId === client?.id);
   const [areaIndex, setAreaIndex] = useState(0);
+  const area = areas[areaIndex];
+  const availableShifts = data.shifts.filter((shift) => shift.areaId === area?.id);
+  const [shiftId, setShiftId] = useState(availableShifts[0]?.id ?? 0);
+  const [shiftSelectorVisible, setShiftSelectorVisible] = useState(false);
   const [quantity, setQuantity] = useState("6");
   const [description, setDescription] = useState("Auxiliares con disponibilidad inmediata para apoyo operativo.");
   const [saving, setSaving] = useState(false);
-  const area = areas[areaIndex];
-  const requiredDate = addDaysIso(todayIso(), 2);
+  const [calendarVisible, setCalendarVisible] = useState(false);
+  const [requiredDate, setRequiredDate] = useState(() => addDaysIso(todayIso(), 1));
+  const [requiredEndDate, setRequiredEndDate] = useState(() => addDaysIso(todayIso(), 1));
+
+  useEffect(() => {
+    const nextShift = data.shifts.find((shift) => shift.areaId === area?.id);
+    setShiftId(nextShift?.id ?? 0);
+  }, [area?.id, data.shifts]);
 
   const save = async () => {
-    if (!client || !area || Number(quantity) <= 0 || !description.trim()) {
+    const selectedShift = availableShifts.find((shift) => shift.id === shiftId);
+    if (!client || !area || !selectedShift || Number(quantity) <= 0 || !description.trim()) {
       Alert.alert("Completa la solicitud", "Todos los campos son obligatorios.");
+      return;
+    }
+    const minimumRequiredDate = addDaysIso(todayIso(), 1);
+    if (requiredDate < minimumRequiredDate) {
+      Alert.alert("Revisa las fechas", "La fecha inicial debe ser, como mínimo, mañana.");
+      return;
+    }
+    if (requiredEndDate < requiredDate) {
+      Alert.alert("Revisa las fechas", "La fecha final no puede ser anterior a la fecha inicial.");
       return;
     }
     setSaving(true);
@@ -3465,9 +3680,11 @@ function NewRequest({
       await createPersonnelRequest({
         clientId: client.id,
         areaId: area.id,
+        shiftId: selectedShift.id,
         quantity: Number(quantity),
         description: description.trim(),
         requiredDate,
+        requiredEndDate,
         userId: context.id,
       });
       Alert.alert("Solicitud enviada", "El coordinador ya puede visualizarla.");
@@ -3485,13 +3702,48 @@ function NewRequest({
       <FormCard title="Datos del requerimiento">
         <Choice label="Empresa" value={client?.name ?? "Sin empresa"} icon="business-outline" disabled />
         <Choice label="Área *" value={area?.name ?? "Sin área"} icon="location-outline" onPress={() => setAreaIndex((value) => (value + 1) % Math.max(areas.length, 1))} />
+        <Choice
+          label="Turno *"
+          value={availableShifts.find((shift) => shift.id === shiftId)?.name ?? "Selecciona un turno"}
+          icon="time-outline"
+          disabled={!area || availableShifts.length === 0}
+          onPress={() => setShiftSelectorVisible(true)}
+        />
         <Label text="Cantidad de personal *" />
         <Input icon="people-outline" value={quantity} onChangeText={setQuantity} keyboardType="number-pad" />
-        <Choice label="Fecha requerida" value={formatDate(requiredDate)} icon="calendar-outline" disabled />
+        <Choice
+          label="Fechas requeridas *"
+          value={formatDateRange(requiredDate, requiredEndDate)}
+          icon="calendar-outline"
+          onPress={() => setCalendarVisible(true)}
+        />
         <Label text="Descripción del perfil *" />
         <TextInput value={description} onChangeText={setDescription} multiline style={styles.textArea} />
       </FormCard>
       <PrimaryButton label={saving ? "Enviando..." : "Enviar solicitud"} icon="send" disabled={saving} onPress={save} />
+      <DropdownModal
+        visible={shiftSelectorVisible}
+        title="Seleccionar turno"
+        options={availableShifts}
+        selectedId={shiftId}
+        onClose={() => setShiftSelectorVisible(false)}
+        onSelect={(id) => {
+          setShiftId(id);
+          setShiftSelectorVisible(false);
+        }}
+      />
+      <DateRangeCalendarModal
+        visible={calendarVisible}
+        startDate={requiredDate}
+        endDate={requiredEndDate}
+        minimumDate={addDaysIso(todayIso(), 1)}
+        onClose={() => setCalendarVisible(false)}
+        onApply={(startDate, endDate) => {
+          setRequiredDate(startDate);
+          setRequiredEndDate(endDate);
+          setCalendarVisible(false);
+        }}
+      />
     </Page>
   );
 }
@@ -8951,8 +9203,10 @@ const styles = StyleSheet.create({
   auditDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: C.orange, marginTop: 7 },
   rowActions: { flexDirection: "row", gap: 10 },
   kpiRow: { flexDirection: "row", gap: 10 },
+  clientKpiGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  clientKpiCell: { flexBasis: 130, flexGrow: 1 },
   kpi: { flex: 1, minHeight: 105, borderRadius: 17, padding: 13, backgroundColor: C.white, borderWidth: 1, borderColor: C.line, gap: 5 },
-  kpiValue: { color: C.ink, fontSize: 22, fontWeight: "900" },
+  kpiValue: { color: C.ink, fontSize: 22, fontWeight: "900", fontVariant: ["tabular-nums"] },
   card: { backgroundColor: C.white, borderRadius: 18, padding: 14, gap: 11, borderWidth: 1, borderColor: C.line },
   centerCard: { minHeight: 120, backgroundColor: C.white, borderRadius: 18, padding: 18, borderWidth: 1, borderColor: C.line, alignItems: "center", justifyContent: "center" },
   cardTop: { flexDirection: "row", alignItems: "center", gap: 11 },
@@ -9159,10 +9413,13 @@ const styles = StyleSheet.create({
   calendarWeekday: { width: "14.2857%", paddingVertical: 8, color: C.muted, fontSize: 10, fontWeight: "800", textAlign: "center" },
   calendarDay: { width: "14.2857%", aspectRatio: 1, alignItems: "center", justifyContent: "center", borderRadius: 12 },
   calendarToday: { borderWidth: 1, borderColor: C.navy },
+  calendarDayInRange: { backgroundColor: C.blueBg },
   calendarDaySelected: { backgroundColor: C.navy },
+  calendarDayDisabled: { opacity: 0.4 },
   calendarDayText: { color: C.ink, fontSize: 12, fontWeight: "700" },
   calendarTodayText: { color: C.navy, fontWeight: "900" },
   calendarDayTextSelected: { color: C.white },
+  calendarDayTextDisabled: { color: C.muted },
   yearGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   yearOption: { width: "31.8%", minHeight: 46, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: "#F8FAFF" },
   yearOptionText: { color: C.ink, fontSize: 13, fontWeight: "800" },

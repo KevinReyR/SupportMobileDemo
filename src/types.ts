@@ -43,6 +43,7 @@ export interface Operation {
   plannedUnits: number | null;
   actualUnits: number | null;
   people: number;
+  contractorIds: number[];
   worked: number;
   extraHours: number;
   status: OperationStatus;
@@ -92,9 +93,12 @@ export interface PersonnelRequest {
   client: string;
   areaId: number;
   area: string;
+  shiftId: number | null;
+  shift: string | null;
   quantity: number;
   description: string;
   requiredDate: string;
+  requiredEndDate: string;
   status: RequestStatus;
 }
 
