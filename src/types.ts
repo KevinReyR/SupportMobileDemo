@@ -68,6 +68,8 @@ export interface PersonnelRequest {
   client: string;
   areaId: number;
   area: string;
+  shiftId: number | null;
+  shift: string | null;
   quantity: number;
   description: string;
   requiredDate: string;

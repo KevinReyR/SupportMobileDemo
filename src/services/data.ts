@@ -166,7 +166,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       .order("id", { ascending: false }),
     supabase
       .from("personnel_request")
-      .select("id,client_id,area_id,required_quantity,description,required_date,required_end_date,status,clients(name),area(name)")
+      .select("id,client_id,area_id,shift_id,required_quantity,description,required_date,required_end_date,status,clients(name),area(name),shift(name)")
       .order("required_date", { ascending: false }),
     supabase.from("area").select("id,name,client_id").eq("is_active", true).order("id"),
     supabase.from("shift").select("id,name,area_id").eq("is_active", true).order("area_id").order("id"),
@@ -218,6 +218,8 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       client: cleanText(firstRelation<any>(row.clients)?.name),
     areaId: row.area_id,
       area: cleanText(firstRelation<any>(row.area)?.name),
+    shiftId: row.shift_id ?? null,
+    shift: cleanText(firstRelation<any>(row.shift)?.name) || null,
     quantity: row.required_quantity,
       description: cleanText(row.description),
     requiredDate: row.required_date,
@@ -1385,6 +1387,7 @@ export async function saveAdminPayrollRule(input: {
 export async function createPersonnelRequest(input: {
   clientId: number;
   areaId: number;
+  shiftId: number;
   quantity: number;
   description: string;
   requiredDate: string;
@@ -1394,6 +1397,7 @@ export async function createPersonnelRequest(input: {
   const result = await supabase.from("personnel_request").insert({
     client_id: input.clientId,
     area_id: input.areaId,
+    shift_id: input.shiftId,
     required_quantity: input.quantity,
     description: input.description,
     required_date: input.requiredDate,

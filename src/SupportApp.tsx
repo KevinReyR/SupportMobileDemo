@@ -3077,7 +3077,7 @@ function Requests({
           <View style={styles.between}>
             <View>
               <Text style={styles.cardTitle}>{request.client}</Text>
-              <Text style={styles.cardMeta}>{request.area}</Text>
+              <Text style={styles.cardMeta}>{request.area} ⋅ {request.shift ?? "Sin turno"}</Text>
             </View>
             <RequestBadge status={request.status} />
           </View>
@@ -3126,16 +3126,25 @@ function NewRequest({
   const client = context.clients[0];
   const areas = data.areas.filter((area) => area.clientId === client?.id);
   const [areaIndex, setAreaIndex] = useState(0);
+  const area = areas[areaIndex];
+  const availableShifts = data.shifts.filter((shift) => shift.areaId === area?.id);
+  const [shiftId, setShiftId] = useState(availableShifts[0]?.id ?? 0);
+  const [shiftSelectorVisible, setShiftSelectorVisible] = useState(false);
   const [quantity, setQuantity] = useState("6");
   const [description, setDescription] = useState("Auxiliares con disponibilidad inmediata para apoyo operativo.");
   const [saving, setSaving] = useState(false);
   const [calendarVisible, setCalendarVisible] = useState(false);
   const [requiredDate, setRequiredDate] = useState(() => addDaysIso(todayIso(), 1));
   const [requiredEndDate, setRequiredEndDate] = useState(() => addDaysIso(todayIso(), 1));
-  const area = areas[areaIndex];
+
+  useEffect(() => {
+    const nextShift = data.shifts.find((shift) => shift.areaId === area?.id);
+    setShiftId(nextShift?.id ?? 0);
+  }, [area?.id, data.shifts]);
 
   const save = async () => {
-    if (!client || !area || Number(quantity) <= 0 || !description.trim()) {
+    const selectedShift = availableShifts.find((shift) => shift.id === shiftId);
+    if (!client || !area || !selectedShift || Number(quantity) <= 0 || !description.trim()) {
       Alert.alert("Completa la solicitud", "Todos los campos son obligatorios.");
       return;
     }
@@ -3153,6 +3162,7 @@ function NewRequest({
       await createPersonnelRequest({
         clientId: client.id,
         areaId: area.id,
+        shiftId: selectedShift.id,
         quantity: Number(quantity),
         description: description.trim(),
         requiredDate,
@@ -3174,6 +3184,13 @@ function NewRequest({
       <FormCard title="Datos del requerimiento">
         <Choice label="Empresa" value={client?.name ?? "Sin empresa"} icon="business-outline" disabled />
         <Choice label="Área *" value={area?.name ?? "Sin área"} icon="location-outline" onPress={() => setAreaIndex((value) => (value + 1) % Math.max(areas.length, 1))} />
+        <Choice
+          label="Turno *"
+          value={availableShifts.find((shift) => shift.id === shiftId)?.name ?? "Selecciona un turno"}
+          icon="time-outline"
+          disabled={!area || availableShifts.length === 0}
+          onPress={() => setShiftSelectorVisible(true)}
+        />
         <Label text="Cantidad de personal *" />
         <Input icon="people-outline" value={quantity} onChangeText={setQuantity} keyboardType="number-pad" />
         <Choice
@@ -3186,6 +3203,17 @@ function NewRequest({
         <TextInput value={description} onChangeText={setDescription} multiline style={styles.textArea} />
       </FormCard>
       <PrimaryButton label={saving ? "Enviando..." : "Enviar solicitud"} icon="send" disabled={saving} onPress={save} />
+      <DropdownModal
+        visible={shiftSelectorVisible}
+        title="Seleccionar turno"
+        options={availableShifts}
+        selectedId={shiftId}
+        onClose={() => setShiftSelectorVisible(false)}
+        onSelect={(id) => {
+          setShiftId(id);
+          setShiftSelectorVisible(false);
+        }}
+      />
       <DateRangeCalendarModal
         visible={calendarVisible}
         startDate={requiredDate}
