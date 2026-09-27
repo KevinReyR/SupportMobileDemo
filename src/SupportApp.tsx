@@ -1808,6 +1808,11 @@ function Operations({
   const pending = operations.filter((item) => item.status === "PENDIENTE");
   const changesRequested = operations.filter((item) => item.status === "CAMBIOS_SOLICITADOS");
   const today = todayIso();
+  const todayOperations = operations.filter((item) => item.date === today);
+  const uniqueContractorsToday = new Set(
+    todayOperations.flatMap((item) => item.contractorIds),
+  ).size;
+  const inProgressToday = todayOperations.filter((item) => item.status === "EN_CURSO").length;
   const threeDayStart = dateToIso(addDays(isoToDate(today), -2));
   const visibleOperations = operations.filter((operation) => {
     if (changesRequestedOnly && operation.status !== "CAMBIOS_SOLICITADOS") return false;
@@ -1815,9 +1820,7 @@ function Operations({
     if (changesRequestedOnly) return true;
     return operation.date >= threeDayStart && operation.date <= today;
   });
-  const totalToday = operations
-    .filter((item) => item.date === today)
-    .reduce((total, item) => total + item.people, 0);
+  const totalToday = todayOperations.reduce((total, item) => total + item.people, 0);
   return (
     <Page loading={loading} onRefresh={onRefresh}>
       <View>
@@ -1831,6 +1834,22 @@ function Operations({
         </Text>
         <Text style={styles.subtitle}>Información protegida según tu perfil y clientes asignados.</Text>
       </View>
+      {context.role === "Cliente" && (
+        <View style={styles.clientKpiGrid}>
+          <View style={styles.clientKpiCell}>
+            <Kpi value={String(uniqueContractorsToday)} label="Contratistas hoy" icon="people" />
+          </View>
+          <View style={styles.clientKpiCell}>
+            <Kpi value={String(todayOperations.length)} label="Operaciones hoy" icon="briefcase" />
+          </View>
+          <View style={styles.clientKpiCell}>
+            <Kpi value={String(inProgressToday)} label="En curso hoy" icon="time" />
+          </View>
+          <View style={styles.clientKpiCell}>
+            <Kpi value={String(pending.length)} label="Pendientes de revisión" icon="alert-circle" />
+          </View>
+        </View>
+      )}
       {context.role !== "Cliente" && (
         <View style={styles.kpiRow}>
           <Kpi
@@ -8683,8 +8702,10 @@ const styles = StyleSheet.create({
   actionRow: { flexDirection: "row", gap: 10 },
   rowActions: { flexDirection: "row", gap: 10 },
   kpiRow: { flexDirection: "row", gap: 10 },
+  clientKpiGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  clientKpiCell: { flexBasis: 130, flexGrow: 1 },
   kpi: { flex: 1, minHeight: 105, borderRadius: 17, padding: 13, backgroundColor: C.white, borderWidth: 1, borderColor: C.line, gap: 5 },
-  kpiValue: { color: C.ink, fontSize: 22, fontWeight: "900" },
+  kpiValue: { color: C.ink, fontSize: 22, fontWeight: "900", fontVariant: ["tabular-nums"] },
   card: { backgroundColor: C.white, borderRadius: 18, padding: 14, gap: 11, borderWidth: 1, borderColor: C.line },
   centerCard: { minHeight: 120, backgroundColor: C.white, borderRadius: 18, padding: 18, borderWidth: 1, borderColor: C.line, alignItems: "center", justifyContent: "center" },
   cardTop: { flexDirection: "row", alignItems: "center", gap: 11 },

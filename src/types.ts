@@ -43,6 +43,7 @@ export interface Operation {
   plannedUnits: number | null;
   actualUnits: number | null;
   people: number;
+  contractorIds: number[];
   worked: number;
   extraHours: number;
   status: OperationStatus;
