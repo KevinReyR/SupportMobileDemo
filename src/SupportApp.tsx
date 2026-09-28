@@ -26,7 +26,7 @@ import * as FileSystem from "expo-file-system/legacy";
 import * as Linking from "expo-linking";
 import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
 import { LinearGradient } from "expo-linear-gradient";
-import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import Svg, { Line, Polyline, Rect, Text as SvgText } from "react-native-svg";
 import type { Session } from "@supabase/supabase-js";
 
@@ -514,31 +514,35 @@ export default function SupportApp() {
     }
     setLoading(true);
     setError("");
+    let nextContext: UserContext | null = null;
     try {
-      const nextContext = await withTimeout(
+      nextContext = await withTimeout(
         loadUserContext(nextSession.user.id),
         12_000,
         "No fue posible validar la sesión. Revisa tu conexión e inténtalo nuevamente.",
       );
+      if (!mountedRef.current || hydrationId !== hydrationIdRef.current) return;
+      setContext(nextContext);
+      const home: Screen = nextContext.roleCode === "ADMIN" ? "admin-home" : "operations";
+      setScreen(home);
+      setActiveTab(home);
       const nextData = await withTimeout(
         loadAppData(nextContext),
         15_000,
         "La carga inicial tardó demasiado. Puedes reintentar desde la aplicación.",
       );
       if (!mountedRef.current || hydrationId !== hydrationIdRef.current) return;
-      const home: Screen = nextContext.roleCode === "ADMIN" ? "admin-home" : "operations";
-      setContext(nextContext);
       setData(nextData);
-      setScreen(home);
-      setActiveTab(home);
     } catch (cause) {
       if (!mountedRef.current || hydrationId !== hydrationIdRef.current) return;
       const message = errorMessage(cause);
       setError(message);
       hydratedUserIdRef.current = null;
-      setSession(null);
-      setContext(null);
       setData(EMPTY_DATA);
+      if (!nextContext) {
+        setSession(null);
+        setContext(null);
+      }
     } finally {
       if (mountedRef.current && hydrationId === hydrationIdRef.current) {
         setLoading(false);
@@ -678,7 +682,12 @@ export default function SupportApp() {
 
   return (
     <SafeAreaProvider>
-      <SafeAreaView style={styles.safe} edges={["top"]}>
+      <SafeAreaView
+        style={styles.safe}
+        edges={showTabs && Platform.OS === "android"
+          ? ["top", "left", "right"]
+          : ["top", "left", "right", "bottom"]}
+      >
         <StatusBar barStyle="dark-content" backgroundColor={C.bg} />
         <Header
           context={context}
@@ -1520,15 +1529,32 @@ function Login({ initialError, busy }: { initialError: string; busy: boolean }) 
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState(initialError);
 
+  useEffect(() => {
+    setMessage(initialError);
+  }, [initialError]);
+
   const signIn = async () => {
+    if (!email.trim() || !password) {
+      setMessage("Ingresa tu correo y contraseña.");
+      return;
+    }
     setSubmitting(true);
     setMessage("");
-    const result = await supabase.auth.signInWithPassword({
-      email: email.trim().toLowerCase(),
-      password,
-    });
-    if (result.error) setMessage("Correo o contraseña incorrectos.");
-    setSubmitting(false);
+    try {
+      const result = await withTimeout(
+        supabase.auth.signInWithPassword({
+          email: email.trim().toLowerCase(),
+          password,
+        }),
+        15_000,
+        "El inicio de sesión tardó demasiado. Revisa tu conexión e inténtalo nuevamente.",
+      );
+      if (result.error) setMessage("Correo o contraseña incorrectos.");
+    } catch (cause) {
+      setMessage(errorMessage(cause));
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const recover = async () => {
@@ -8881,8 +8907,11 @@ function BottomNav({
   active: Screen;
   onPress: (screen: Screen) => void;
 }) {
+  const insets = useSafeAreaInsets();
+  const androidBottomInset = Platform.OS === "android" ? Math.max(insets.bottom, 12) : 0;
+
   return (
-    <View style={styles.bottomNav}>
+    <View style={[styles.bottomNav, androidBottomInset > 0 && { paddingBottom: androidBottomInset }]}>
       {tabs.map((tab) => {
         const selected = active === tab.screen;
         return (

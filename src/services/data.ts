@@ -162,7 +162,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
     supabase
       .from("operation")
       .select(
-        "id,operation_date,client_id,area_id,operation_type_id,shift_id,service_unit_type_id,planned_units,actual_units,status,observations,review_observations,clients(name),area(name),operation_type(code,name),shift(name),service_unit_type(name),operation_assignment(id,planned_quantity,worked_quantity,extra_hours,deleted_at)",
+        "id,operation_date,client_id,area_id,operation_type_id,shift_id,service_unit_type_id,planned_units,actual_units,status,observations,review_observations,clients(name),area(name),operation_type(code,name),shift(name),service_unit_type(name),operation_assignment(id,contractor_id,planned_quantity,worked_quantity,extra_hours,deleted_at)",
       )
       .order("operation_date", { ascending: false })
       .order("id", { ascending: false }),
@@ -231,7 +231,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
   let contractors: Contractor[] = [];
   let clientContractors: ClientContractor[] = [];
   if (context.roleCode !== "CLIENT") {
-    const [contractorResult, assignmentResult, contractResult] = await Promise.all([
+    const [contractorResult, contractResult] = await Promise.all([
       supabase
         .from("contractor")
         .select(
@@ -239,26 +239,22 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
         )
         .order("name"),
       supabase
-        .from("operation_assignment")
-        .select("contractor_id,operation(operation_date,clients(name),area(name))")
-        .is("deleted_at", null),
-      supabase
         .from("contractor_contract")
         .select("id,contractor_id,start_date,end_date,status_id,contract_type,contract_status(name),contract_type_ref:contract_type(name)")
         .order("start_date", { ascending: false })
         .order("id", { ascending: false }),
     ]);
     fail(contractorResult.error);
-    fail(assignmentResult.error);
     fail(contractResult.error);
 
     const lastAssignments = new Map<number, any>();
-    for (const row of assignmentResult.data ?? []) {
-      const operation = firstRelation<any>((row as any).operation);
-      if (!operation) continue;
-      const current = lastAssignments.get((row as any).contractor_id);
-      if (!current || operation.operation_date > current.operation_date) {
-        lastAssignments.set((row as any).contractor_id, operation);
+    for (const operation of common[2].data ?? []) {
+      for (const assignment of (operation as any).operation_assignment ?? []) {
+        if (assignment.deleted_at !== null) continue;
+        const contractorId = Number(assignment.contractor_id);
+        if (!lastAssignments.has(contractorId)) {
+          lastAssignments.set(contractorId, operation);
+        }
       }
     }
 
