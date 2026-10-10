@@ -24,6 +24,7 @@ import type {
   PersonnelRequest,
   Role,
   RoleCode,
+  ShiftAssignmentCheck,
   StatisticsContractorOption,
   StatisticsSummary,
   UserContext,
@@ -860,6 +861,7 @@ export async function createOperation(input: {
   areaId: number;
   shiftId: number;
   contractorIds: number[];
+  confirmedSecondShiftContractorIds: number[];
 }) {
   const result = await supabase.rpc("create_operation_with_assignments", {
     p_operation_date: input.date,
@@ -869,10 +871,40 @@ export async function createOperation(input: {
     p_assignments: input.contractorIds.map((contractorId) => ({
       contractor_id: contractorId,
       planned_quantity: 1,
+      confirmed_second_shift: input.confirmedSecondShiftContractorIds.includes(contractorId),
     })),
   });
   fail(result.error);
   return result.data as number;
+}
+
+export async function checkContractorShiftAssignment(input: {
+  date: string;
+  contractorId: number;
+  clientId: number;
+  areaId: number;
+  shiftId: number;
+  excludeOperationId?: number;
+}): Promise<ShiftAssignmentCheck> {
+  const result = await supabase.rpc("check_contractor_shift_assignment", {
+    p_operation_date: input.date,
+    p_contractor_id: input.contractorId,
+    p_target_client_id: input.clientId,
+    p_target_area_id: input.areaId,
+    p_target_shift_id: input.shiftId,
+    p_exclude_operation_id: input.excludeOperationId ?? null,
+  });
+  fail(result.error);
+  const row = Array.isArray(result.data) ? result.data[0] : result.data;
+  return {
+    status: row.status,
+    assignments: (row.assignments ?? []).map((assignment: any) => ({
+      operationId: Number(assignment.operation_id),
+      client: cleanText(assignment.client),
+      area: cleanText(assignment.area),
+      shift: cleanText(assignment.shift),
+    })),
+  };
 }
 
 export async function loadAvailableServiceUnits(areaId: number, date: string): Promise<{ id: number; name: string }[]> {
@@ -923,7 +955,7 @@ export async function loadAvailableContractorsForOperationEdit(
 }
 
 export async function updateInProgressOperation(input: OperationEditInput): Promise<number> {
-  const result = await supabase.rpc("update_in_progress_operation", {
+  const result = await supabase.rpc("update_in_progress_operation_v2", {
     p_operation_id: input.operationId,
     p_operation_date: input.date,
     p_client_id: input.clientId,
@@ -934,6 +966,7 @@ export async function updateInProgressOperation(input: OperationEditInput): Prom
       input.operationType === "DESCARGUE" ? input.serviceUnitTypeId : null,
     p_planned_units: input.operationType === "DESCARGUE" ? input.plannedUnits : null,
     p_contractor_ids: input.contractorIds,
+    p_confirmed_second_shift_contractor_ids: input.confirmedSecondShiftContractorIds,
   });
   fail(result.error);
   return Number(result.data ?? 0);
@@ -963,6 +996,7 @@ export async function finalizeOperation(
   operationId: number,
   assignments: Assignment[],
   observations: string,
+  confirmedSecondShiftContractorIds: number[],
 ) {
   const result = await supabase.rpc("finalize_operation", {
     p_operation_id: operationId,
@@ -973,6 +1007,7 @@ export async function finalizeOperation(
       worked_quantity: assignment.attendanceStatus === "AUSENTE" ? 0 : 1,
       extra_hours: assignment.extraHours,
       observations: assignment.observations ?? "",
+      confirmed_second_shift: confirmedSecondShiftContractorIds.includes(assignment.contractorId),
     })),
     p_observations: observations || null,
   });

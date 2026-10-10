@@ -61,6 +61,26 @@ export interface OperationEditInput {
   serviceUnitTypeId: number | null;
   plannedUnits: number | null;
   contractorIds: number[];
+  confirmedSecondShiftContractorIds: number[];
+}
+
+export type ShiftAssignmentCheckStatus =
+  | "AVAILABLE"
+  | "CONFIRM_REQUIRED"
+  | "SAME_OPERATION"
+  | "LIMIT_REACHED"
+  | "DISCHARGE_CONFLICT";
+
+export interface ExistingShiftAssignment {
+  operationId: number;
+  client: string;
+  area: string;
+  shift: string;
+}
+
+export interface ShiftAssignmentCheck {
+  status: ShiftAssignmentCheckStatus;
+  assignments: ExistingShiftAssignment[];
 }
 
 export interface OperationChangeHistoryItem {

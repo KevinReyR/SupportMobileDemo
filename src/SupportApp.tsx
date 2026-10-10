@@ -37,6 +37,7 @@ import { buildCedulaPdfFromPhotos } from "./lib/cedula-pdf";
 import { supabase } from "./lib/supabase";
 import {
   cancelPersonnelRequest,
+  checkContractorShiftAssignment,
   calculateAdminDirectPayroll,
   closeAdminDirectPayroll,
   createAdminUser,
@@ -122,6 +123,7 @@ import type {
   PersonnelRequest,
   Role,
   RoleCode,
+  ShiftAssignmentCheck,
   StatisticsSummary,
   UserContext,
   WorkwearMovement,
@@ -166,6 +168,49 @@ function confirmAction(title: string, message: string, confirmLabel: string, onC
     { text: "Cancelar", style: "cancel" },
     { text: confirmLabel, onPress: onConfirm },
   ]);
+}
+
+function shiftAssignmentLabel(assignment: ShiftAssignmentCheck["assignments"][number]) {
+  return `${assignment.client} / ${assignment.area} / ${assignment.shift}`;
+}
+
+function handleShiftAssignmentCheck(
+  contractor: Contractor,
+  date: string,
+  check: ShiftAssignmentCheck,
+  onAdd: (confirmedSecondShift: boolean) => void,
+) {
+  if (check.status === "AVAILABLE") {
+    onAdd(false);
+    return;
+  }
+  if (check.status === "CONFIRM_REQUIRED") {
+    confirmAction(
+      "Confirmar segundo turno",
+      `${contractor.fullName} ya está asignado a ${shiftAssignmentLabel(check.assignments[0])} el ${formatDate(date)}. ¿Deseas confirmar la asignación a este segundo turno?`,
+      "Confirmar asignación",
+      () => onAdd(true),
+    );
+    return;
+  }
+  if (check.status === "SAME_OPERATION") {
+    showMessage(
+      "Contratista ya asignado",
+      "El contratista ya está asignado a esta Empresa / Área / Turno.",
+    );
+    return;
+  }
+  if (check.status === "LIMIT_REACHED") {
+    showMessage(
+      "Límite diario alcanzado",
+      `${contractor.fullName} ya tiene dos turnos el ${formatDate(date)}:\n\n${check.assignments.map((item) => `• ${shiftAssignmentLabel(item)}`).join("\n")}`,
+    );
+    return;
+  }
+  showMessage(
+    "Contratista no disponible",
+    `${contractor.fullName} ya está asignado a un descargue el ${formatDate(date)}${check.assignments[0] ? ` en ${shiftAssignmentLabel(check.assignments[0])}` : ""}.`,
+  );
 }
 
 const C = {
@@ -2644,7 +2689,13 @@ function InitialOperation({
   const [contractorId, setContractorId] = useState(activeContractors[0]?.id ?? 0);
   const [openSelector, setOpenSelector] = useState<"operationType" | "client" | "area" | "shift" | "serviceUnitType" | "contractor" | null>(null);
   const [added, setAdded] = useState<Contractor[]>([]);
+  const [confirmedSecondShiftContractorIds, setConfirmedSecondShiftContractorIds] = useState<number[]>([]);
+  const [checkingContractor, setCheckingContractor] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setConfirmedSecondShiftContractorIds([]);
+  }, [operationDate, operationType, clientId, areaId, shiftId]);
 
   useEffect(() => {
     const nextArea = data.areas.find((area) => area.clientId === clientId);
@@ -2703,6 +2754,7 @@ function InitialOperation({
         await createOperation({
           date: operationDate, clientId, areaId, shiftId,
           contractorIds: added.map((item) => item.id),
+          confirmedSecondShiftContractorIds,
         });
       }
       showMessage("Registro guardado", "La operación quedó EN CURSO.");
@@ -2778,13 +2830,44 @@ function InitialOperation({
           onPress={() => setOpenSelector("contractor")}
         />
         <SecondaryButton
-          label="Agregar contratista"
+          label={checkingContractor ? "Validando contratista..." : "Agregar contratista"}
           icon="person-add-outline"
-          onPress={() => {
-            if (selectedContractor && !added.some((item) => item.id === selectedContractor.id)) {
-              setAdded([...added, selectedContractor]);
+          disabled={checkingContractor}
+          onPress={() => void (async () => {
+            if (!selectedContractor) return;
+            if (added.some((item) => item.id === selectedContractor.id)) {
+              showMessage("Contratista ya asignado", "El contratista ya está agregado a esta operación.");
+              return;
             }
-          }}
+            if (operationType === "DESCARGUE") {
+              setAdded((rows) => [...rows, selectedContractor]);
+              return;
+            }
+            if (!clientId || !areaId || !shiftId) {
+              showMessage("Completa la operación", "Selecciona cliente, área y turno antes de agregar personal.");
+              return;
+            }
+            setCheckingContractor(true);
+            try {
+              const check = await checkContractorShiftAssignment({
+                date: operationDate,
+                contractorId: selectedContractor.id,
+                clientId,
+                areaId,
+                shiftId,
+              });
+              handleShiftAssignmentCheck(selectedContractor, operationDate, check, (confirmed) => {
+                setAdded((rows) => [...rows, selectedContractor]);
+                if (confirmed) {
+                  setConfirmedSecondShiftContractorIds((ids) => [...new Set([...ids, selectedContractor.id])]);
+                }
+              });
+            } catch (cause) {
+              showMessage("No fue posible validar el contratista", errorMessage(cause));
+            } finally {
+              setCheckingContractor(false);
+            }
+          })()}
         />
       </FormCard>
       <SectionTitle title={`Personal agregado (${added.length})`} />
@@ -2801,7 +2884,10 @@ function InitialOperation({
                     : serviceUnitTypes.find((item) => item.id === serviceUnitTypeId)?.name}
                 </Text>
               </View>
-              <Pressable onPress={() => setAdded(added.filter((item) => item.id !== contractor.id))}>
+              <Pressable onPress={() => {
+                setAdded(added.filter((item) => item.id !== contractor.id));
+                setConfirmedSecondShiftContractorIds((ids) => ids.filter((id) => id !== contractor.id));
+              }}>
                 <Ionicons name="trash-outline" size={20} color={C.red} />
               </Pressable>
             </View>
@@ -2923,6 +3009,8 @@ function EditOperation({
   const [originalContractorIds, setOriginalContractorIds] = useState<number[]>([]);
   const [availableContractorIds, setAvailableContractorIds] = useState<number[]>([]);
   const [selectedContractorId, setSelectedContractorId] = useState(0);
+  const [confirmedSecondShiftContractorIds, setConfirmedSecondShiftContractorIds] = useState<number[]>([]);
+  const [checkingContractor, setCheckingContractor] = useState(false);
   const [openSelector, setOpenSelector] = useState<
     "operationType" | "client" | "area" | "shift" | "serviceUnitType" | "contractor" | null
   >(null);
@@ -2933,6 +3021,10 @@ function EditOperation({
   const availableAreas = data.areas.filter((area) => area.clientId === clientId);
   const availableShifts = data.shifts.filter((shift) => shift.areaId === areaId);
   const activeContractors = data.contractors.filter((contractor) => contractor.active);
+
+  useEffect(() => {
+    setConfirmedSecondShiftContractorIds([]);
+  }, [operationDate, operationType, clientId, areaId, shiftId]);
 
   useEffect(() => {
     loadOperationAssignments(operation.id)
@@ -3081,6 +3173,7 @@ function EditOperation({
             serviceUnitTypeId: operationType === "DESCARGUE" ? serviceUnitTypeId : null,
             plannedUnits: operationType === "DESCARGUE" ? unitCount : null,
             contractorIds: [...selectedContractorIds].sort((a, b) => a - b),
+            confirmedSecondShiftContractorIds,
           });
           if (changedItems === 0) {
             showMessage("Sin cambios", "La operación ya tenía estos valores.");
@@ -3174,7 +3267,10 @@ function EditOperation({
                       {hasConflict ? "No disponible para la fecha o tipo seleccionado" : contractor.document}
                     </Text>
                   </View>
-                  <Pressable onPress={() => setSelectedContractorIds((ids) => ids.filter((item) => item !== id))}>
+                  <Pressable onPress={() => {
+                    setSelectedContractorIds((ids) => ids.filter((item) => item !== id));
+                    setConfirmedSecondShiftContractorIds((ids) => ids.filter((item) => item !== id));
+                  }}>
                     <Ionicons name="trash-outline" size={20} color={C.red} />
                   </Pressable>
                 </View>
@@ -3193,9 +3289,9 @@ function EditOperation({
       )}
 
       <SecondaryButton
-        label={loadingAvailability ? "Validando disponibilidad..." : "Añadir contratista"}
+        label={loadingAvailability || checkingContractor ? "Validando disponibilidad..." : "Añadir contratista"}
         icon="person-add-outline"
-        disabled={loadingAvailability || selectableContractors.length === 0}
+        disabled={loadingAvailability || checkingContractor || selectableContractors.length === 0}
         onPress={() => setOpenSelector("contractor")}
       />
       <PrimaryButton
@@ -3284,9 +3380,37 @@ function EditOperation({
         searchPlaceholder="Buscar contratista por nombre"
         onClose={() => setOpenSelector(null)}
         onSelect={(id) => {
-          setSelectedContractorIds((ids) => [...ids, id].sort((a, b) => a - b));
-          setSelectedContractorId(0);
           setOpenSelector(null);
+          const contractor = data.contractors.find((item) => item.id === id);
+          if (!contractor) return;
+          if (selectedContractorIds.includes(id)) {
+            showMessage("Contratista ya asignado", "El contratista ya está agregado a esta operación.");
+            return;
+          }
+          if (operationType === "DESCARGUE") {
+            setSelectedContractorIds((ids) => [...ids, id].sort((a, b) => a - b));
+            setSelectedContractorId(0);
+            return;
+          }
+          setCheckingContractor(true);
+          void checkContractorShiftAssignment({
+            date: operationDate,
+            contractorId: id,
+            clientId,
+            areaId,
+            shiftId,
+            excludeOperationId: operation.id,
+          }).then((check) => {
+            handleShiftAssignmentCheck(contractor, operationDate, check, (confirmed) => {
+              setSelectedContractorIds((ids) => [...ids, id].sort((a, b) => a - b));
+              setSelectedContractorId(0);
+              if (confirmed) {
+                setConfirmedSecondShiftContractorIds((ids) => [...new Set([...ids, id])]);
+              }
+            });
+          }).catch((cause) => {
+            showMessage("No fue posible validar el contratista", errorMessage(cause));
+          }).finally(() => setCheckingContractor(false));
         }}
       />
     </Page>
@@ -3310,6 +3434,8 @@ function FinalOperation({
   const [saving, setSaving] = useState(false);
   const [availableContractorIds, setAvailableContractorIds] = useState<number[]>([]);
   const [contractorSelectorVisible, setContractorSelectorVisible] = useState(false);
+  const [confirmedSecondShiftContractorIds, setConfirmedSecondShiftContractorIds] = useState<number[]>([]);
+  const [checkingContractor, setCheckingContractor] = useState(false);
 
   const distributeUnits = useCallback((rows: Assignment[], totalText: string) => {
     const totalCents = Math.round((Number(totalText) || 0) * 100);
@@ -3389,7 +3515,12 @@ function FinalOperation({
           if (isDischarge) {
             await finalizeDischargeOperation(operation.id, Number(actualUnits), assignments, observations);
           } else {
-            await finalizeOperation(operation.id, assignments, observations);
+            await finalizeOperation(
+              operation.id,
+              assignments,
+              observations,
+              confirmedSecondShiftContractorIds,
+            );
           }
           await onSaved();
         } catch (cause) {
@@ -3441,6 +3572,7 @@ function FinalOperation({
               <Pressable
                 onPress={() => setAssignments((rows) => {
                   const next = rows.filter((row) => row.assignmentId !== assignment.assignmentId);
+                  setConfirmedSecondShiftContractorIds((ids) => ids.filter((id) => id !== assignment.contractorId));
                   return isDischarge ? distributeUnits(next, actualUnits) : next;
                 })}
               >
@@ -3500,8 +3632,9 @@ function FinalOperation({
       ))}
       {!loading && (
         <SecondaryButton
-          label="Añadir contratista"
+          label={checkingContractor ? "Validando contratista..." : "Añadir contratista"}
           icon="person-add-outline"
+          disabled={checkingContractor}
           onPress={() => setContractorSelectorVisible(true)}
         />
       )}
@@ -3539,7 +3672,11 @@ function FinalOperation({
           setContractorSelectorVisible(false);
           const contractor = contractors.find((item) => item.id === contractorId);
           if (!contractor) return;
-          setAssignments((rows) => {
+          if (assignments.some((assignment) => assignment.contractorId === contractorId)) {
+            showMessage("Contratista ya asignado", "El contratista ya está agregado a esta operación.");
+            return;
+          }
+          const addContractor = (confirmedSecondShift: boolean) => setAssignments((rows) => {
             const next = [...rows, {
               assignmentId: -contractor.id,
               contractorId: contractor.id,
@@ -3551,8 +3688,28 @@ function FinalOperation({
               dischargedUnits: 0,
               observations: null,
             }];
+            if (confirmedSecondShift) {
+              setConfirmedSecondShiftContractorIds((ids) => [...new Set([...ids, contractorId])]);
+            }
             return isDischarge ? distributeUnits(next, actualUnits) : next;
           });
+          if (isDischarge) {
+            addContractor(false);
+            return;
+          }
+          setCheckingContractor(true);
+          void checkContractorShiftAssignment({
+            date: operation.date,
+            contractorId,
+            clientId: operation.clientId,
+            areaId: operation.areaId,
+            shiftId: operation.shiftId ?? 0,
+            excludeOperationId: operation.id,
+          }).then((check) => {
+            handleShiftAssignmentCheck(contractor, operation.date, check, addContractor);
+          }).catch((cause) => {
+            showMessage("No fue posible validar el contratista", errorMessage(cause));
+          }).finally(() => setCheckingContractor(false));
         }}
       />
     </Page>
