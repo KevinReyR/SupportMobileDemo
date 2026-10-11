@@ -1421,6 +1421,8 @@ export async function loadAdminPayroll(periodStart: string): Promise<AdminPayrol
       eligibleDays: Number(item.eligibleDays ?? 0),
       paidDays: Number(item.paidDays ?? 0),
       baseSalaryAmount: Number(item.baseSalaryAmount ?? 0),
+      extraHourAmount: Number(item.extraHourAmount ?? 0),
+      totalPayAmount: Number(item.totalPayAmount ?? Number(item.baseSalaryAmount ?? 0) + Number(item.extraHourAmount ?? 0)),
       status: item.status,
       calculatedAt: item.calculatedAt,
       closedAt: item.closedAt ?? null,

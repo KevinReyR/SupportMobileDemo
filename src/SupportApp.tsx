@@ -7652,7 +7652,7 @@ function AdminPayrollModule({ contractTypes }: { contractTypes: AppData["contrac
 
   const close = () => confirmAction(
     "Cerrar periodo de nómina",
-    "Los periodos cerrados son inmutables. Confirma que revisaste los días pagables y los totales.",
+    "Se actualizarán las horas extra aprobadas antes del cierre. Luego el periodo será inmutable. Confirma que revisaste los días pagables y los totales.",
     "Cerrar periodo",
     () => {
       void (async () => {
@@ -7672,7 +7672,7 @@ function AdminPayrollModule({ contractTypes }: { contractTypes: AppData["contrac
 
   const draftCount = data?.periods.filter((period) => period.status === "DRAFT").length ?? 0;
   const closedCount = data?.periods.filter((period) => period.status === "CLOSED").length ?? 0;
-  const total = data?.periods.reduce((sum, period) => sum + period.baseSalaryAmount, 0) ?? 0;
+  const total = data?.periods.reduce((sum, period) => sum + period.totalPayAmount, 0) ?? 0;
 
   return (
     <>
@@ -7699,36 +7699,43 @@ function AdminPayrollModule({ contractTypes }: { contractTypes: AppData["contrac
             <Stat value={formatCurrency(total)} label="Total del periodo" icon="wallet-outline" />
           </View>
           <FormCard title={`Nómina ${formatMonth(periodStart)}`}>
+            <Text style={styles.caption}>Las horas extra provienen de operaciones cerradas y se actualizan al recalcular o cerrar el periodo.</Text>
             {!data?.periods.length ? (
               <EmptyState icon="wallet-outline" text="No hay nómina calculada para este mes." />
             ) : (
-              <View style={styles.adminCompactTable}>
-                <View style={[styles.adminCompactRow, styles.adminCompactHeader]}>
-                  <Text style={styles.adminCompactWideHead}>Contratista</Text>
-                  <Text style={styles.adminCompactHead}>Salario</Text>
-                  <Text style={styles.adminCompactHead}>Elegibles</Text>
-                  <Text style={styles.adminCompactHead}>Pagables</Text>
-                  <Text style={styles.adminCompactHead}>Total</Text>
-                  <Text style={styles.adminCompactHead}>Estado</Text>
-                  <Text style={styles.adminCompactActionHead}>Editar</Text>
-                </View>
-                {data.periods.map((period) => (
-                  <View key={period.id} style={styles.adminCompactRow}>
-                    <View style={styles.adminCompactWideCell}>
-                      <Text style={styles.cardTitle}>{period.contractorName}</Text>
-                      <Text style={styles.caption}>{period.document}</Text>
-                    </View>
-                    <Text style={styles.adminCompactCell}>{formatCurrency(period.monthlySalary)}</Text>
-                    <Text style={styles.adminCompactCell}>{period.eligibleDays}</Text>
-                    <Text style={styles.adminCompactCell}>{period.paidDays}</Text>
-                    <Text style={styles.adminCompactCell}>{formatCurrency(period.baseSalaryAmount)}</Text>
-                    <View style={styles.adminCompactCell}><StatusPill good={period.status === "CLOSED"} text={period.status} /></View>
-                    <Pressable style={styles.adminCompactAction} disabled={period.status !== "DRAFT"} onPress={() => setEditingPeriod(period)}>
-                      <Ionicons name="create-outline" size={18} color={period.status === "DRAFT" ? C.navy : C.muted} />
-                    </Pressable>
+              <ScrollView horizontal showsHorizontalScrollIndicator contentContainerStyle={styles.adminPayrollScrollContent}>
+                <View style={[styles.adminCompactTable, styles.adminPayrollTable]}>
+                  <View style={[styles.adminCompactRow, styles.adminCompactHeader]}>
+                    <Text style={styles.adminCompactWideHead}>Contratista</Text>
+                    <Text style={styles.adminCompactHead}>Salario mensual</Text>
+                    <Text style={styles.adminCompactHead}>Elegibles</Text>
+                    <Text style={styles.adminCompactHead}>Pagables</Text>
+                    <Text style={styles.adminCompactHead}>Salario base</Text>
+                    <Text style={styles.adminCompactHead}>Horas extra</Text>
+                    <Text style={styles.adminCompactHead}>Total a pagar</Text>
+                    <Text style={styles.adminCompactHead}>Estado</Text>
+                    <Text style={styles.adminCompactActionHead}>Editar</Text>
                   </View>
-                ))}
-              </View>
+                  {data.periods.map((period) => (
+                    <View key={period.id} style={styles.adminCompactRow}>
+                      <View style={styles.adminCompactWideCell}>
+                        <Text style={styles.cardTitle}>{period.contractorName}</Text>
+                        <Text style={styles.caption}>{period.document}</Text>
+                      </View>
+                      <Text style={styles.adminCompactCell}>{formatCurrency(period.monthlySalary)}</Text>
+                      <Text style={styles.adminCompactCell}>{period.eligibleDays}</Text>
+                      <Text style={styles.adminCompactCell}>{period.paidDays}</Text>
+                      <Text style={styles.adminCompactCell}>{formatCurrency(period.baseSalaryAmount)}</Text>
+                      <Text style={styles.adminCompactCell}>{formatCurrency(period.extraHourAmount)}</Text>
+                      <Text style={styles.adminCompactCell}>{formatCurrency(period.totalPayAmount)}</Text>
+                      <View style={styles.adminCompactCell}><StatusPill good={period.status === "CLOSED"} text={period.status} /></View>
+                      <Pressable style={styles.adminCompactAction} disabled={period.status !== "DRAFT"} onPress={() => setEditingPeriod(period)}>
+                        <Ionicons name="create-outline" size={18} color={period.status === "DRAFT" ? C.navy : C.muted} />
+                      </Pressable>
+                    </View>
+                  ))}
+                </View>
+              </ScrollView>
             )}
           </FormCard>
           <FormCard title="Reglas salariales">
@@ -9582,6 +9589,8 @@ const styles = StyleSheet.create({
   adminCellMain: { flex: 1.3, color: C.ink, fontSize: 13, fontWeight: "900" },
   adminCell: { flex: 1, color: C.muted, fontSize: 11, fontWeight: "700" },
   adminCompactTable: { borderWidth: 1, borderColor: C.line, borderRadius: 14, overflow: "hidden", backgroundColor: C.white },
+  adminPayrollScrollContent: { minWidth: 1000, flexGrow: 1 },
+  adminPayrollTable: { minWidth: 1000, flexGrow: 1 },
   adminCompactRow: { minHeight: 48, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 10, paddingVertical: 9, borderBottomWidth: 1, borderBottomColor: C.line },
   adminCompactHeader: { minHeight: 42, backgroundColor: C.bg },
   adminCompactHead: { flex: 1, color: C.ink, fontSize: 9, fontWeight: "900", textTransform: "uppercase" },
