@@ -391,6 +391,8 @@ export interface AdminPayrollPeriod {
   eligibleDays: number;
   paidDays: number;
   baseSalaryAmount: number;
+  extraHourAmount: number;
+  totalPayAmount: number;
   status: PayrollPeriodStatus;
   calculatedAt: string;
   closedAt: string | null;
