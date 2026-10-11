@@ -80,6 +80,7 @@ import {
   saveAdminCostRule,
   saveAdminPayrollRule,
   saveAdminExtraHourRate,
+  saveAdminDirectExtraHourRate,
   saveAdminServiceUnitRate,
   saveAdminServiceUnitType,
   saveAdminServiceRate,
@@ -7165,7 +7166,7 @@ function AdminDashboard({ data, adminData }: { data: AppData; adminData: AdminDa
         <Stat value={String(data.users.length)} label="Usuarios" icon="people-outline" />
         <Stat value={String(data.contractors.length)} label="Contratistas" icon="id-card-outline" />
         <Stat value={String(adminData.clients.length)} label="Clientes" icon="business-outline" />
-        <Stat value={String(adminData.serviceRates.length + adminData.extraHourRates.length)} label="Tarifas" icon="cash-outline" />
+        <Stat value={String(adminData.serviceRates.length + adminData.extraHourRates.length + adminData.directExtraHourRates.length)} label="Tarifas" icon="cash-outline" />
         <Stat value={String(adminData.costConcepts.length)} label="Conceptos" icon="receipt-outline" />
         <Stat value={String(adminData.costRules.length)} label="Reglas costo" icon="calculator-outline" />
       </View>
@@ -7387,7 +7388,7 @@ function AdminCatalogList<T extends { id: number; name: string }>({
 }
 
 function AdminRatesModule({ adminData, onChanged }: { adminData: AdminData; onChanged: () => void }) {
-  const [rateTab, setRateTab] = useState<"SHIFT" | "EXTRA" | "UNIT" | "UNIT_TYPES">("SHIFT");
+  const [rateTab, setRateTab] = useState<"SHIFT" | "EXTRA" | "DIRECT_EXTRA" | "UNIT" | "UNIT_TYPES">("SHIFT");
   const [clientId, setClientId] = useState(0);
   const [areaId, setAreaId] = useState(0);
   const [shiftId, setShiftId] = useState(0);
@@ -7395,6 +7396,7 @@ function AdminRatesModule({ adminData, onChanged }: { adminData: AdminData; onCh
   const [rateStatus, setRateStatus] = useState<"ALL" | "ACTIVE" | "HISTORICAL">("ACTIVE");
   const [shiftRate, setShiftRate] = useState<AdminData["serviceRates"][number] | null | "new">(null);
   const [extraRate, setExtraRate] = useState<AdminData["extraHourRates"][number] | null | "new">(null);
+  const [directExtraRate, setDirectExtraRate] = useState<AdminData["directExtraHourRates"][number] | null | "new">(null);
   const [unitRate, setUnitRate] = useState<AdminData["serviceUnitRates"][number] | null | "new">(null);
   const [unitType, setUnitType] = useState<AdminData["serviceUnitTypes"][number] | null | "new">(null);
 
@@ -7433,11 +7435,12 @@ function AdminRatesModule({ adminData, onChanged }: { adminData: AdminData; onCh
       <View style={styles.adminRateTabs}>
         <AdminRateTab label="Tarifas por turno" icon="time-outline" selected={rateTab === "SHIFT"} onPress={() => setRateTab("SHIFT")} />
         <AdminRateTab label="Horas extra por área" icon="timer-outline" selected={rateTab === "EXTRA"} onPress={() => { setRateTab("EXTRA"); setShiftId(0); }} />
+        <AdminRateTab label="Horas extra DIRECTO" icon="time-outline" selected={rateTab === "DIRECT_EXTRA"} onPress={() => { setRateTab("DIRECT_EXTRA"); resetFilters(); }} />
         <AdminRateTab label="Tarifas de descargue" icon="cube-outline" selected={rateTab === "UNIT"} onPress={() => { setRateTab("UNIT"); setShiftId(0); }} />
         <AdminRateTab label="Tipos de unidad" icon="list-outline" selected={rateTab === "UNIT_TYPES"} onPress={() => setRateTab("UNIT_TYPES")} />
       </View>
 
-      {rateTab !== "UNIT_TYPES" && (
+      {rateTab !== "UNIT_TYPES" && rateTab !== "DIRECT_EXTRA" && (
       <FormCard title="Filtros">
         <View style={styles.adminRateFilterGrid}>
           <AdminSelectField
@@ -7493,7 +7496,31 @@ function AdminRatesModule({ adminData, onChanged }: { adminData: AdminData; onCh
       </FormCard>
       )}
 
-      {rateTab === "UNIT_TYPES" ? (
+      {rateTab === "DIRECT_EXTRA" ? (
+        <FormCard title="Horas extra DIRECTO">
+          <View style={styles.between}>
+            <Text style={styles.caption}>Tarifas globales por tipo de turno. La venta al cliente se configura por área.</Text>
+            <Pressable style={styles.smallActionButton} onPress={() => setDirectExtraRate("new")}>
+              <Ionicons name="add-circle-outline" size={16} color={C.navy} />
+              <Text style={styles.smallActionText}>Crear tarifa</Text>
+            </Pressable>
+          </View>
+          {adminData.directExtraHourRates.length === 0 ? (
+            <EmptyState icon="timer-outline" text="No hay tarifas de hora extra DIRECTO configuradas." />
+          ) : adminData.directExtraHourRates.map((rate) => (
+            <Pressable key={rate.id} style={styles.adminRateCard} onPress={() => setDirectExtraRate(rate)}>
+              <View style={styles.adminRateIcon}><Ionicons name="timer-outline" size={20} color={C.navy} /></View>
+              <View style={styles.flex}>
+                <Text style={styles.adminCellMain}>{rate.rateType === "DIURNA" ? "Diurna" : rate.rateType === "NOCTURNA" ? "Nocturna" : "Festiva"}</Text>
+                <Text style={styles.adminRateValidity}>Desde {rate.validFrom}{rate.validTo ? ` hasta ${rate.validTo}` : " ⋅ Sin fecha final"}</Text>
+              </View>
+              <Text style={styles.adminRateSale}>{formatCurrency(rate.hourlyAmount)} / h</Text>
+              <StatusPill good={rate.validFrom <= todayIso() && (!rate.validTo || rate.validTo >= todayIso())} text={rate.validFrom > todayIso() ? "FUTURA" : rate.validTo && rate.validTo < todayIso() ? "HISTÓRICA" : "VIGENTE"} />
+              <Ionicons name="chevron-forward" size={18} color={C.muted} />
+            </Pressable>
+          ))}
+        </FormCard>
+      ) : rateTab === "UNIT_TYPES" ? (
         <AdminCatalogList
           title="Tipos de unidad de descargue"
           rows={adminData.serviceUnitTypes}
@@ -7532,6 +7559,7 @@ function AdminRatesModule({ adminData, onChanged }: { adminData: AdminData; onCh
 
       <AdminServiceRateModal item={shiftRate === "new" ? null : shiftRate} clients={adminData.clients} areas={adminData.areas} shifts={adminData.shifts} initialClientId={clientId} initialAreaId={areaId} visible={shiftRate !== null} onClose={() => setShiftRate(null)} onSaved={async () => { setShiftRate(null); await onChanged(); }} />
       <AdminExtraRateModal item={extraRate === "new" ? null : extraRate} clients={adminData.clients} areas={adminData.areas} initialClientId={clientId} initialAreaId={areaId} visible={extraRate !== null} onClose={() => setExtraRate(null)} onSaved={async () => { setExtraRate(null); await onChanged(); }} />
+      <AdminDirectExtraRateModal item={directExtraRate === "new" ? null : directExtraRate} visible={directExtraRate !== null} onClose={() => setDirectExtraRate(null)} onSaved={async () => { setDirectExtraRate(null); await onChanged(); }} />
       <AdminServiceUnitRateModal item={unitRate === "new" ? null : unitRate} clients={adminData.clients} areas={adminData.areas} unitTypes={adminData.serviceUnitTypes} initialClientId={clientId} initialAreaId={areaId} visible={unitRate !== null} onClose={() => setUnitRate(null)} onSaved={async () => { setUnitRate(null); await onChanged(); }} />
       <AdminServiceUnitTypeModal item={unitType === "new" ? null : unitType} visible={unitType !== null} onClose={() => setUnitType(null)} onSaved={async () => { setUnitType(null); await onChanged(); }} />
     </>
@@ -8669,6 +8697,57 @@ function AdminExtraRateModal({ visible, item, clients, areas, initialClientId, i
       <AdminField label="Costo hora extra" value={costPrice} onChangeText={setCostPrice} icon="receipt-outline" keyboardType="numeric" />
       <AdminField label="Válido desde" value={validFrom} onChangeText={setValidFrom} icon="calendar-outline" />
       <AdminField label="Válido hasta" value={validTo} onChangeText={setValidTo} icon="calendar-outline" />
+    </AdminModalShell>
+  );
+}
+
+function AdminDirectExtraRateModal({ visible, item, onClose, onSaved }: {
+  visible: boolean;
+  item: AdminData["directExtraHourRates"][number] | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [rateType, setRateType] = useState<AdminData["directExtraHourRates"][number]["rateType"]>("DIURNA");
+  const [hourlyAmount, setHourlyAmount] = useState("");
+  const [validFrom, setValidFrom] = useState(todayIso());
+  const [validTo, setValidTo] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!visible) return;
+    setRateType(item?.rateType ?? "DIURNA");
+    setHourlyAmount(item ? String(item.hourlyAmount) : "");
+    setValidFrom(item?.validFrom ?? todayIso());
+    setValidTo(item?.validTo ?? "");
+  }, [item, visible]);
+
+  return (
+    <AdminModalShell visible={visible} title={item ? "Editar hora extra DIRECTO" : "Crear hora extra DIRECTO"} saving={saving} onClose={onClose} onSave={async () => {
+      setSaving(true);
+      try {
+        const amount = Number(hourlyAmount);
+        if (!hourlyAmount.trim() || !Number.isFinite(amount) || amount <= 0) throw new Error("Ingresa un valor por hora mayor que cero.");
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(validFrom) || (validTo && !/^\d{4}-\d{2}-\d{2}$/.test(validTo))) {
+          throw new Error("Usa fechas con formato AAAA-MM-DD.");
+        }
+        if (validTo && validTo < validFrom) throw new Error("La fecha final no puede ser anterior a la inicial.");
+        await saveAdminDirectExtraHourRate({ id: item?.id, rateType, hourlyAmount: amount, validFrom, validTo: validTo || null });
+        await onSaved();
+      } catch (cause) {
+        Alert.alert("No fue posible guardar", errorMessage(cause));
+      } finally {
+        setSaving(false);
+      }
+    }}>
+      <AdminOptionChips label="Tipo de hora extra" value={rateType} options={[
+        { id: "DIURNA", name: "Diurna" },
+        { id: "NOCTURNA", name: "Nocturna" },
+        { id: "FESTIVA", name: "Festiva" },
+      ]} onChange={(next) => setRateType(next as AdminData["directExtraHourRates"][number]["rateType"])} />
+      <AdminField label="Valor por hora" value={hourlyAmount} onChangeText={setHourlyAmount} icon="cash-outline" keyboardType="numeric" />
+      <AdminField label="Válido desde" value={validFrom} onChangeText={setValidFrom} icon="calendar-outline" />
+      <AdminField label="Válido hasta" value={validTo} onChangeText={setValidTo} icon="calendar-outline" />
+      <Notice icon="information-circle-outline" text="Una tarifa ya utilizada no puede cambiar de tipo, valor ni fecha inicial. Para actualizarla, cierra su vigencia y crea otra." />
     </AdminModalShell>
   );
 }

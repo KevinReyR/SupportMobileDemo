@@ -1632,6 +1632,7 @@ export async function loadAdminData(): Promise<AdminData> {
     shiftsResult,
     serviceRatesResult,
     extraRatesResult,
+    directExtraRatesResult,
     serviceUnitTypesResult,
     serviceUnitRatesResult,
     costConceptsResult,
@@ -1650,6 +1651,10 @@ export async function loadAdminData(): Promise<AdminData> {
     supabase
       .from("area_extra_hour_rates")
       .select("id,area_id,sale_price,cost_price,valid_from,valid_to,area(name,client_id,clients(name))")
+      .order("valid_from", { ascending: false }),
+    supabase
+      .from("direct_extra_hour_rates")
+      .select("id,rate_type,hourly_amount,valid_from,valid_to")
       .order("valid_from", { ascending: false }),
     supabase.from("service_unit_type").select("id,code,name,description,is_active").order("name"),
     supabase
@@ -1679,6 +1684,7 @@ export async function loadAdminData(): Promise<AdminData> {
     shiftsResult,
     serviceRatesResult,
     extraRatesResult,
+    directExtraRatesResult,
     serviceUnitTypesResult,
     serviceUnitRatesResult,
     costConceptsResult,
@@ -1745,6 +1751,13 @@ export async function loadAdminData(): Promise<AdminData> {
         validTo: row.valid_to,
       };
     }),
+    directExtraHourRates: (directExtraRatesResult.data ?? []).map((row: any) => ({
+      id: row.id,
+      rateType: row.rate_type,
+      hourlyAmount: Number(row.hourly_amount),
+      validFrom: row.valid_from,
+      validTo: row.valid_to,
+    })),
     serviceUnitTypes: (serviceUnitTypesResult.data ?? []).map((row: any) => ({
       id: row.id,
       code: row.code,
@@ -1916,6 +1929,25 @@ export async function saveAdminExtraHourRate(input: {
   const result = input.id
     ? await supabase.from("area_extra_hour_rates").update(payload).eq("id", input.id)
     : await supabase.from("area_extra_hour_rates").insert(payload);
+  fail(result.error);
+}
+
+export async function saveAdminDirectExtraHourRate(input: {
+  id?: number;
+  rateType: AdminData["directExtraHourRates"][number]["rateType"];
+  hourlyAmount: number;
+  validFrom: string;
+  validTo: string | null;
+}) {
+  const payload = {
+    rate_type: input.rateType,
+    hourly_amount: input.hourlyAmount,
+    valid_from: input.validFrom,
+    valid_to: input.validTo,
+  };
+  const result = input.id
+    ? await supabase.from("direct_extra_hour_rates").update(payload).eq("id", input.id)
+    : await supabase.from("direct_extra_hour_rates").insert(payload);
   fail(result.error);
 }
 

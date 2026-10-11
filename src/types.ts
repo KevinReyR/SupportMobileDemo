@@ -284,6 +284,16 @@ export interface AdminExtraHourRate {
   validTo: string | null;
 }
 
+export type DirectExtraHourRateType = "DIURNA" | "NOCTURNA" | "FESTIVA";
+
+export interface AdminDirectExtraHourRate {
+  id: number;
+  rateType: DirectExtraHourRateType;
+  hourlyAmount: number;
+  validFrom: string;
+  validTo: string | null;
+}
+
 export interface AdminServiceUnitType extends NamedRecord {
   code: string;
   description: string | null;
@@ -398,6 +408,7 @@ export interface AdminData {
   shifts: AdminShift[];
   serviceRates: AdminServiceRate[];
   extraHourRates: AdminExtraHourRate[];
+  directExtraHourRates: AdminDirectExtraHourRate[];
   serviceUnitTypes: AdminServiceUnitType[];
   serviceUnitRates: AdminServiceUnitRate[];
   costConcepts: AdminCostConcept[];
