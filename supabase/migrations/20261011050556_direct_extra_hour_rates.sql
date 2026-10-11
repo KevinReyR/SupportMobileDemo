@@ -252,6 +252,36 @@ $$;
 revoke execute on function public.review_operation(bigint, varchar, text) from public, anon;
 grant execute on function public.review_operation(bigint, varchar, text) to authenticated;
 
+-- Keep a row-level recovery snapshot of every DIRECTO extra-hour cost repriced below.
+create table private.direct_extra_hour_cost_backup (
+  shift_cost_id bigint primary key,
+  operation_assignment_id bigint not null,
+  operation_date date not null,
+  old_rule_value numeric,
+  old_base_cost_amount numeric,
+  old_shift_total_cost numeric,
+  old_unit_extra_hour_cost_price numeric,
+  old_assignment_total_cost numeric,
+  captured_at timestamp without time zone not null default public.colombia_now()
+);
+revoke all on private.direct_extra_hour_cost_backup from public, anon, authenticated;
+
+insert into private.direct_extra_hour_cost_backup (
+  shift_cost_id, operation_assignment_id, operation_date,
+  old_rule_value, old_base_cost_amount, old_shift_total_cost,
+  old_unit_extra_hour_cost_price, old_assignment_total_cost
+)
+select sc.id, oa.id, o.operation_date,
+  sc.rule_value, sc.base_cost_amount, sc.total_cost,
+  oa.unit_extra_hour_cost_price, oa.total_cost
+from public.shift_costs sc
+join public.cost_concepts concept on concept.id = sc.cost_concept_id
+  and concept.code = 'COSTO_HORA_EXTRA'
+join public.contract_type ct on ct.id = sc.contract_type_id
+  and upper(ct.name) = 'DIRECTO'
+join public.operation_assignment oa on oa.id = sc.operation_assignment_id
+join public.operation o on o.id = sc.operation_id and o.status = 'CERRADO';
+
 do $$
 declare
   target_operation record;
