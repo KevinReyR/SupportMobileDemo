@@ -61,6 +61,26 @@ export interface OperationEditInput {
   serviceUnitTypeId: number | null;
   plannedUnits: number | null;
   contractorIds: number[];
+  confirmedSecondShiftContractorIds: number[];
+}
+
+export type ShiftAssignmentCheckStatus =
+  | "AVAILABLE"
+  | "CONFIRM_REQUIRED"
+  | "SAME_OPERATION"
+  | "LIMIT_REACHED"
+  | "DISCHARGE_CONFLICT";
+
+export interface ExistingShiftAssignment {
+  operationId: number;
+  client: string;
+  area: string;
+  shift: string;
+}
+
+export interface ShiftAssignmentCheck {
+  status: ShiftAssignmentCheckStatus;
+  assignments: ExistingShiftAssignment[];
 }
 
 export interface OperationChangeHistoryItem {
@@ -264,6 +284,16 @@ export interface AdminExtraHourRate {
   validTo: string | null;
 }
 
+export type DirectExtraHourRateType = "DIURNA" | "NOCTURNA" | "FESTIVA";
+
+export interface AdminDirectExtraHourRate {
+  id: number;
+  rateType: DirectExtraHourRateType;
+  hourlyAmount: number;
+  validFrom: string;
+  validTo: string | null;
+}
+
 export interface AdminServiceUnitType extends NamedRecord {
   code: string;
   description: string | null;
@@ -361,6 +391,8 @@ export interface AdminPayrollPeriod {
   eligibleDays: number;
   paidDays: number;
   baseSalaryAmount: number;
+  extraHourAmount: number;
+  totalPayAmount: number;
   status: PayrollPeriodStatus;
   calculatedAt: string;
   closedAt: string | null;
@@ -378,6 +410,7 @@ export interface AdminData {
   shifts: AdminShift[];
   serviceRates: AdminServiceRate[];
   extraHourRates: AdminExtraHourRate[];
+  directExtraHourRates: AdminDirectExtraHourRate[];
   serviceUnitTypes: AdminServiceUnitType[];
   serviceUnitRates: AdminServiceUnitRate[];
   costConcepts: AdminCostConcept[];

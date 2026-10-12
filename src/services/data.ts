@@ -24,6 +24,7 @@ import type {
   PersonnelRequest,
   Role,
   RoleCode,
+  ShiftAssignmentCheck,
   StatisticsContractorOption,
   StatisticsSummary,
   UserContext,
@@ -856,6 +857,7 @@ export async function createOperation(input: {
   areaId: number;
   shiftId: number;
   contractorIds: number[];
+  confirmedSecondShiftContractorIds: number[];
 }) {
   const result = await supabase.rpc("create_operation_with_assignments", {
     p_operation_date: input.date,
@@ -865,10 +867,40 @@ export async function createOperation(input: {
     p_assignments: input.contractorIds.map((contractorId) => ({
       contractor_id: contractorId,
       planned_quantity: 1,
+      confirmed_second_shift: input.confirmedSecondShiftContractorIds.includes(contractorId),
     })),
   });
   fail(result.error);
   return result.data as number;
+}
+
+export async function checkContractorShiftAssignment(input: {
+  date: string;
+  contractorId: number;
+  clientId: number;
+  areaId: number;
+  shiftId: number;
+  excludeOperationId?: number;
+}): Promise<ShiftAssignmentCheck> {
+  const result = await supabase.rpc("check_contractor_shift_assignment", {
+    p_operation_date: input.date,
+    p_contractor_id: input.contractorId,
+    p_target_client_id: input.clientId,
+    p_target_area_id: input.areaId,
+    p_target_shift_id: input.shiftId,
+    p_exclude_operation_id: input.excludeOperationId ?? null,
+  });
+  fail(result.error);
+  const row = Array.isArray(result.data) ? result.data[0] : result.data;
+  return {
+    status: row.status,
+    assignments: (row.assignments ?? []).map((assignment: any) => ({
+      operationId: Number(assignment.operation_id),
+      client: cleanText(assignment.client),
+      area: cleanText(assignment.area),
+      shift: cleanText(assignment.shift),
+    })),
+  };
 }
 
 export async function loadAvailableServiceUnits(areaId: number, date: string): Promise<{ id: number; name: string }[]> {
@@ -919,7 +951,7 @@ export async function loadAvailableContractorsForOperationEdit(
 }
 
 export async function updateInProgressOperation(input: OperationEditInput): Promise<number> {
-  const result = await supabase.rpc("update_in_progress_operation", {
+  const result = await supabase.rpc("update_in_progress_operation_v2", {
     p_operation_id: input.operationId,
     p_operation_date: input.date,
     p_client_id: input.clientId,
@@ -930,6 +962,7 @@ export async function updateInProgressOperation(input: OperationEditInput): Prom
       input.operationType === "DESCARGUE" ? input.serviceUnitTypeId : null,
     p_planned_units: input.operationType === "DESCARGUE" ? input.plannedUnits : null,
     p_contractor_ids: input.contractorIds,
+    p_confirmed_second_shift_contractor_ids: input.confirmedSecondShiftContractorIds,
   });
   fail(result.error);
   return Number(result.data ?? 0);
@@ -959,6 +992,7 @@ export async function finalizeOperation(
   operationId: number,
   assignments: Assignment[],
   observations: string,
+  confirmedSecondShiftContractorIds: number[],
 ) {
   const result = await supabase.rpc("finalize_operation", {
     p_operation_id: operationId,
@@ -969,6 +1003,7 @@ export async function finalizeOperation(
       worked_quantity: assignment.attendanceStatus === "AUSENTE" ? 0 : 1,
       extra_hours: assignment.extraHours,
       observations: assignment.observations ?? "",
+      confirmed_second_shift: confirmedSecondShiftContractorIds.includes(assignment.contractorId),
     })),
     p_observations: observations || null,
   });
@@ -1382,6 +1417,8 @@ export async function loadAdminPayroll(periodStart: string): Promise<AdminPayrol
       eligibleDays: Number(item.eligibleDays ?? 0),
       paidDays: Number(item.paidDays ?? 0),
       baseSalaryAmount: Number(item.baseSalaryAmount ?? 0),
+      extraHourAmount: Number(item.extraHourAmount ?? 0),
+      totalPayAmount: Number(item.totalPayAmount ?? Number(item.baseSalaryAmount ?? 0) + Number(item.extraHourAmount ?? 0)),
       status: item.status,
       calculatedAt: item.calculatedAt,
       closedAt: item.closedAt ?? null,
@@ -1593,6 +1630,7 @@ export async function loadAdminData(): Promise<AdminData> {
     shiftsResult,
     serviceRatesResult,
     extraRatesResult,
+    directExtraRatesResult,
     serviceUnitTypesResult,
     serviceUnitRatesResult,
     costConceptsResult,
@@ -1611,6 +1649,10 @@ export async function loadAdminData(): Promise<AdminData> {
     supabase
       .from("area_extra_hour_rates")
       .select("id,area_id,sale_price,cost_price,valid_from,valid_to,area(name,client_id,clients(name))")
+      .order("valid_from", { ascending: false }),
+    supabase
+      .from("direct_extra_hour_rates")
+      .select("id,rate_type,hourly_amount,valid_from,valid_to")
       .order("valid_from", { ascending: false }),
     supabase.from("service_unit_type").select("id,code,name,description,is_active").order("name"),
     supabase
@@ -1640,6 +1682,7 @@ export async function loadAdminData(): Promise<AdminData> {
     shiftsResult,
     serviceRatesResult,
     extraRatesResult,
+    directExtraRatesResult,
     serviceUnitTypesResult,
     serviceUnitRatesResult,
     costConceptsResult,
@@ -1706,6 +1749,13 @@ export async function loadAdminData(): Promise<AdminData> {
         validTo: row.valid_to,
       };
     }),
+    directExtraHourRates: (directExtraRatesResult.data ?? []).map((row: any) => ({
+      id: row.id,
+      rateType: row.rate_type,
+      hourlyAmount: Number(row.hourly_amount),
+      validFrom: row.valid_from,
+      validTo: row.valid_to,
+    })),
     serviceUnitTypes: (serviceUnitTypesResult.data ?? []).map((row: any) => ({
       id: row.id,
       code: row.code,
@@ -1877,6 +1927,25 @@ export async function saveAdminExtraHourRate(input: {
   const result = input.id
     ? await supabase.from("area_extra_hour_rates").update(payload).eq("id", input.id)
     : await supabase.from("area_extra_hour_rates").insert(payload);
+  fail(result.error);
+}
+
+export async function saveAdminDirectExtraHourRate(input: {
+  id?: number;
+  rateType: AdminData["directExtraHourRates"][number]["rateType"];
+  hourlyAmount: number;
+  validFrom: string;
+  validTo: string | null;
+}) {
+  const payload = {
+    rate_type: input.rateType,
+    hourly_amount: input.hourlyAmount,
+    valid_from: input.validFrom,
+    valid_to: input.validTo,
+  };
+  const result = input.id
+    ? await supabase.from("direct_extra_hour_rates").update(payload).eq("id", input.id)
+    : await supabase.from("direct_extra_hour_rates").insert(payload);
   fail(result.error);
 }
 
