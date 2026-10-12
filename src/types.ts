@@ -16,6 +16,38 @@ export interface NamedRecord {
 export type ContractStatus = "ACTIVO" | "PENDIENTE" | "INACTIVO";
 export type WorkwearMovementType = "ENTREGA" | "DEVOLUCION" | "BAJA";
 
+export type ContractorNoveltyType = "INCAPACIDAD" | "PERMISO" | "LICENCIA" | "ASISTENCIA" | "VACACIONES";
+export type ContractorNoveltySubtype =
+  | "MEDICA" | "ACCIDENTE_TRABAJO"
+  | "REMUNERADO" | "NO_REMUNERADO"
+  | "MATERNIDAD" | "PATERNIDAD" | "LUTO" | "OTRA"
+  | "TARDANZA" | "AUSENCIA" | "ABANDONO";
+
+export interface ContractorNovelty {
+  id: number;
+  contractorId: number;
+  startDate: string;
+  endDate: string | null;
+  typeCode: ContractorNoveltyType;
+  subtypeCode: ContractorNoveltySubtype | null;
+  isJustified: boolean;
+  description: string;
+  createdBy: string;
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ContractorNoveltyInput {
+  contractorId: number;
+  startDate: string;
+  endDate: string | null;
+  typeCode: ContractorNoveltyType;
+  subtypeCode: ContractorNoveltySubtype | null;
+  isJustified: boolean;
+  description: string;
+}
+
 export interface UserContext {
   id: string;
   name: string;
