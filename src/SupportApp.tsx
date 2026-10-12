@@ -42,6 +42,7 @@ import {
   closeAdminDirectPayroll,
   createAdminUser,
   createContractorDraft,
+  createContractorNovelty,
   createContractorDocumentSignedUrl,
   createContractorProfilePhotoSignedUrl,
   createOperation,
@@ -56,6 +57,7 @@ import {
   loadClientContractorHistory,
   loadContractorDocuments,
   loadContractorHistory,
+  loadContractorNovelties,
   loadContractorProfile,
   loadContractorWorkwearMovements,
   loadContractorWorkwearSummary,
@@ -96,6 +98,7 @@ import {
   toggleUserClient,
   updateInProgressOperation,
   updateAdminContractor,
+  updateContractorNovelty,
   updateAdminDirectPayrollPeriod,
   updateAdminUserProfile,
   uploadContractorActivationDocument,
@@ -111,6 +114,10 @@ import type {
   Contractor,
   ContractorDocument,
   ContractorHistory,
+  ContractorNovelty,
+  ContractorNoveltyInput,
+  ContractorNoveltySubtype,
+  ContractorNoveltyType,
   ContractorOnboardingContract,
   ContractorOnboardingForm,
   ContractorOnboardingSubmission,
@@ -339,6 +346,17 @@ function formatDateRange(startDate: string, endDate: string) {
 function formatColombiaDateTime(value: string) {
   const [date, time = ""] = value.replace("T", " ").split(" ");
   return `${formatDate(date)}${time ? ` ⋅ ${time.slice(0, 5)}` : ""}`;
+}
+
+function formatBogotaTimestamp(value: string) {
+  return new Intl.DateTimeFormat("es-CO", {
+    timeZone: "America/Bogota",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
 }
 
 function todayIso() {
@@ -2063,6 +2081,7 @@ function CalendarModal({
   title = "Filtrar por fecha",
   subtitle = "Selecciona el día que quieres visualizar.",
   resetLabel = "Mostrar últimos 3 días",
+  minimumDate,
   onClose,
   onSelect,
   onReset,
@@ -2073,6 +2092,7 @@ function CalendarModal({
   title?: string;
   subtitle?: string;
   resetLabel?: string;
+  minimumDate?: string;
   onClose: () => void;
   onSelect: (date: string) => void;
   onReset?: () => void;
@@ -2226,6 +2246,7 @@ function CalendarModal({
                   );
                   const selected = isoDate === selectedDate;
                   const isToday = isoDate === todayIso();
+                  const disabled = Boolean(minimumDate && isoDate < minimumDate);
                   return (
                     <Pressable
                       key={isoDate}
@@ -2233,7 +2254,10 @@ function CalendarModal({
                         styles.calendarDay,
                         isToday && styles.calendarToday,
                         selected && styles.calendarDaySelected,
+                        disabled && styles.calendarDayDisabled,
                       ]}
+                      disabled={disabled}
+                      accessibilityState={{ disabled, selected }}
                       onPress={() => onSelect(isoDate)}
                     >
                       <Text
@@ -4665,6 +4689,10 @@ type ContractorActivationDocumentsCardHandle = {
   replaceDocuments: (documents: ContractorDocument[]) => void;
 };
 
+type ContractorNoveltiesSectionHandle = {
+  replaceNovelties: (novelties: ContractorNovelty[]) => void;
+};
+
 function ClientContractorProfile({
   contractor,
   onContractorRefreshed,
@@ -4790,6 +4818,7 @@ function ContractorProfile({
   const documentsRef = useRef<ContractorDocumentsSectionHandle>(null);
   const workwearRef = useRef<ContractorWorkwearSectionHandle>(null);
   const activationRef = useRef<ContractorActivationDocumentsCardHandle>(null);
+  const noveltiesRef = useRef<ContractorNoveltiesSectionHandle>(null);
   useEffect(() => {
     loadContractorHistory(contractor.id)
       .then(setHistory)
@@ -4802,19 +4831,23 @@ function ContractorProfile({
     refreshingRef.current = true;
     setRefreshing(true);
     try {
-      const [updatedContractor, updatedHistory, updatedDocuments, updatedSummary, updatedMovements] =
+      const [updatedContractor, updatedHistory, updatedDocuments, updatedSummary, updatedMovements, updatedNovelties] =
         await Promise.all([
           loadContractorProfile(contractor.id),
           loadContractorHistory(contractor.id),
           loadContractorDocuments(contractor.id),
           loadContractorWorkwearSummary(contractor.id),
           loadContractorWorkwearMovements(contractor.id),
+          context.roleCode === "COORDINATOR" || context.roleCode === "DIRECTOR"
+            ? loadContractorNovelties(contractor.id)
+            : Promise.resolve([]),
         ]);
       onContractorRefreshed(updatedContractor);
       setHistory(updatedHistory);
       documentsRef.current?.replaceDocuments(updatedDocuments);
       workwearRef.current?.replaceWorkwear(updatedSummary, updatedMovements);
       activationRef.current?.replaceDocuments(updatedDocuments);
+      noveltiesRef.current?.replaceNovelties(updatedNovelties);
     } catch (cause) {
       Alert.alert("No fue posible actualizar", errorMessage(cause));
     } finally {
@@ -4861,6 +4894,9 @@ function ContractorProfile({
         ["Parentesco", contractor.emergencyContactRelationship],
         ["Teléfono", contractor.emergencyContactPhone],
       ]} />
+      {(context.roleCode === "COORDINATOR" || context.roleCode === "DIRECTOR") && (
+        <ContractorNoveltiesSection key={contractor.id} ref={noveltiesRef} contractorId={contractor.id} />
+      )}
       <ContractorWorkwearSection ref={workwearRef} contractorId={contractor.id} workwearTypes={workwearTypes} />
       {context.role === "Director" && contractor.contractStatus === "PENDIENTE" && (
         <ContractorActivationDocumentsCard
@@ -4915,6 +4951,295 @@ function ContractorProfile({
     </Page>
   );
 }
+
+const noveltyTypes: { id: number; code: ContractorNoveltyType; name: string }[] = [
+  { id: 1, code: "INCAPACIDAD", name: "Incapacidad o accidente" },
+  { id: 2, code: "PERMISO", name: "Permiso personal" },
+  { id: 3, code: "LICENCIA", name: "Licencia" },
+  { id: 4, code: "ASISTENCIA", name: "Asistencia" },
+  { id: 5, code: "VACACIONES", name: "Vacaciones" },
+];
+
+const noveltySubtypes: Record<ContractorNoveltyType, { id: number; code: ContractorNoveltySubtype; name: string }[]> = {
+  INCAPACIDAD: [
+    { id: 1, code: "MEDICA", name: "Incapacidad médica" },
+    { id: 2, code: "ACCIDENTE_TRABAJO", name: "Accidente de trabajo" },
+  ],
+  PERMISO: [
+    { id: 1, code: "REMUNERADO", name: "Remunerado" },
+    { id: 2, code: "NO_REMUNERADO", name: "No remunerado" },
+  ],
+  LICENCIA: [
+    { id: 1, code: "MATERNIDAD", name: "Maternidad" },
+    { id: 2, code: "PATERNIDAD", name: "Paternidad" },
+    { id: 3, code: "LUTO", name: "Luto" },
+    { id: 4, code: "OTRA", name: "Otra licencia" },
+  ],
+  ASISTENCIA: [
+    { id: 1, code: "TARDANZA", name: "Tardanza" },
+    { id: 2, code: "AUSENCIA", name: "Ausencia" },
+    { id: 3, code: "ABANDONO", name: "Abandono de puesto" },
+  ],
+  VACACIONES: [],
+};
+
+function noveltyLabel(item: ContractorNovelty) {
+  const type = noveltyTypes.find((option) => option.code === item.typeCode)?.name ?? item.typeCode;
+  const subtype = noveltySubtypes[item.typeCode]?.find((option) => option.code === item.subtypeCode)?.name;
+  return subtype ? `${type} · ${subtype}` : type;
+}
+
+const ContractorNoveltiesSection = forwardRef<ContractorNoveltiesSectionHandle, { contractorId: number }>(
+  function ContractorNoveltiesSection({ contractorId }, ref) {
+    const [items, setItems] = useState<ContractorNovelty[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState("");
+    const [formVisible, setFormVisible] = useState(false);
+    const [editingId, setEditingId] = useState<number | null>(null);
+    const [startDate, setStartDate] = useState(todayIso());
+    const [endDate, setEndDate] = useState<string | null>(null);
+    const [typeCode, setTypeCode] = useState<ContractorNoveltyType | null>(null);
+    const [subtypeCode, setSubtypeCode] = useState<ContractorNoveltySubtype | null>(null);
+    const [isJustified, setIsJustified] = useState<boolean | null>(null);
+    const [description, setDescription] = useState("");
+    const [selector, setSelector] = useState<"type" | "subtype" | null>(null);
+    const [calendarField, setCalendarField] = useState<"start" | "end" | null>(null);
+    const [saving, setSaving] = useState(false);
+    const [formError, setFormError] = useState("");
+
+    const reload = useCallback(async () => {
+      const nextItems = await loadContractorNovelties(contractorId);
+      setItems(nextItems);
+      setLoadError("");
+      setLoading(false);
+    }, [contractorId]);
+
+    useEffect(() => {
+      let active = true;
+      setLoading(true);
+      loadContractorNovelties(contractorId)
+        .then((value) => { if (active) { setItems(value); setLoadError(""); } })
+        .catch((cause) => { if (active) setLoadError(errorMessage(cause)); })
+        .finally(() => { if (active) setLoading(false); });
+      return () => { active = false; };
+    }, [contractorId]);
+
+    useImperativeHandle(ref, () => ({
+      replaceNovelties: (value) => { setItems(value); setLoadError(""); setLoading(false); },
+    }), []);
+
+    const openNew = () => {
+      setEditingId(null);
+      setStartDate(todayIso());
+      setEndDate(null);
+      setTypeCode(null);
+      setSubtypeCode(null);
+      setIsJustified(null);
+      setDescription("");
+      setFormError("");
+      setFormVisible(true);
+    };
+
+    const openEdit = (item: ContractorNovelty) => {
+      setEditingId(item.id);
+      setStartDate(item.startDate);
+      setEndDate(item.endDate);
+      setTypeCode(item.typeCode);
+      setSubtypeCode(item.subtypeCode);
+      setIsJustified(item.isJustified);
+      setDescription(item.description);
+      setFormError("");
+      setFormVisible(true);
+    };
+
+    const save = async () => {
+      if (!startDate || !typeCode || (typeCode !== "VACACIONES" && !subtypeCode)
+        || isJustified === null || !description.trim()) {
+        setFormError("Completa el tipo, subtipo, justificación y descripción de la novedad.");
+        return;
+      }
+      if (endDate && endDate < startDate) {
+        setFormError("La fecha final no puede ser anterior a la fecha de inicio.");
+        return;
+      }
+      const input: ContractorNoveltyInput = {
+        contractorId,
+        startDate,
+        endDate,
+        typeCode,
+        subtypeCode: typeCode === "VACACIONES" ? null : subtypeCode,
+        isJustified,
+        description: description.trim(),
+      };
+      setSaving(true);
+      setFormError("");
+      try {
+        if (editingId === null) await createContractorNovelty(input);
+        else await updateContractorNovelty(editingId, input);
+        setFormVisible(false);
+        try { await reload(); }
+        catch (cause) { setLoadError(errorMessage(cause)); }
+      } catch (cause) {
+        setFormError(errorMessage(cause));
+      } finally {
+        setSaving(false);
+      }
+    };
+
+    const selectedType = noveltyTypes.find((option) => option.code === typeCode);
+    const subtypes = typeCode ? noveltySubtypes[typeCode] : [];
+    const selectedSubtype = subtypes.find((option) => option.code === subtypeCode);
+
+    return (
+      <>
+        <SectionTitle title="Novedades" action={`${items.length} registros`} />
+        <SecondaryButton
+          label="Reportar Novedad"
+          icon="add-circle-outline"
+          disabled={formVisible}
+          onPress={openNew}
+        />
+        {formVisible && (
+          <FormCard title={editingId === null ? "Nueva novedad" : "Corregir novedad"}>
+            <Choice label="Fecha de inicio *" value={formatDate(startDate)} icon="calendar-outline" onPress={() => setCalendarField("start")} />
+            <Choice
+              label="Fecha de finalización (opcional)"
+              value={endDate ? formatDate(endDate) : "Sin fecha final · novedad abierta"}
+              icon="calendar-outline"
+              onPress={() => setCalendarField("end")}
+            />
+            {endDate && (
+              <Pressable onPress={() => setEndDate(null)} style={styles.retryLink}>
+                <Ionicons name="close-circle-outline" size={17} color={C.navy} />
+                <Text style={styles.caption}>Dejar sin fecha de finalización</Text>
+              </Pressable>
+            )}
+            <Choice label="Tipo de novedad *" value={selectedType?.name ?? "Seleccionar tipo"} icon="list-outline" onPress={() => setSelector("type")} />
+            {typeCode && typeCode !== "VACACIONES" && (
+              <Choice label="Subtipo *" value={selectedSubtype?.name ?? "Seleccionar subtipo"} icon="list-outline" onPress={() => setSelector("subtype")} />
+            )}
+            <Label text="¿Justificado? *" />
+            <View style={styles.noveltyChoiceRow}>
+              {([true, false] as const).map((value) => (
+                <Pressable
+                  key={String(value)}
+                  style={[styles.noveltyChoice, isJustified === value && styles.noveltyChoiceSelected]}
+                  accessibilityRole="radio"
+                  accessibilityState={{ selected: isJustified === value }}
+                  onPress={() => setIsJustified(value)}
+                >
+                  <Text style={[styles.secondaryButtonText, isJustified === value && styles.noveltyChoiceTextSelected]}>
+                    {value ? "Sí" : "No"}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+            <Label text="Descripción *" />
+            <TextInput
+              value={description}
+              onChangeText={setDescription}
+              placeholder={typeCode === "LICENCIA" && subtypeCode === "OTRA" ? "Indica cuál es la licencia y describe la novedad" : "Describe la novedad"}
+              placeholderTextColor="#929BAD"
+              multiline
+              style={styles.textArea}
+            />
+            {formError ? <Notice icon="alert-circle-outline" text={formError} tone="error" /> : null}
+            <View style={styles.actionRow}>
+              <SecondaryButton label="Cancelar" disabled={saving} onPress={() => setFormVisible(false)} />
+              <PrimaryButton label={saving ? "Guardando..." : "Guardar novedad"} icon="save-outline" disabled={saving} onPress={save} />
+            </View>
+          </FormCard>
+        )}
+        {loading ? <ActivityIndicator color={C.navy} /> : null}
+        {loadError ? (
+          <View style={styles.card}>
+            <Notice icon="alert-circle-outline" text={`No fue posible cargar las novedades: ${loadError}`} tone="error" />
+            <SecondaryButton label="Reintentar" icon="refresh-outline" onPress={() => {
+              setLoading(true);
+              reload().catch((cause) => { setLoadError(errorMessage(cause)); setLoading(false); });
+            }} />
+          </View>
+        ) : null}
+        {!loading && !loadError && items.length === 0 ? (
+          <EmptyState icon="document-text-outline" text="Aún no hay novedades registradas para este contratista." />
+        ) : null}
+        {items.map((item) => (
+          <View key={item.id} style={styles.card}>
+            <View style={styles.between}>
+              <View style={styles.flex}>
+                <Text style={styles.cardTitle} selectable>{noveltyLabel(item)}</Text>
+                <Text style={styles.cardMeta} selectable>
+                  {item.endDate ? formatDateRange(item.startDate, item.endDate) : `${formatDate(item.startDate)} · Sin fecha final`}
+                </Text>
+              </View>
+              <Pressable
+                style={[styles.smallActionButton, formVisible && styles.buttonDisabled]}
+                disabled={formVisible}
+                accessibilityLabel={`Editar novedad: ${noveltyLabel(item)}`}
+                onPress={() => openEdit(item)}
+              >
+                <Ionicons name="create-outline" size={16} color={C.navy} />
+                <Text style={styles.secondaryButtonText}>Editar</Text>
+              </Pressable>
+            </View>
+            <Text style={styles.description} selectable>{item.description}</Text>
+            <Text style={styles.caption} selectable>
+              {item.isJustified ? "Justificada" : "No justificada"} · Registrada {formatBogotaTimestamp(item.createdAt)}
+              {item.updatedBy ? ` · Modificada ${formatBogotaTimestamp(item.updatedAt)}` : ""}
+            </Text>
+          </View>
+        ))}
+        <DropdownModal
+          visible={selector === "type"}
+          title="Tipo de novedad"
+          options={noveltyTypes}
+          selectedId={selectedType?.id ?? 0}
+          onClose={() => setSelector(null)}
+          onSelect={(id) => {
+            const option = noveltyTypes.find((item) => item.id === id);
+            setTypeCode(option?.code ?? null);
+            setSubtypeCode(null);
+            setSelector(null);
+          }}
+        />
+        <DropdownModal
+          visible={selector === "subtype"}
+          title="Subtipo de novedad"
+          options={subtypes}
+          selectedId={selectedSubtype?.id ?? 0}
+          onClose={() => setSelector(null)}
+          onSelect={(id) => {
+            setSubtypeCode(subtypes.find((item) => item.id === id)?.code ?? null);
+            setSelector(null);
+          }}
+        />
+        <CalendarModal
+          visible={calendarField !== null}
+          selectedDate={calendarField === "end" ? endDate : startDate}
+          defaultDate={startDate}
+          minimumDate={calendarField === "end" ? startDate : undefined}
+          title={calendarField === "end" ? "Fecha de finalización" : "Fecha de inicio"}
+          subtitle="Se permiten fechas pasadas y futuras."
+          onClose={() => setCalendarField(null)}
+          onSelect={(date) => {
+            if (calendarField === "start") {
+              setStartDate(date);
+              if (endDate && endDate < date) setEndDate(null);
+            } else if (calendarField === "end") {
+              if (date < startDate) {
+                setFormError("La fecha final no puede ser anterior a la fecha de inicio.");
+                return;
+              }
+              setEndDate(date);
+            }
+            setFormError("");
+            setCalendarField(null);
+          }}
+        />
+      </>
+    );
+  },
+);
 
 function ContractorProfileAvatar({ fileId, initials }: { fileId: string | null; initials: string }) {
   const [photoUrl, setPhotoUrl] = useState("");
@@ -9471,6 +9796,10 @@ const styles = StyleSheet.create({
   destructiveButton: { borderColor: C.red },
   buttonDisabled: { opacity: 0.45 },
   actionRow: { flexDirection: "row", gap: 10 },
+  noveltyChoiceRow: { flexDirection: "row", gap: 10 },
+  noveltyChoice: { flex: 1, minHeight: 44, borderRadius: 12, borderWidth: 1, borderColor: C.line, alignItems: "center", justifyContent: "center", backgroundColor: C.white },
+  noveltyChoiceSelected: { borderColor: C.navy, backgroundColor: C.blueBg },
+  noveltyChoiceTextSelected: { color: C.navy },
   auditEntry: { flexDirection: "row", alignItems: "flex-start", gap: 9, marginTop: 12 },
   auditDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: C.orange, marginTop: 7 },
   rowActions: { flexDirection: "row", gap: 10 },

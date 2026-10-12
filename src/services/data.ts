@@ -14,6 +14,8 @@ import type {
   ContractorOnboardingSubmission,
   ContractorDocument,
   ContractorHistory,
+  ContractorNovelty,
+  ContractorNoveltyInput,
   DirectorReportRankingItem,
   DirectorReportsSummary,
   DirectorDashboard,
@@ -580,6 +582,76 @@ export async function loadContractorHistory(contractorId: number): Promise<Contr
     extraHours: Number(row.extra_hours ?? 0),
     observations: cleanText(row.observations) || null,
   }));
+}
+
+const contractorNoveltyColumns =
+  "id,contractor_id,start_date,end_date,type_code,subtype_code,is_justified,description,created_by,updated_by,created_at,updated_at";
+
+export async function loadContractorNovelties(contractorId: number): Promise<ContractorNovelty[]> {
+  const result = await supabase
+    .from("contractor_novelties")
+    .select(contractorNoveltyColumns)
+    .eq("contractor_id", contractorId)
+    .order("start_date", { ascending: false })
+    .order("created_at", { ascending: false });
+  fail(result.error);
+  return (result.data ?? []).map((row: any) => ({
+    id: Number(row.id),
+    contractorId: Number(row.contractor_id),
+    startDate: row.start_date,
+    endDate: row.end_date,
+    typeCode: row.type_code,
+    subtypeCode: row.subtype_code,
+    isJustified: row.is_justified,
+    description: row.description,
+    createdBy: row.created_by,
+    updatedBy: row.updated_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+}
+
+function validatedContractorNovelty(input: ContractorNoveltyInput) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.startDate)) {
+    throw new Error("Selecciona una fecha de inicio válida.");
+  }
+  if (input.endDate && (!/^\d{4}-\d{2}-\d{2}$/.test(input.endDate) || input.endDate < input.startDate)) {
+    throw new Error("La fecha de finalización no puede ser anterior a la fecha de inicio.");
+  }
+  if (!input.typeCode || (input.typeCode !== "VACACIONES" && !input.subtypeCode)) {
+    throw new Error("Selecciona el tipo y subtipo de novedad.");
+  }
+  if (typeof input.isJustified !== "boolean") {
+    throw new Error("Indica si la novedad está justificada.");
+  }
+  const description = input.description.trim();
+  if (!description) throw new Error("Escribe una descripción de la novedad.");
+  return {
+    contractor_id: input.contractorId,
+    start_date: input.startDate,
+    end_date: input.endDate,
+    type_code: input.typeCode,
+    subtype_code: input.typeCode === "VACACIONES" ? null : input.subtypeCode,
+    is_justified: input.isJustified,
+    description,
+  };
+}
+
+export async function createContractorNovelty(input: ContractorNoveltyInput): Promise<void> {
+  const result = await supabase.from("contractor_novelties")
+    .insert(validatedContractorNovelty(input));
+  fail(result.error);
+}
+
+export async function updateContractorNovelty(id: number, input: ContractorNoveltyInput): Promise<void> {
+  const { contractor_id: _contractorId, ...changes } = validatedContractorNovelty(input);
+  const result = await supabase.from("contractor_novelties")
+    .update(changes)
+    .eq("id", id)
+    .eq("contractor_id", input.contractorId)
+    .select("id")
+    .single();
+  fail(result.error);
 }
 
 export async function loadClientContractorHistory(contractorId: number): Promise<ContractorHistory[]> {
