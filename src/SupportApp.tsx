@@ -17,6 +17,7 @@ import {
   Text,
   TextInput,
   TouchableWithoutFeedback,
+  useWindowDimensions,
   View,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
@@ -404,6 +405,19 @@ function addCalendarMonthsIso(value: string, months: number) {
 function monthStartIso(value: string) {
   const date = isoToDate(value);
   return dateToIso(new Date(date.getFullYear(), date.getMonth(), 1));
+}
+
+function previousInclusiveDateRange(startDate: string, endDate: string) {
+  const [startYear, startMonth, startDay] = startDate.split("-").map(Number);
+  const [endYear, endMonth, endDay] = endDate.split("-").map(Number);
+  const startDayIndex = Date.UTC(startYear, startMonth - 1, startDay) / 86_400_000;
+  const endDayIndex = Date.UTC(endYear, endMonth - 1, endDay) / 86_400_000;
+  const inclusiveDays = Math.max(1, Math.round(endDayIndex - startDayIndex) + 1);
+  const previousEndDate = addDaysIso(startDate, -1);
+  return {
+    startDate: addDaysIso(previousEndDate, -(inclusiveDays - 1)),
+    endDate: previousEndDate,
+  };
 }
 
 function formatMonth(value: string) {
@@ -6452,6 +6466,7 @@ function DirectorReports({ context, data }: { context: UserContext; data: AppDat
   const [openFilter, setOpenFilter] = useState<"startDate" | "endDate" | "client" | "contractor" | null>(null);
   const [activeTab, setActiveTab] = useState<DirectorReportTab>("operation");
   const [report, setReport] = useState<DirectorReportsSummary | null>(null);
+  const [previousReport, setPreviousReport] = useState<DirectorReportsSummary | null>(null);
   const [contractorOptions, setContractorOptions] = useState<DirectorReportsSummary["contractorOptions"]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -6470,10 +6485,17 @@ function DirectorReports({ context, data }: { context: UserContext; data: AppDat
     setLoading(true);
     setError(null);
     try {
-      const [reportResult, optionsResult] = await Promise.all([
+      const previousRange = previousInclusiveDateRange(startDate, endDate);
+      const [reportResult, previousReportResult, optionsResult] = await Promise.all([
         loadDirectorReports({
           startDate,
           endDate,
+          clientId: clientId || null,
+          contractorId: contractorId || null,
+        }),
+        loadDirectorReports({
+          startDate: previousRange.startDate,
+          endDate: previousRange.endDate,
           clientId: clientId || null,
           contractorId: contractorId || null,
         }),
@@ -6485,10 +6507,12 @@ function DirectorReports({ context, data }: { context: UserContext; data: AppDat
         }),
       ]);
       setReport(reportResult);
+      setPreviousReport(previousReportResult);
       setContractorOptions(optionsResult.contractorOptions);
     } catch (cause) {
       setError(errorMessage(cause));
       setReport(null);
+      setPreviousReport(null);
       setContractorOptions([]);
     } finally {
       setLoading(false);
@@ -6575,10 +6599,16 @@ function DirectorReports({ context, data }: { context: UserContext; data: AppDat
         <View style={styles.centerCard}><ActivityIndicator color={C.navy} /></View>
       ) : error ? (
         <Notice icon="cloud-offline-outline" tone="error" text={error} />
-      ) : !report || !hasData ? (
+      ) : !report || !previousReport || !hasData ? (
         <EmptyState icon="bar-chart-outline" text="No hay informes para los filtros seleccionados." />
       ) : (
-        <DirectorReportTabContent report={report} tab={activeTab} startDate={startDate} endDate={endDate} />
+        <DirectorReportTabContent
+          report={report}
+          previousReport={previousReport}
+          tab={activeTab}
+          startDate={startDate}
+          endDate={endDate}
+        />
       )}
       <CalendarModal
         visible={openFilter === "startDate"}
@@ -6634,27 +6664,68 @@ function DirectorReports({ context, data }: { context: UserContext; data: AppDat
 
 function DirectorReportTabContent({
   report,
+  previousReport,
   tab,
   startDate,
   endDate,
 }: {
   report: DirectorReportsSummary;
+  previousReport: DirectorReportsSummary;
   tab: DirectorReportTab;
   startDate: string;
   endDate: string;
 }) {
-  const isWeb = Platform.OS === "web";
+  const { width } = useWindowDimensions();
+  const previousRange = previousInclusiveDateRange(startDate, endDate);
+  const metricColumns = width >= 840 ? 3 : width >= 350 ? 2 : 1;
+  const metricCardWidth: number | `${number}%` = metricColumns === 3 ? "31.8%" : metricColumns === 2 ? "48.4%" : "100%";
   const trendLabel = report.trendGranularity === "DAY" ? "día" : report.trendGranularity === "WEEK" ? "semana" : "mes";
+  const metric = (
+    title: string,
+    value: string,
+    icon: IconName,
+    color: string,
+    currentValue: number,
+    previousValue: number,
+    series?: number[],
+    percentagePoints = false,
+  ) => (
+    <DirectorReportMetricCard
+      key={title}
+      title={title}
+      value={value}
+      icon={icon}
+      color={color}
+      delta={percentagePoints ? currentValue - previousValue : reportPercentChange(currentValue, previousValue)}
+      deltaUnit={percentagePoints ? "pp" : "%"}
+      series={series}
+      width={metricCardWidth}
+    />
+  );
+  const periodSummary = (
+    <View style={styles.reportPeriodSummary}>
+      <View style={styles.reportPeriodIcon}>
+        <Ionicons name="calendar-outline" size={19} color={C.navy} />
+      </View>
+      <View style={styles.flex}>
+        <Text style={styles.reportPeriodTitle}>Período actual: {formatDateRange(startDate, endDate)}</Text>
+        <Text style={styles.reportPeriodComparison}>
+          Comparado con {formatDateRange(previousRange.startDate, previousRange.endDate)}
+        </Text>
+      </View>
+    </View>
+  );
   if (tab === "operation") {
     return (
       <>
-        <View style={styles.statsGrid}>
-          <Stat value={String(report.operationsClosed)} label="Operaciones cerradas" icon="checkmark-circle-outline" />
-          <Stat value={String(report.operationsPending)} label="Pendientes" icon="alert-circle-outline" />
-          <Stat value={formatNumber(report.workedShifts)} label="Turnos trabajados" icon="time-outline" />
-          <Stat value={String(report.dischargeOperations)} label="Descargues" icon="cube-outline" />
-          <Stat value={formatNumber(report.dischargedUnits)} label="Unidades descargadas" icon="layers-outline" />
-          <Stat value={`${formatNumber(report.coveragePercent)}%`} label="Cobertura" icon="analytics-outline" />
+        {periodSummary}
+        <View style={styles.reportMetricGrid}>
+          {metric("Operaciones cerradas", String(report.operationsClosed), "checkmark-circle-outline", C.green, report.operationsClosed, previousReport.operationsClosed, report.trendSeries.map((item) => item.closedOperations ?? 0))}
+          {metric("Pendientes", String(report.operationsPending), "alert-circle-outline", C.orange, report.operationsPending, previousReport.operationsPending)}
+          {metric("Turnos trabajados", formatNumber(report.workedShifts), "time-outline", C.navy, report.workedShifts, previousReport.workedShifts, report.trendSeries.map((item) => item.workedShifts ?? 0))}
+          {metric("Descargues", String(report.dischargeOperations), "cube-outline", "#6D55D9", report.dischargeOperations, previousReport.dischargeOperations, report.trendSeries.map((item) => item.dischargeOperations ?? 0))}
+          {metric("Unidades descargadas", formatNumber(report.dischargedUnits), "layers-outline", "#6D55D9", report.dischargedUnits, previousReport.dischargedUnits, report.trendSeries.map((item) => item.dischargedUnits ?? 0))}
+          {metric("Cobertura", `${formatNumber(report.coveragePercent)}%`, "analytics-outline", C.green, report.coveragePercent, previousReport.coveragePercent, undefined, true)}
         </View>
         <View style={styles.reportGrid}>
           <View style={styles.reportGridItem}>
@@ -6665,15 +6736,13 @@ function DirectorReportTabContent({
               valueLabel={(value) => String(Math.round(value))}
             />
           </View>
-          {isWeb && (
-            <View style={styles.reportGridItem}>
-              <ReportLineChart
-                title="Tendencia de turnos trabajados"
-                data={report.trendSeries}
-                getValue={(item) => item.workedShifts ?? 0}
-              />
-            </View>
-          )}
+          <View style={styles.reportGridItem}>
+            <ReportLineChart
+              title="Tendencia de turnos trabajados"
+              data={report.trendSeries}
+              getValue={(item) => item.workedShifts ?? 0}
+            />
+          </View>
           <View style={styles.reportGridItem}>
             <ReportBarChart
               title={`Unidades descargadas por ${trendLabel}`}
@@ -6690,25 +6759,25 @@ function DirectorReportTabContent({
 
   if (tab === "contractors") {
     const average = report.contractorsWorked > 0 ? report.workedShifts / report.contractorsWorked : 0;
+    const previousAverage = previousReport.contractorsWorked > 0 ? previousReport.workedShifts / previousReport.contractorsWorked : 0;
     return (
       <>
-        <View style={styles.statsGrid}>
-          <Stat value={String(report.contractorsWorked)} label="Contratistas trabajaron" icon="people-outline" />
-          <Stat value={formatNumber(average)} label="Promedio turnos" icon="speedometer-outline" />
-          <Stat value={`${formatNumber(report.extraHours)} h`} label="Horas extra" icon="time-outline" />
-          <Stat value={String(report.absences)} label="Ausencias" icon="close-circle-outline" />
+        {periodSummary}
+        <View style={styles.reportMetricGrid}>
+          {metric("Contratistas trabajaron", String(report.contractorsWorked), "people-outline", C.navy, report.contractorsWorked, previousReport.contractorsWorked, report.trendSeries.map((item) => item.contractors ?? 0))}
+          {metric("Promedio turnos", formatNumber(average), "speedometer-outline", C.green, average, previousAverage)}
+          {metric("Horas extra", `${formatNumber(report.extraHours)} h`, "time-outline", C.orange, report.extraHours, previousReport.extraHours, report.trendSeries.map((item) => item.extraHours ?? 0))}
+          {metric("Ausencias", String(report.absences), "close-circle-outline", C.red, report.absences, previousReport.absences)}
         </View>
         <View style={styles.reportGrid}>
-          {isWeb && (
-            <View style={styles.reportGridItem}>
-              <ReportBarChart
-                title={`Auxiliares por ${trendLabel}`}
-                data={report.trendSeries}
-                getValue={(item) => item.contractors ?? 0}
-                valueLabel={(value) => String(Math.round(value))}
-              />
-            </View>
-          )}
+          <View style={styles.reportGridItem}>
+            <ReportBarChart
+              title={`Auxiliares por ${trendLabel}`}
+              data={report.trendSeries}
+              getValue={(item) => item.contractors ?? 0}
+              valueLabel={(value) => String(Math.round(value))}
+            />
+          </View>
           <View style={styles.reportGridItem}>
             <ReportRankingList
               title="Top contratistas por turnos"
@@ -6716,7 +6785,7 @@ function DirectorReportTabContent({
               metric={(item) => formatNumber(item.workedShifts ?? 0)}
               metricLabel="Turnos"
               secondary={(item) => `${formatNumber(item.extraHours ?? 0)} h extra ⋅ ${item.absences ?? 0} ausencias`}
-              limit={isWeb ? 10 : 5}
+              limit={5}
             />
           </View>
         </View>
@@ -6726,13 +6795,15 @@ function DirectorReportTabContent({
 
   if (tab === "client") {
     const averageSale = report.clientsCount > 0 ? report.saleTotal / report.clientsCount : 0;
+    const previousAverageSale = previousReport.clientsCount > 0 ? previousReport.saleTotal / previousReport.clientsCount : 0;
     return (
       <>
-        <View style={styles.statsGrid}>
-          <Stat value={formatCurrency(report.saleTotal)} label="Venta total" icon="cash-outline" />
-          <Stat value={formatCurrency(report.costTotal)} label="Costos" icon="receipt-outline" />
-          <Stat value={String(report.clientsCount)} label="Clientes" icon="business-outline" />
-          <Stat value={formatCurrency(averageSale)} label="Promedio por cliente" icon="trending-up-outline" />
+        {periodSummary}
+        <View style={styles.reportMetricGrid}>
+          {metric("Venta total", formatCurrency(report.saleTotal), "cash-outline", C.navy, report.saleTotal, previousReport.saleTotal, report.trendSeries.map((item) => item.saleTotal ?? 0))}
+          {metric("Costos", formatCurrency(report.costTotal), "receipt-outline", "#287C9E", report.costTotal, previousReport.costTotal)}
+          {metric("Clientes", String(report.clientsCount), "business-outline", C.orange, report.clientsCount, previousReport.clientsCount)}
+          {metric("Promedio por cliente", formatCurrency(averageSale), "trending-up-outline", C.green, averageSale, previousAverageSale)}
         </View>
         <View style={styles.reportGrid}>
           <View style={styles.reportGridItem}>
@@ -6743,16 +6814,14 @@ function DirectorReportTabContent({
               valueLabel={formatShortCurrency}
             />
           </View>
-          {isWeb && (
-            <View style={styles.reportGridItem}>
-              <ReportBarChart
-                title={`Ventas por ${trendLabel}`}
-                data={report.trendSeries}
-                getValue={(item) => item.saleTotal ?? 0}
-                valueLabel={formatShortCurrency}
-              />
-            </View>
-          )}
+          <View style={styles.reportGridItem}>
+            <ReportBarChart
+              title={`Ventas por ${trendLabel}`}
+              data={report.trendSeries}
+              getValue={(item) => item.saleTotal ?? 0}
+              valueLabel={formatShortCurrency}
+            />
+          </View>
           <View style={styles.reportGridItem}>
             <ReportRankingList
               title="Ranking de clientes"
@@ -6760,7 +6829,7 @@ function DirectorReportTabContent({
               metric={(item) => formatCurrency(item.saleTotal ?? 0)}
               metricLabel="Venta"
               secondary={(item) => `${item.contractors ?? 0} auxiliares ⋅ ${formatNumber(item.workedShifts ?? 0)} turnos`}
-              limit={isWeb ? 10 : 5}
+              limit={5}
             />
           </View>
         </View>
@@ -6769,13 +6838,15 @@ function DirectorReportTabContent({
   }
 
   const averagePayroll = report.payrollContractors > 0 ? report.payrollTotal / report.payrollContractors : 0;
+  const previousAveragePayroll = previousReport.payrollContractors > 0 ? previousReport.payrollTotal / previousReport.payrollContractors : 0;
   const hasPayroll = report.payrollTotal > 0 || report.payrollByClient.length > 0 || report.payrollByContractor.length > 0;
   return (
     <>
-      <View style={styles.statsGrid}>
-        <Stat value={formatCurrency(report.payrollTotal)} label="Total nómina" icon="wallet-outline" />
-        <Stat value={String(report.payrollContractors)} label="Contratistas con pago" icon="people-outline" />
-        <Stat value={formatCurrency(averagePayroll)} label="Promedio por contratista" icon="calculator-outline" />
+      {periodSummary}
+      <View style={styles.reportMetricGrid}>
+        {metric("Total nómina", formatCurrency(report.payrollTotal), "wallet-outline", C.navy, report.payrollTotal, previousReport.payrollTotal)}
+        {metric("Contratistas con pago", String(report.payrollContractors), "people-outline", C.orange, report.payrollContractors, previousReport.payrollContractors)}
+        {metric("Promedio por contratista", formatCurrency(averagePayroll), "calculator-outline", C.green, averagePayroll, previousAveragePayroll)}
       </View>
       {!hasPayroll ? (
         <EmptyState icon="wallet-outline" text="No hay conceptos de costo categorizados como NOMINA para este periodo." />
@@ -6796,12 +6867,84 @@ function DirectorReportTabContent({
               metric={(item) => formatCurrency(item.payrollTotal ?? 0)}
               metricLabel="Nómina"
               secondary={(item) => `${item.clientName || "Sin cliente"} ⋅ ${formatNumber(item.workedShifts ?? 0)} turnos`}
-              limit={isWeb ? 10 : 5}
+              limit={5}
             />
           </View>
         </View>
       )}
     </>
+  );
+}
+
+function reportPercentChange(current: number, previous: number) {
+  if (previous === 0) return current === 0 ? 0 : 100;
+  return ((current - previous) * 100) / Math.abs(previous);
+}
+
+function DirectorReportMetricCard({
+  title,
+  value,
+  icon,
+  color,
+  delta,
+  deltaUnit,
+  series,
+  width,
+}: {
+  title: string;
+  value: string;
+  icon: IconName;
+  color: string;
+  delta: number;
+  deltaUnit: "pp" | "%";
+  series?: number[];
+  width: number | `${number}%`;
+}) {
+  const positive = delta >= 0;
+  const directionColor = positive ? C.green : C.red;
+  return (
+    <View
+      accessible
+      accessibilityLabel={`${title}: ${value}. ${formatNumber(Math.abs(delta))} ${deltaUnit === "pp" ? "puntos porcentuales" : "por ciento"} ${positive ? "más" : "menos"} que el período anterior.`}
+      style={[styles.reportMetricCard, { width }]}
+    >
+      <View style={styles.reportMetricHeader}>
+        <View style={[styles.reportMetricIcon, { backgroundColor: `${color}18` }]}>
+          <Ionicons name={icon} size={21} color={color} />
+        </View>
+        <Text style={styles.reportMetricTitle} numberOfLines={2}>{title}</Text>
+      </View>
+      <Text style={styles.reportMetricValue} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.62} selectable>
+        {value}
+      </Text>
+      <View style={styles.reportMetricDeltaRow}>
+        <Ionicons name={positive ? "arrow-up" : "arrow-down"} size={14} color={directionColor} />
+        <Text style={[styles.reportMetricDelta, { color: directionColor }]}>{formatNumber(Math.abs(delta))}{deltaUnit}</Text>
+      </View>
+      <Text style={styles.reportMetricDeltaCaption}>vs. período anterior</Text>
+      {series && series.length > 0 ? <DirectorReportSparkline values={series} color={color} /> : <View style={styles.reportMetricChartSpacer} />}
+    </View>
+  );
+}
+
+function DirectorReportSparkline({ values, color }: { values: number[]; color: string }) {
+  const sampledValues = sampleChartItems(values, 14);
+  const chartWidth = 160;
+  const chartHeight = 34;
+  const max = Math.max(...sampledValues, 1);
+  const min = Math.min(...sampledValues, 0);
+  const span = max - min || 1;
+  const points = sampledValues
+    .map((value, index) => {
+      const x = (index * chartWidth) / Math.max(sampledValues.length - 1, 1);
+      const y = chartHeight - 3 - ((value - min) / span) * (chartHeight - 6);
+      return `${x},${y}`;
+    })
+    .join(" ");
+  return (
+    <Svg width="100%" height={chartHeight} viewBox={`0 0 ${chartWidth} ${chartHeight}`} accessibilityElementsHidden>
+      <Polyline points={points} fill="none" stroke={color} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" />
+    </Svg>
   );
 }
 
@@ -9946,6 +10089,20 @@ const styles = StyleSheet.create({
   statValue: { color: C.ink, fontSize: 21, fontWeight: "900" },
   reportFilterGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
   reportFilterField: { flex: 1, minWidth: 210 },
+  reportPeriodSummary: { minHeight: 66, paddingHorizontal: 14, paddingVertical: 12, borderRadius: 14, backgroundColor: C.white, borderWidth: 1, borderColor: C.line, flexDirection: "row", alignItems: "center", gap: 11 },
+  reportPeriodIcon: { width: 38, height: 38, borderRadius: 12, backgroundColor: C.blueBg, alignItems: "center", justifyContent: "center" },
+  reportPeriodTitle: { color: C.ink, fontSize: 12, lineHeight: 17, fontWeight: "800" },
+  reportPeriodComparison: { color: C.muted, fontSize: 10, lineHeight: 15, marginTop: 2 },
+  reportMetricGrid: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  reportMetricCard: { minHeight: 184, backgroundColor: C.white, borderRadius: 14, padding: 14, borderWidth: 1, borderColor: C.line },
+  reportMetricHeader: { minHeight: 42, flexDirection: "row", alignItems: "center", gap: 9 },
+  reportMetricIcon: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center" },
+  reportMetricTitle: { flex: 1, color: C.ink, fontSize: 12, lineHeight: 16, fontWeight: "700" },
+  reportMetricValue: { color: C.ink, fontSize: 22, lineHeight: 28, fontWeight: "900", marginTop: 8, fontVariant: ["tabular-nums"] },
+  reportMetricDeltaRow: { flexDirection: "row", alignItems: "center", gap: 3, marginTop: 5 },
+  reportMetricDelta: { fontSize: 11, fontWeight: "800", fontVariant: ["tabular-nums"] },
+  reportMetricDeltaCaption: { color: C.muted, fontSize: 9, lineHeight: 13, marginTop: 1 },
+  reportMetricChartSpacer: { height: 34 },
   reportGrid: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
   reportGridItem: { flex: 1, minWidth: 290 },
   reportRankingRow: { minHeight: 62, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: "#F0F2F6", flexDirection: "row", alignItems: "center", gap: 11 },
