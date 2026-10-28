@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { missingContractorRegistrationDetails } from "../_shared/contractor-details.ts";
 import { PDFDocument, StandardFonts, rgb } from "https://esm.sh/pdf-lib@1.17.1";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { createCorporateProfilePhoto } from "../_shared/profile-photo.ts";
@@ -504,6 +505,18 @@ async function getInvite(serviceClient: any, token: string, allowedStatuses = ["
   return data;
 }
 
+async function requireRegistrationDetails(serviceClient: any, contractorId: number) {
+  const { data, error } = await serviceClient.from("contractor")
+    .select("residence_department,residence_city,neighborhood,address,pension_fund,eps")
+    .eq("id", contractorId)
+    .single();
+  if (error) throw new Error(error.message);
+  const missing = missingContractorRegistrationDetails(data);
+  if (missing.length) {
+    throw new Error(`Support Colombia debe completar estos datos antes de continuar: ${missing.join(", ")}.`);
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return jsonResponse({ error: "Method not allowed" }, 405);
@@ -528,6 +541,9 @@ Deno.serve(async (req) => {
     const invite = await getInvite(serviceClient, token, allowedStatuses);
 
     if (action === "get") {
+      if (invite.status === "PENDING") {
+        await requireRegistrationDetails(serviceClient, invite.contractor_id);
+      }
       const [civilStates, transportTypes, educationLevels, policyFile] = await Promise.all([
         serviceClient.from("civil_state_type").select("id,name").order("id"),
         serviceClient.from("transport_type").select("id,name").order("id"),
@@ -675,6 +691,7 @@ Deno.serve(async (req) => {
     if (action !== "submit") return jsonResponse({ error: "Accion no valida." }, 400);
 
     const payload = body?.payload ?? {};
+    await requireRegistrationDetails(serviceClient, invite.contractor_id);
     if (!payload.acceptsDataPolicy) {
       throw new Error("Debes aceptar la politica de tratamiento de datos personales.");
     }
@@ -761,18 +778,13 @@ Deno.serve(async (req) => {
         birth_date: requireString(payload.birthDate, "Fecha de nacimiento"),
         birth_place: requireString(payload.birthPlace, "Lugar de nacimiento"),
         civil_state_id: civilStateId,
-        residence_department: requireString(payload.residenceDepartment, "Departamento de residencia"),
-        residence_city: requireString(payload.residenceCity, "Ciudad de residencia"),
-        address: requireString(payload.address, "Direccion de residencia"),
         stratum: requireString(payload.stratum, "Estrato"),
         phone_number: requireString(payload.phone, "Telefono"),
         type_transport_id: transportTypeId,
         education_level_id: educationLevelId,
-        eps: requireString(payload.eps, "EPS"),
         shirt_size: requireString(payload.shirtSize, "Talla de camisa"),
         pant_size: requireString(payload.pantSize, "Talla de pantalon"),
         shoe_size: requireString(payload.shoeSize, "Talla de zapatos"),
-        pension_fund: requireString(payload.pensionFund, "Fondo de pensiones"),
         emergency_contact_name: requireString(payload.emergencyContactName, "Contacto de emergencia"),
         emergency_contact_relationship: requireString(payload.emergencyContactRelationship, "Parentesco"),
         emergency_contact_phone: requireString(payload.emergencyContactPhone, "Telefono de emergencia"),

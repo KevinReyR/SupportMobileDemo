@@ -23,17 +23,18 @@ import { Ionicons } from "@expo/vector-icons";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
+import * as ImagePicker from "expo-image-picker";
 import * as Linking from "expo-linking";
 import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
 import { LinearGradient } from "expo-linear-gradient";
-import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import Svg, { Line, Polyline, Rect, Text as SvgText } from "react-native-svg";
 import type { Session } from "@supabase/supabase-js";
 
 import PdfViewer from "./components/pdf-viewer";
 import DirectorWebDashboard from "./components/director-web-dashboard";
 import { COLOMBIA_DEPARTMENTS, COLOMBIA_MUNICIPALITIES_BY_DEPARTMENT } from "./data/colombia-locations";
-import { buildCedulaPdfFromPhotos } from "./lib/cedula-pdf";
+import { buildCedulaPdfFromPhotos, buildPdfFromPhotos } from "./lib/cedula-pdf";
 import { supabase } from "./lib/supabase";
 import {
   cancelPersonnelRequest,
@@ -42,6 +43,7 @@ import {
   closeAdminDirectPayroll,
   createAdminUser,
   createContractorDraft,
+  completeContractorRegistrationDetails,
   createContractorNovelty,
   createContractorDocumentSignedUrl,
   createContractorProfilePhotoSignedUrl,
@@ -584,31 +586,35 @@ export default function SupportApp() {
     }
     setLoading(true);
     setError("");
+    let nextContext: UserContext | null = null;
     try {
-      const nextContext = await withTimeout(
+      nextContext = await withTimeout(
         loadUserContext(nextSession.user.id),
         12_000,
         "No fue posible validar la sesión. Revisa tu conexión e inténtalo nuevamente.",
       );
+      if (!mountedRef.current || hydrationId !== hydrationIdRef.current) return;
+      setContext(nextContext);
+      const home: Screen = nextContext.roleCode === "ADMIN" ? "admin-home" : "operations";
+      setScreen(home);
+      setActiveTab(home);
       const nextData = await withTimeout(
         loadAppData(nextContext),
         15_000,
         "La carga inicial tardó demasiado. Puedes reintentar desde la aplicación.",
       );
       if (!mountedRef.current || hydrationId !== hydrationIdRef.current) return;
-      const home: Screen = nextContext.roleCode === "ADMIN" ? "admin-home" : "operations";
-      setContext(nextContext);
       setData(nextData);
-      setScreen(home);
-      setActiveTab(home);
     } catch (cause) {
       if (!mountedRef.current || hydrationId !== hydrationIdRef.current) return;
       const message = errorMessage(cause);
       setError(message);
       hydratedUserIdRef.current = null;
-      setSession(null);
-      setContext(null);
       setData(EMPTY_DATA);
+      if (!nextContext) {
+        setSession(null);
+        setContext(null);
+      }
     } finally {
       if (mountedRef.current && hydrationId === hydrationIdRef.current) {
         setLoading(false);
@@ -748,7 +754,12 @@ export default function SupportApp() {
 
   return (
     <SafeAreaProvider>
-      <SafeAreaView style={styles.safe} edges={["top"]}>
+      <SafeAreaView
+        style={styles.safe}
+        edges={showTabs && Platform.OS === "android"
+          ? ["top", "left", "right"]
+          : ["top", "left", "right", "bottom"]}
+      >
         <StatusBar barStyle="dark-content" backgroundColor={C.bg} />
         <Header
           context={context}
@@ -965,7 +976,7 @@ function PublicContractorOnboarding({ token }: { token: string }) {
   const [onboardingStepLabel, setOnboardingStepLabel] = useState("");
   const [calendarOpen, setCalendarOpen] = useState(false);
   const [picker, setPicker] = useState<
-    null | "blood" | "civil" | "department" | "city" | "transport" | "education" | "stratum" | "shirt" | "pant" | "shoe"
+    null | "blood" | "civil" | "transport" | "education" | "stratum" | "shirt" | "pant" | "shoe"
   >(null);
   const [selfieOpen, setSelfieOpen] = useState(false);
   const [selfieUri, setSelfieUri] = useState("");
@@ -974,18 +985,13 @@ function PublicContractorOnboarding({ token }: { token: string }) {
     birthDate: "",
     birthPlace: "",
     civilStateId: 0,
-    residenceDepartment: "",
-    residenceCity: "",
-    address: "",
     stratum: "",
     phone: "",
     transportTypeId: 0,
     educationLevelId: 0,
-    eps: "",
     shirtSize: "",
     pantSize: "",
     shoeSize: "",
-    pensionFund: "",
     emergencyContactName: "",
     emergencyContactRelationship: "",
     emergencyContactPhone: "",
@@ -1033,11 +1039,6 @@ function PublicContractorOnboarding({ token }: { token: string }) {
   const update = (key: keyof typeof fields, value: string | number | boolean) => {
     setFields((current) => ({ ...current, [key]: value }));
   };
-  const departmentOptions = Array.from(COLOMBIA_DEPARTMENTS);
-  const cityOptions = fields.residenceDepartment ? COLOMBIA_MUNICIPALITIES_BY_DEPARTMENT[fields.residenceDepartment] ?? [] : [];
-  const selectResidenceDepartment = (department: string) => {
-    setFields((current) => ({ ...current, residenceDepartment: department, residenceCity: "" }));
-  };
   const setProgress = (progress: number, label: string) => {
     setOnboardingProgress(progress);
     setOnboardingStepLabel(label);
@@ -1054,16 +1055,11 @@ function PublicContractorOnboarding({ token }: { token: string }) {
       fields.bloodType,
       fields.birthDate,
       fields.birthPlace,
-      fields.residenceDepartment,
-      fields.residenceCity,
-      fields.address,
       fields.stratum,
       fields.phone,
-      fields.eps,
       fields.shirtSize,
       fields.pantSize,
       fields.shoeSize,
-      fields.pensionFund,
       fields.emergencyContactName,
       fields.emergencyContactRelationship,
       fields.emergencyContactPhone,
@@ -1186,18 +1182,6 @@ function PublicContractorOnboarding({ token }: { token: string }) {
       selectedId: fields.civilStateId,
       onSelect: (id: number) => update("civilStateId", id),
     },
-    department: {
-      title: "Departamento de residencia",
-      options: stringOptions(departmentOptions),
-      selectedId: currentStringId(departmentOptions, fields.residenceDepartment),
-      onSelect: (id: number) => selectResidenceDepartment(departmentOptions[id - 1] ?? ""),
-    },
-    city: {
-      title: "Ciudad de residencia",
-      options: stringOptions(cityOptions),
-      selectedId: currentStringId(cityOptions, fields.residenceCity),
-      onSelect: (id: number) => update("residenceCity", cityOptions[id - 1] ?? ""),
-    },
     transport: {
       title: "Medio de transporte",
       options: form.catalogs.transportTypes,
@@ -1257,22 +1241,7 @@ function PublicContractorOnboarding({ token }: { token: string }) {
             <Input icon="location-outline" value={fields.birthPlace} onChangeText={(value) => update("birthPlace", value)} autoCapitalize="words" />
             <Choice label="Estado civil *" value={selectedName(form.catalogs.civilStates, fields.civilStateId)} icon="heart-outline" onPress={() => setPicker("civil")} />
           </FormCard>
-          <FormCard title="Residencia y contacto">
-            <Choice
-              label="Departamento de residencia *"
-              value={fields.residenceDepartment || "Selecciona departamento"}
-              icon="map-outline"
-              onPress={() => setPicker("department")}
-            />
-            <Choice
-              label="Ciudad de residencia *"
-              value={fields.residenceCity || (fields.residenceDepartment ? "Selecciona ciudad" : "Selecciona departamento primero")}
-              icon="business-outline"
-              disabled={!fields.residenceDepartment || cityOptions.length === 0}
-              onPress={() => setPicker("city")}
-            />
-            <Label text="Dirección de residencia *" />
-            <Input icon="home-outline" value={fields.address} onChangeText={(value) => update("address", value)} />
+          <FormCard title="Contacto">
             <Choice label="Estrato *" value={fields.stratum} icon="layers-outline" onPress={() => setPicker("stratum")} />
             <Label text="Teléfono *" />
             <Input icon="call-outline" value={fields.phone} onChangeText={(value) => update("phone", value)} keyboardType="phone-pad" />
@@ -1280,10 +1249,6 @@ function PublicContractorOnboarding({ token }: { token: string }) {
           <FormCard title="Información laboral y logística">
             <Choice label="Medio de transporte *" value={selectedName(form.catalogs.transportTypes, fields.transportTypeId)} icon="car-outline" onPress={() => setPicker("transport")} />
             <Choice label="Grado de escolaridad *" value={selectedName(form.catalogs.educationLevels, fields.educationLevelId)} icon="school-outline" onPress={() => setPicker("education")} />
-            <Label text="EPS *" />
-            <Input icon="medkit-outline" value={fields.eps} onChangeText={(value) => update("eps", value)} autoCapitalize="words" />
-            <Label text="Fondo de pensiones *" />
-            <Input icon="business-outline" value={fields.pensionFund} onChangeText={(value) => update("pensionFund", value)} autoCapitalize="words" />
             <Choice label="Talla de camisa *" value={fields.shirtSize} icon="shirt-outline" onPress={() => setPicker("shirt")} />
             <Choice label="Talla de pantalón *" value={fields.pantSize} icon="resize-outline" onPress={() => setPicker("pant")} />
             <Choice label="Talla de zapatos *" value={fields.shoeSize} icon="footsteps-outline" onPress={() => setPicker("shoe")} />
@@ -1590,15 +1555,32 @@ function Login({ initialError, busy }: { initialError: string; busy: boolean }) 
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState(initialError);
 
+  useEffect(() => {
+    setMessage(initialError);
+  }, [initialError]);
+
   const signIn = async () => {
+    if (!email.trim() || !password) {
+      setMessage("Ingresa tu correo y contraseña.");
+      return;
+    }
     setSubmitting(true);
     setMessage("");
-    const result = await supabase.auth.signInWithPassword({
-      email: email.trim().toLowerCase(),
-      password,
-    });
-    if (result.error) setMessage("Correo o contraseña incorrectos.");
-    setSubmitting(false);
+    try {
+      const result = await withTimeout(
+        supabase.auth.signInWithPassword({
+          email: email.trim().toLowerCase(),
+          password,
+        }),
+        15_000,
+        "El inicio de sesión tardó demasiado. Revisa tu conexión e inténtalo nuevamente.",
+      );
+      if (result.error) setMessage("Correo o contraseña incorrectos.");
+    } catch (cause) {
+      setMessage(errorMessage(cause));
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const recover = async () => {
@@ -3978,6 +3960,167 @@ function ClientStaff({
   );
 }
 
+type ContractorRegistrationDetails = {
+  residenceDepartment: string;
+  residenceCity: string;
+  neighborhood: string;
+  address: string;
+  pensionFund: string;
+  eps: string;
+};
+
+const emptyContractorRegistrationDetails = (): ContractorRegistrationDetails => ({
+  residenceDepartment: "",
+  residenceCity: "",
+  neighborhood: "",
+  address: "",
+  pensionFund: "",
+  eps: "",
+});
+
+const registrationDetailLabels: Record<keyof ContractorRegistrationDetails, string> = {
+  residenceDepartment: "Departamento",
+  residenceCity: "Ciudad",
+  neighborhood: "Barrio",
+  address: "Dirección",
+  pensionFund: "Fondo de pensiones",
+  eps: "EPS",
+};
+
+function missingRegistrationDetails(details: ContractorRegistrationDetails): string[] {
+  const missing = (Object.keys(registrationDetailLabels) as (keyof ContractorRegistrationDetails)[])
+    .filter((key) => !details[key].trim())
+    .map((key) => registrationDetailLabels[key]);
+  if (details.residenceDepartment && !COLOMBIA_DEPARTMENTS.includes(details.residenceDepartment as typeof COLOMBIA_DEPARTMENTS[number])) {
+    missing.push("Departamento válido");
+  } else if (details.residenceCity && !(COLOMBIA_MUNICIPALITIES_BY_DEPARTMENT[details.residenceDepartment] ?? []).includes(details.residenceCity)) {
+    missing.push("Ciudad del departamento seleccionado");
+  }
+  return missing;
+}
+
+function ContractorRegistrationFields({
+  details,
+  onChange,
+}: {
+  details: ContractorRegistrationDetails;
+  onChange: (details: ContractorRegistrationDetails) => void;
+}) {
+  const [picker, setPicker] = useState<"department" | "city" | null>(null);
+  const departments = Array.from(COLOMBIA_DEPARTMENTS);
+  const cities = details.residenceDepartment
+    ? COLOMBIA_MUNICIPALITIES_BY_DEPARTMENT[details.residenceDepartment] ?? []
+    : [];
+  const options = picker === "department" ? departments : cities;
+  const selected = picker === "department" ? details.residenceDepartment : details.residenceCity;
+  const update = (key: keyof ContractorRegistrationDetails, value: string) => onChange({ ...details, [key]: value });
+
+  return (
+    <>
+      <Choice label="Departamento *" value={details.residenceDepartment || "Selecciona departamento"} icon="map-outline" onPress={() => setPicker("department")} />
+      <Choice label="Ciudad *" value={details.residenceCity || (details.residenceDepartment ? "Selecciona ciudad" : "Selecciona departamento primero")}
+        icon="business-outline" disabled={!details.residenceDepartment || !cities.length} onPress={() => setPicker("city")} />
+      <Label text="Barrio *" />
+      <Input icon="location-outline" value={details.neighborhood} onChangeText={(value) => update("neighborhood", value)} autoCapitalize="words" />
+      <Label text="Dirección *" />
+      <Input icon="home-outline" value={details.address} onChangeText={(value) => update("address", value)} />
+      <Label text="Fondo de pensiones *" />
+      <Input icon="business-outline" value={details.pensionFund} onChangeText={(value) => update("pensionFund", value)} autoCapitalize="words" />
+      <Label text="EPS *" />
+      <Input icon="medkit-outline" value={details.eps} onChangeText={(value) => update("eps", value)} autoCapitalize="words" />
+      <DropdownModal
+        visible={picker !== null}
+        title={picker === "department" ? "Departamento de residencia" : "Ciudad de residencia"}
+        options={options.map((name, index) => ({ id: index + 1, name }))}
+        selectedId={Math.max(0, options.indexOf(selected) + 1)}
+        searchable
+        onClose={() => setPicker(null)}
+        onSelect={(id) => {
+          const value = options[id - 1] ?? "";
+          if (picker === "department") onChange({ ...details, residenceDepartment: value, residenceCity: "" });
+          else update("residenceCity", value);
+          setPicker(null);
+        }}
+      />
+    </>
+  );
+}
+
+async function pickGalleryPhotoUri(): Promise<string | null> {
+  const result = await ImagePicker.launchImageLibraryAsync({
+    mediaTypes: ["images"],
+    allowsEditing: false,
+    allowsMultipleSelection: false,
+    quality: 1,
+  });
+  if (result.canceled) return null;
+  const uri = result.assets?.[0]?.uri;
+  if (!uri) throw new Error("No fue posible leer la foto seleccionada.");
+  return uri;
+}
+
+async function pickGalleryPdf(name: string): Promise<ContractorPdfFile | null> {
+  const uri = await pickGalleryPhotoUri();
+  return uri ? buildPdfFromPhotos([uri], name) : null;
+}
+
+function PdfGallerySourceModal({
+  visible,
+  title,
+  onClose,
+  onPickPdf,
+  onPickGallery,
+}: {
+  visible: boolean;
+  title: string;
+  onClose: () => void;
+  onPickPdf: () => void;
+  onPickGallery: () => void;
+}) {
+  const choose = (callback: () => void) => {
+    onClose();
+    if (Platform.OS === "web") {
+      callback();
+    } else {
+      InteractionManager.runAfterInteractions(() => setTimeout(callback, 350));
+    }
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.modalCard}>
+          <View style={styles.between}>
+            <View style={styles.flex}>
+              <Text style={styles.formTitle}>{title}</Text>
+              <Text style={styles.caption}>El archivo guardado siempre será un PDF máximo 1 MB.</Text>
+            </View>
+            <Pressable style={styles.iconButton} onPress={onClose}>
+              <Ionicons name="close" size={20} color={C.ink} />
+            </Pressable>
+          </View>
+          <Pressable style={styles.sourceOption} onPress={() => choose(onPickPdf)}>
+            <View style={styles.pdfIcon}><Ionicons name="document-attach-outline" size={23} color={C.orange} /></View>
+            <View style={styles.flex}>
+              <Text style={styles.cardTitle}>Cargar PDF</Text>
+              <Text style={styles.cardMeta}>Selecciona un archivo PDF.</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={C.muted} />
+          </Pressable>
+          <Pressable style={styles.sourceOption} onPress={() => choose(onPickGallery)}>
+            <View style={styles.pdfIcon}><Ionicons name="images-outline" size={23} color={C.orange} /></View>
+            <View style={styles.flex}>
+              <Text style={styles.cardTitle}>Galería de fotos</Text>
+              <Text style={styles.cardMeta}>Elige una foto para convertirla en PDF.</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={C.muted} />
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 function CreateContractor({
   documentTypes,
   onSaved,
@@ -3992,11 +4135,13 @@ function CreateContractor({
   const [birthDate, setBirthDate] = useState("");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
+  const [registrationDetails, setRegistrationDetails] = useState(emptyContractorRegistrationDetails);
   const [cedulaPdf, setCedulaPdf] = useState<ContractorPdfFile | null>(null);
   const [selectorOpen, setSelectorOpen] = useState(false);
   const [birthDateCalendarOpen, setBirthDateCalendarOpen] = useState(false);
   const [cedulaSourceOpen, setCedulaSourceOpen] = useState(false);
   const [cedulaCaptureOpen, setCedulaCaptureOpen] = useState(false);
+  const [cedulaCaptureMode, setCedulaCaptureMode] = useState<"camera" | "gallery">("camera");
   const [pendingCedulaPick, setPendingCedulaPick] = useState(false);
   const [saving, setSaving] = useState(false);
   const pickingCedulaRef = useRef(false);
@@ -4065,6 +4210,11 @@ function CreateContractor({
       Alert.alert("Correo no válido", "Verifica el formato del correo electrónico.");
       return;
     }
+    const missing = missingRegistrationDetails(registrationDetails);
+    if (missing.length) {
+      Alert.alert("Completa el contratista", `Faltan: ${missing.join(", ")}.`);
+      return;
+    }
     if (!cedulaPdf) {
       Alert.alert("Adjunta la cédula", "La cédula en PDF es obligatoria para crear el contratista.");
       return;
@@ -4079,6 +4229,7 @@ function CreateContractor({
         birthDate,
         phone,
         email: normalizedEmail,
+        ...registrationDetails,
         cedulaPdf,
       });
       Alert.alert("Contratista creado", "El contrato quedó PENDIENTE hasta que el Director adjunte el Certificado ARL.");
@@ -4094,7 +4245,7 @@ function CreateContractor({
     <Page>
       <Notice
         icon="information-circle-outline"
-        text="En esta fase solo se registran datos básicos y la cédula. El contrato quedará PENDIENTE."
+        text="Registra los datos personales, de residencia y seguridad social, y adjunta la cédula. El contrato quedará PENDIENTE."
       />
       <FormCard title="Datos básicos">
         <Choice
@@ -4121,6 +4272,9 @@ function CreateContractor({
         <Label text="Correo *" />
         <Input icon="mail-outline" value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" />
       </FormCard>
+      <FormCard title="Residencia y seguridad social">
+        <ContractorRegistrationFields details={registrationDetails} onChange={setRegistrationDetails} />
+      </FormCard>
       <FormCard title="Documento obligatorio">
         <Pressable style={styles.uploadCard} onPress={() => setCedulaSourceOpen(true)}>
           <View style={styles.pdfIcon}>
@@ -4133,7 +4287,7 @@ function CreateContractor({
                 ? cedulaPdf.name === "cedula-fotos.pdf"
                   ? "PDF generado desde fotos"
                   : cedulaPdf.name
-                : "Cargar PDF o tomar foto"}
+                : "Cargar PDF, tomar foto o elegir de Galería"}
             </Text>
           </View>
           <Ionicons name="cloud-upload-outline" size={20} color={C.navy} />
@@ -4167,16 +4321,24 @@ function CreateContractor({
         visible={cedulaSourceOpen}
         onClose={() => setCedulaSourceOpen(false)}
         onPickPdf={() => {
-          setPendingCedulaPick(true);
           setCedulaSourceOpen(false);
+          if (Platform.OS === "web") void pickCedula();
+          else setPendingCedulaPick(true);
         }}
         onTakePhotos={() => {
           setCedulaSourceOpen(false);
+          setCedulaCaptureMode("camera");
+          setCedulaCaptureOpen(true);
+        }}
+        onPickGallery={() => {
+          setCedulaSourceOpen(false);
+          setCedulaCaptureMode("gallery");
           setCedulaCaptureOpen(true);
         }}
       />
       <CedulaCaptureFlow
         visible={cedulaCaptureOpen}
+        mode={cedulaCaptureMode}
         onClose={() => setCedulaCaptureOpen(false)}
         onPdfReady={(file) => {
           setCedulaPdf(file);
@@ -4192,11 +4354,13 @@ function CedulaSourceModal({
   onClose,
   onPickPdf,
   onTakePhotos,
+  onPickGallery,
 }: {
   visible: boolean;
   onClose: () => void;
   onPickPdf: () => void;
   onTakePhotos: () => void;
+  onPickGallery: () => void;
 }) {
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
@@ -4231,6 +4395,16 @@ function CedulaSourceModal({
             </View>
             <Ionicons name="chevron-forward" size={20} color={C.muted} />
           </Pressable>
+          <Pressable style={styles.sourceOption} onPress={onPickGallery}>
+            <View style={styles.pdfIcon}>
+              <Ionicons name="images-outline" size={23} color={C.orange} />
+            </View>
+            <View style={styles.flex}>
+              <Text style={styles.cardTitle}>Galería de fotos</Text>
+              <Text style={styles.cardMeta}>Selecciona frente y, si quieres, reverso.</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={C.muted} />
+          </Pressable>
         </View>
       </View>
     </Modal>
@@ -4239,10 +4413,12 @@ function CedulaSourceModal({
 
 function CedulaCaptureFlow({
   visible,
+  mode,
   onClose,
   onPdfReady,
 }: {
   visible: boolean;
+  mode: "camera" | "gallery";
   onClose: () => void;
   onPdfReady: (file: ContractorPdfFile) => void;
 }) {
@@ -4259,10 +4435,21 @@ function CedulaCaptureFlow({
       setFrontUri("");
       setBackUri("");
       setActiveSide("front");
-      setCameraOpen(true);
+      setCameraOpen(mode === "camera");
       setGenerating(false);
     }
-  }, [visible]);
+  }, [visible, mode]);
+
+  const selectGalleryPhoto = async (side: CedulaSide) => {
+    try {
+      const uri = await pickGalleryPhotoUri();
+      if (!uri) return;
+      if (side === "front") setFrontUri(uri);
+      else setBackUri(uri);
+    } catch (cause) {
+      Alert.alert("No fue posible seleccionar la foto", errorMessage(cause));
+    }
+  };
 
   const ensurePermission = async () => {
     if (permission?.granted) return true;
@@ -4301,13 +4488,15 @@ function CedulaCaptureFlow({
   };
 
   const generatePdf = async () => {
-    if (!frontUri || !backUri) {
-      Alert.alert("Faltan fotos", "Toma la foto del frente y del reverso antes de generar el PDF.");
+    if (!frontUri || (mode === "camera" && !backUri)) {
+      Alert.alert("Faltan fotos", mode === "camera"
+        ? "Toma la foto del frente y del reverso antes de generar el PDF."
+        : "Selecciona al menos la foto del frente para generar el PDF.");
       return;
     }
     setGenerating(true);
     try {
-      const file = await buildCedulaPdfFromPhotos(frontUri, backUri);
+      const file = await buildCedulaPdfFromPhotos(frontUri, backUri || undefined);
       onPdfReady(file);
     } catch (cause) {
       Alert.alert("No fue posible generar el PDF", errorMessage(cause));
@@ -4324,7 +4513,7 @@ function CedulaCaptureFlow({
         <View style={styles.cameraHeader}>
           <View style={styles.flex}>
             <Text style={styles.formTitle}>Foto de cédula</Text>
-            <Text style={styles.caption}>Toma frente y reverso. Solo se guardará el PDF final.</Text>
+            <Text style={styles.caption}>{mode === "camera" ? "Toma frente y reverso." : "Selecciona frente y reverso opcional."} Solo se guardará el PDF final.</Text>
           </View>
           <Pressable style={styles.iconButton} onPress={onClose}>
             <Ionicons name="close" size={20} color={C.ink} />
@@ -4352,21 +4541,27 @@ function CedulaCaptureFlow({
           </View>
         ) : (
           <ScrollView contentContainerStyle={styles.capturePreviewContent}>
-            <Notice icon="document-text-outline" text="Previsualiza ambas imágenes antes de generar el PDF." />
+            <Notice icon="document-text-outline" text={mode === "camera"
+              ? "Previsualiza ambas imágenes antes de generar el PDF."
+              : "Selecciona y revisa el frente. Puedes añadir el reverso antes de generar el PDF."} />
             <CedulaPreviewSlot
               title="Frente del documento"
               uri={frontUri}
-              onTake={() => openCamera("front")}
+              actionLabel={mode === "gallery" ? (frontUri ? "Cambiar foto" : "Elegir foto") : undefined}
+              actionIcon={mode === "gallery" ? "images-outline" : undefined}
+              onTake={() => mode === "gallery" ? void selectGalleryPhoto("front") : void openCamera("front")}
             />
             <CedulaPreviewSlot
               title="Reverso del documento"
               uri={backUri}
-              onTake={() => openCamera("back")}
+              actionLabel={mode === "gallery" ? (backUri ? "Cambiar foto" : "Elegir foto") : undefined}
+              actionIcon={mode === "gallery" ? "images-outline" : undefined}
+              onTake={() => mode === "gallery" ? void selectGalleryPhoto("back") : void openCamera("back")}
             />
             <PrimaryButton
               label={generating ? "Generando PDF..." : "Generar PDF de cédula"}
               icon="document-outline"
-              disabled={generating || !frontUri || !backUri}
+              disabled={generating || !frontUri || (mode === "camera" && !backUri)}
               onPress={generatePdf}
             />
             <SecondaryButton label="Cancelar" icon="close-outline" onPress={onClose} />
@@ -4484,7 +4679,13 @@ function SelfieCaptureModal({
   );
 }
 
-function CedulaPreviewSlot({ title, uri, onTake }: { title: string; uri: string; onTake: () => void }) {
+function CedulaPreviewSlot({ title, uri, onTake, actionLabel, actionIcon }: {
+  title: string;
+  uri: string;
+  onTake: () => void;
+  actionLabel?: string;
+  actionIcon?: IconName;
+}) {
   return (
     <View style={styles.previewCard}>
       <View style={styles.between}>
@@ -4492,7 +4693,7 @@ function CedulaPreviewSlot({ title, uri, onTake }: { title: string; uri: string;
           <Text style={styles.cardTitle}>{title}</Text>
           <Text style={styles.caption}>{uri ? "Foto lista para generar PDF." : "Foto pendiente."}</Text>
         </View>
-        <SecondaryButton label={uri ? "Repetir" : "Tomar"} icon="camera-outline" onPress={onTake} />
+        <SecondaryButton label={actionLabel ?? (uri ? "Repetir" : "Tomar")} icon={actionIcon ?? "camera-outline"} onPress={onTake} />
       </View>
       {uri ? (
         <Image source={{ uri }} style={styles.cedulaPreviewImage} resizeMode="contain" />
@@ -4789,6 +4990,7 @@ function ContractorProfile({
   const [refreshing, setRefreshing] = useState(false);
   const refreshingRef = useRef(false);
   const [terminationVisible, setTerminationVisible] = useState(false);
+  const [registrationDetailsVisible, setRegistrationDetailsVisible] = useState(false);
   const documentsRef = useRef<ContractorDocumentsSectionHandle>(null);
   const workwearRef = useRef<ContractorWorkwearSectionHandle>(null);
   const activationRef = useRef<ContractorActivationDocumentsCardHandle>(null);
@@ -4860,9 +5062,36 @@ function ContractorProfile({
       <InfoCard title="Contacto y logística" rows={[
         ["Teléfono", contractor.phone ?? "Sin registrar"],
         ["Correo", contractor.email ?? "Sin registrar"],
+        ["Departamento", contractor.residenceDepartment || "Sin registrar"],
         ["Ciudad", contractor.city],
+        ["Barrio", contractor.neighborhood || "Sin registrar"],
+        ["Dirección", contractor.address || "Sin registrar"],
         ["Transporte", contractor.transport],
       ]} />
+      {(context.roleCode === "COORDINATOR" || context.roleCode === "DIRECTOR") && (
+        <>
+          {missingRegistrationDetails({
+            residenceDepartment: contractor.residenceDepartment,
+            residenceCity: contractor.city === "Sin registrar" ? "" : contractor.city,
+            neighborhood: contractor.neighborhood,
+            address: contractor.address,
+            pensionFund: contractor.pensionFund ?? "",
+            eps: contractor.eps ?? "",
+          }).length > 0 && (
+            <Notice icon="alert-circle-outline" text="Faltan datos de residencia o seguridad social. Complétalos antes de enviar el onboarding." />
+          )}
+          <SecondaryButton label="Completar residencia y seguridad social" icon="create-outline" onPress={() => setRegistrationDetailsVisible(true)} />
+          <ContractorRegistrationDetailsModal
+            contractor={contractor}
+            visible={registrationDetailsVisible}
+            onClose={() => setRegistrationDetailsVisible(false)}
+            onSaved={async () => {
+              onContractorRefreshed(await loadContractorProfile(contractor.id));
+              setRegistrationDetailsVisible(false);
+            }}
+          />
+        </>
+      )}
       <InfoCard title="Contacto de emergencia" rows={[
         ["Nombre", contractor.emergencyContactName],
         ["Parentesco", contractor.emergencyContactRelationship],
@@ -4923,6 +5152,56 @@ function ContractorProfile({
         </Pressable>
       ))}
     </Page>
+  );
+}
+
+function ContractorRegistrationDetailsModal({
+  contractor,
+  visible,
+  onClose,
+  onSaved,
+}: {
+  contractor: Contractor;
+  visible: boolean;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [details, setDetails] = useState(emptyContractorRegistrationDetails);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!visible) return;
+    setDetails({
+      residenceDepartment: contractor.residenceDepartment,
+      residenceCity: contractor.city === "Sin registrar" ? "" : contractor.city,
+      neighborhood: contractor.neighborhood,
+      address: contractor.address,
+      pensionFund: contractor.pensionFund ?? "",
+      eps: contractor.eps ?? "",
+    });
+  }, [visible, contractor.id]);
+
+  const save = async () => {
+    const missing = missingRegistrationDetails(details);
+    if (missing.length) {
+      Alert.alert("Completa los datos", `Faltan: ${missing.join(", ")}.`);
+      return;
+    }
+    setSaving(true);
+    try {
+      await completeContractorRegistrationDetails(contractor.id, details);
+      await onSaved();
+    } catch (cause) {
+      Alert.alert("No fue posible guardar", errorMessage(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <AdminModalShell visible={visible} title="Residencia y seguridad social" saving={saving} onClose={onClose} onSave={save}>
+      <ContractorRegistrationFields details={details} onChange={setDetails} />
+    </AdminModalShell>
   );
 }
 
@@ -5731,6 +6010,8 @@ function ContractorActivationCard({
   onChanged: () => void;
 }) {
   const [arlPdf, setArlPdf] = useState<ContractorPdfFile | null>(null);
+  const [sourceOpen, setSourceOpen] = useState(false);
+  const [preparing, setPreparing] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const pickArl = async () => {
@@ -5763,6 +6044,18 @@ function ContractorActivationCard({
     }
   };
 
+  const pickArlFromGallery = async () => {
+    setPreparing(true);
+    try {
+      const file = await pickGalleryPdf("certificado-arl-foto.pdf");
+      if (file) setArlPdf(file);
+    } catch (cause) {
+      Alert.alert("No fue posible generar el PDF", errorMessage(cause));
+    } finally {
+      setPreparing(false);
+    }
+  };
+
   const save = async () => {
     if (!arlPdf) {
       Alert.alert("Adjunta el ARL", "El Certificado ARL en PDF es obligatorio para activar el contrato.");
@@ -5789,19 +6082,26 @@ function ContractorActivationCard({
           <Text style={styles.caption}>Adjunta el Certificado ARL en PDF para pasar el contrato a ACTIVO.</Text>
         </View>
       </View>
-      <Pressable style={styles.uploadCard} onPress={pickArl}>
+      <Pressable style={styles.uploadCard} onPress={() => setSourceOpen(true)}>
         <View style={styles.pdfIcon}>
           <Ionicons name="document-attach-outline" size={23} color={C.orange} />
         </View>
         <View style={styles.flex}>
           <Text style={styles.cardTitle}>Certificado ARL</Text>
           <Text style={styles.cardMeta}>
-            {arlPdf ? arlPdf.name : "Adjuntar archivo PDF máximo 1 MB"}
+            {preparing ? "Generando PDF..." : arlPdf ? arlPdf.name : "Cargar PDF o elegir foto de Galería"}
           </Text>
         </View>
         <Ionicons name="cloud-upload-outline" size={20} color={C.navy} />
       </Pressable>
-      <PrimaryButton label={saving ? "Activando..." : "Guardar ARL y activar"} icon="checkmark-circle-outline" disabled={saving} onPress={save} />
+      <PrimaryButton label={saving ? "Activando..." : "Guardar ARL y activar"} icon="checkmark-circle-outline" disabled={saving || preparing} onPress={save} />
+      <PdfGallerySourceModal
+        visible={sourceOpen}
+        title="Adjuntar certificado ARL"
+        onClose={() => setSourceOpen(false)}
+        onPickPdf={() => void pickArl()}
+        onPickGallery={() => void pickArlFromGallery()}
+      />
     </View>
   );
 }
@@ -5822,12 +6122,16 @@ function ContractorDocumentUploadModal({
   const [documentTypeCode, setDocumentTypeCode] = useState("");
   const [selectorOpen, setSelectorOpen] = useState(false);
   const [selectedFile, setSelectedFile] = useState<ContractorPdfFile | null>(null);
+  const [sourceOpen, setSourceOpen] = useState(false);
+  const [preparing, setPreparing] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (visible) {
       setDocumentTypeCode(documentTypes[0]?.code ?? "");
       setSelectedFile(null);
+      setSourceOpen(false);
+      setPreparing(false);
       setSaving(false);
     }
   }, [documentTypes, visible]);
@@ -5864,6 +6168,20 @@ function ContractorDocumentUploadModal({
     }
   };
 
+  const pickDocumentFromGallery = async () => {
+    if (!selectedType) return;
+    setPreparing(true);
+    try {
+      const name = `${selectedType.code.toLowerCase().replace(/_/g, "-")}-foto.pdf`;
+      const file = await pickGalleryPdf(name);
+      if (file) setSelectedFile(file);
+    } catch (cause) {
+      Alert.alert("No fue posible generar el PDF", errorMessage(cause));
+    } finally {
+      setPreparing(false);
+    }
+  };
+
   const save = async () => {
     if (!selectedType) {
       Alert.alert("Selecciona el tipo", "Debes seleccionar el tipo de documento.");
@@ -5887,7 +6205,7 @@ function ContractorDocumentUploadModal({
 
   return (
     <>
-      <Modal visible={visible && !selectorOpen} transparent animationType="fade" onRequestClose={onClose}>
+      <Modal visible={visible && !selectorOpen && !sourceOpen} transparent animationType="fade" onRequestClose={onClose}>
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
             <View style={styles.between}>
@@ -5906,13 +6224,13 @@ function ContractorDocumentUploadModal({
               disabled={documentTypes.length === 0}
               onPress={() => setSelectorOpen(true)}
             />
-            <Pressable style={styles.uploadCard} onPress={pickDocument}>
+            <Pressable style={styles.uploadCard} onPress={() => setSourceOpen(true)}>
               <View style={styles.pdfIcon}>
                 <Ionicons name="document-attach-outline" size={23} color={C.orange} />
               </View>
               <View style={styles.flex}>
                 <Text style={styles.cardTitle}>Documento en PDF</Text>
-                <Text style={styles.cardMeta}>{selectedFile ? selectedFile.name : "Adjuntar archivo PDF máximo 1 MB"}</Text>
+                <Text style={styles.cardMeta}>{preparing ? "Generando PDF..." : selectedFile ? selectedFile.name : "Cargar PDF o elegir foto de Galería"}</Text>
               </View>
               <Ionicons name="cloud-upload-outline" size={20} color={C.navy} />
             </Pressable>
@@ -5921,13 +6239,20 @@ function ContractorDocumentUploadModal({
               <PrimaryButton
                 label={saving ? "Guardando..." : "Guardar"}
                 icon="save-outline"
-                disabled={saving}
+                disabled={saving || preparing}
                 onPress={save}
               />
             </View>
           </View>
         </View>
       </Modal>
+      <PdfGallerySourceModal
+        visible={visible && sourceOpen}
+        title="Adjuntar documento"
+        onClose={() => setSourceOpen(false)}
+        onPickPdf={() => void pickDocument()}
+        onPickGallery={() => void pickDocumentFromGallery()}
+      />
       <DropdownModal
         visible={selectorOpen}
         title="Tipo de documento"
@@ -6109,6 +6434,8 @@ const ContractorActivationDocumentsCard = forwardRef<
   onChanged,
 }, ref) {
   const [selectedFiles, setSelectedFiles] = useState<Partial<Record<ContractorActivationDocumentType, ContractorPdfFile>>>({});
+  const [sourceItem, setSourceItem] = useState<(typeof activationDocumentOptions)[number] | null>(null);
+  const [preparingType, setPreparingType] = useState<ContractorActivationDocumentType | null>(null);
   const [existingCodes, setExistingCodes] = useState<ContractorActivationDocumentType[]>([]);
   const [contractTypeId, setContractTypeId] = useState(contractor.contractTypeId ?? contractTypes[0]?.id ?? 0);
   const [contractTypePickerVisible, setContractTypePickerVisible] = useState(false);
@@ -6184,6 +6511,19 @@ const ContractorActivationDocumentsCard = forwardRef<
       }));
     } catch (cause) {
       Alert.alert("No fue posible adjuntar", errorMessage(cause));
+    }
+  };
+
+  const pickDocumentFromGallery = async (typeCode: ContractorActivationDocumentType) => {
+    setPreparingType(typeCode);
+    try {
+      const name = `${typeCode.toLowerCase().replace(/_/g, "-")}-foto.pdf`;
+      const file = await pickGalleryPdf(name);
+      if (file) setSelectedFiles((current) => ({ ...current, [typeCode]: file }));
+    } catch (cause) {
+      Alert.alert("No fue posible generar el PDF", errorMessage(cause));
+    } finally {
+      setPreparingType(null);
     }
   };
 
@@ -6291,7 +6631,7 @@ const ContractorActivationDocumentsCard = forwardRef<
             <Pressable
               key={item.typeCode}
               style={styles.uploadCard}
-              onPress={() => pickDocument(item.typeCode, item.title)}
+              onPress={() => setSourceItem(item)}
             >
               <View style={styles.pdfIcon}>
                 <Ionicons
@@ -6303,7 +6643,9 @@ const ContractorActivationDocumentsCard = forwardRef<
               <View style={styles.flex}>
                 <Text style={styles.cardTitle}>{item.title}</Text>
                 <Text style={styles.cardMeta}>
-                  {selectedFile ? selectedFile.name : saved ? "Guardado. Puedes adjuntar otro PDF." : "Adjuntar archivo PDF máximo 1 MB"}
+                  {preparingType === item.typeCode
+                    ? "Generando PDF..."
+                    : selectedFile ? selectedFile.name : saved ? "Guardado. Puedes adjuntar otro PDF o foto." : "Cargar PDF o elegir foto de Galería"}
                 </Text>
               </View>
               <Ionicons name="cloud-upload-outline" size={20} color={C.navy} />
@@ -6314,7 +6656,7 @@ const ContractorActivationDocumentsCard = forwardRef<
       <PrimaryButton
         label={saving ? `${activationStepLabel || "Guardando"}... ${activationProgress}%` : "Guardar activación"}
         icon="checkmark-circle-outline"
-        disabled={saving || loadingDocuments || contractTypes.length === 0}
+        disabled={saving || preparingType !== null || loadingDocuments || contractTypes.length === 0}
         onPress={save}
       />
       {saving && (
@@ -6323,6 +6665,13 @@ const ContractorActivationDocumentsCard = forwardRef<
         </View>
       )}
     </View>
+    <PdfGallerySourceModal
+      visible={sourceItem !== null}
+      title={sourceItem ? `Adjuntar ${sourceItem.title}` : "Adjuntar documento"}
+      onClose={() => setSourceItem(null)}
+      onPickPdf={() => sourceItem && void pickDocument(sourceItem.typeCode, sourceItem.title)}
+      onPickGallery={() => sourceItem && void pickDocumentFromGallery(sourceItem.typeCode)}
+    />
     <DropdownModal
       visible={contractTypePickerVisible}
       title="Tipo de contrato"
@@ -9701,8 +10050,11 @@ function BottomNav({
   active: Screen;
   onPress: (screen: Screen) => void;
 }) {
+  const insets = useSafeAreaInsets();
+  const androidBottomInset = Platform.OS === "android" ? Math.max(insets.bottom, 12) : 0;
+
   return (
-    <View style={styles.bottomNav}>
+    <View style={[styles.bottomNav, androidBottomInset > 0 && { paddingBottom: androidBottomInset }]}>
       {tabs.map((tab) => {
         const selected = active === tab.screen;
         return (

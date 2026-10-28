@@ -1,12 +1,19 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { addDaysColombia, colombiaNow, ONBOARDING_DAYS, randomToken, sha256Hex } from "../_shared/onboarding.ts";
+import { missingContractorRegistrationDetails } from "../_shared/contractor-details.ts";
 
 type ContractorRow = {
   id: number;
   name: string;
   last_name: string;
   email: string | null;
+  residence_department: string | null;
+  residence_city: string | null;
+  neighborhood: string | null;
+  address: string | null;
+  pension_fund: string | null;
+  eps: string | null;
 };
 
 Deno.serve(async (req) => {
@@ -55,11 +62,15 @@ Deno.serve(async (req) => {
 
   const { data: contractor, error: contractorError } = await serviceClient
     .from("contractor")
-    .select("id,name,last_name,email")
+    .select("id,name,last_name,email,residence_department,residence_city,neighborhood,address,pension_fund,eps")
     .eq("id", contractorId)
     .single<ContractorRow>();
   if (contractorError || !contractor) return jsonResponse({ error: "Contratista no encontrado." }, 404);
   if (!contractor.email) return jsonResponse({ error: "El contratista no tiene correo registrado." }, 400);
+  const missingDetails = missingContractorRegistrationDetails(contractor as unknown as Record<string, unknown>);
+  if (missingDetails.length) {
+    return jsonResponse({ error: `Completa internamente estos datos antes de enviar la invitacion: ${missingDetails.join(", ")}.` }, 400);
+  }
 
   await serviceClient
     .from("contractor_onboarding_invites")
@@ -107,7 +118,7 @@ Deno.serve(async (req) => {
                 <tr>
                   <td style="padding:22px 26px 24px">
                     <h1 style="margin:0 0 10px;font-size:24px;line-height:1.2;color:#15285A">Hola ${fullName || "contratista"},</h1>
-                    <p style="margin:0 0 18px;font-size:15px;line-height:1.45;color:#39445C">Completa tus datos personales y acepta la política de tratamiento de datos para finalizar tu registro.</p>
+                    <p style="margin:0 0 18px;font-size:15px;line-height:1.45;color:#39445C">Para vincularte como contratista de Support Colombia, completa tus datos personales y acepta la política de tratamiento de datos para finalizar tu registro.</p>
                     <a href="${link}" style="display:inline-block;background:#15285A;color:#FFFFFF;padding:12px 18px;border-radius:9px;text-decoration:none;font-size:15px;font-weight:bold">Diligenciar formulario</a>
                     <p style="margin:16px 0 0;font-size:12px;line-height:1.4;color:#6B7280">Este enlace vence en ${ONBOARDING_DAYS} días y solo puede usarse una vez.</p>
                   </td>
