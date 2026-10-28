@@ -38,6 +38,7 @@ import { buildCedulaPdfFromPhotos, buildPdfFromPhotos } from "./lib/cedula-pdf";
 import { supabase } from "./lib/supabase";
 import {
   cancelPersonnelRequest,
+  changeContractorContract,
   checkContractorShiftAssignment,
   calculateAdminDirectPayroll,
   closeAdminDirectPayroll,
@@ -2038,6 +2039,7 @@ function CalendarModal({
   subtitle = "Selecciona el día que quieres visualizar.",
   resetLabel = "Mostrar últimos 3 días",
   minimumDate,
+  maximumDate,
   onClose,
   onSelect,
   onReset,
@@ -2049,6 +2051,7 @@ function CalendarModal({
   subtitle?: string;
   resetLabel?: string;
   minimumDate?: string;
+  maximumDate?: string;
   onClose: () => void;
   onSelect: (date: string) => void;
   onReset?: () => void;
@@ -2202,7 +2205,7 @@ function CalendarModal({
                   );
                   const selected = isoDate === selectedDate;
                   const isToday = isoDate === todayIso();
-                  const disabled = Boolean(minimumDate && isoDate < minimumDate);
+                  const disabled = Boolean((minimumDate && isoDate < minimumDate) || (maximumDate && isoDate > maximumDate));
                   return (
                     <Pressable
                       key={isoDate}
@@ -4769,7 +4772,7 @@ function Staff({
         <View style={styles.flex}>
           <Text style={styles.eyebrow}>BASE DE TALENTO</Text>
           <Text style={styles.greeting}>Personal disponible</Text>
-          <Text style={styles.subtitle}>{contractors.length} contratistas registrados</Text>
+          <Text style={styles.subtitle}>{visible.length} {visible.length === 1 ? "Contratista" : "Contratistas"}</Text>
         </View>
         <Pressable style={styles.fab} onPress={onCreate}>
           <Ionicons name="add" color={C.white} size={26} />
@@ -4990,6 +4993,8 @@ function ContractorProfile({
   const [refreshing, setRefreshing] = useState(false);
   const refreshingRef = useRef(false);
   const [terminationVisible, setTerminationVisible] = useState(false);
+  const [changeContractVisible, setChangeContractVisible] = useState(false);
+  const [statusActionsExpanded, setStatusActionsExpanded] = useState(false);
   const [registrationDetailsVisible, setRegistrationDetailsVisible] = useState(false);
   const documentsRef = useRef<ContractorDocumentsSectionHandle>(null);
   const workwearRef = useRef<ContractorWorkwearSectionHandle>(null);
@@ -5101,6 +5106,42 @@ function ContractorProfile({
         <ContractorNoveltiesSection key={contractor.id} ref={noveltiesRef} contractorId={contractor.id} />
       )}
       <ContractorWorkwearSection ref={workwearRef} contractorId={contractor.id} workwearTypes={workwearTypes} />
+      {(context.roleCode === "COORDINATOR" || context.roleCode === "DIRECTOR") && contractor.contractStatus !== "PENDIENTE" && (
+        <View style={styles.formCard}>
+          <Text style={styles.formTitle}>Cambiar estado</Text>
+          {contractor.scheduledContractStartDate && (
+            <Notice icon="time-outline" text={`Cambio a ${contractor.scheduledContractTypeName} programado para el ${formatDate(contractor.scheduledContractStartDate)}.`} />
+          )}
+          {contractor.contractStatus === "ACTIVO" ? (
+            <>
+              <SecondaryButton
+                label={statusActionsExpanded ? "Ocultar opciones" : "Cambiar estado"}
+                icon={statusActionsExpanded ? "chevron-up-outline" : "chevron-down-outline"}
+                onPress={() => setStatusActionsExpanded((value) => !value)}
+              />
+              {statusActionsExpanded && (
+                <>
+                  <SecondaryButton label="Cambiar contrato" icon="swap-horizontal-outline" disabled={Boolean(contractor.scheduledContractStartDate)} onPress={() => setChangeContractVisible(true)} />
+                  <SecondaryButton label="Desvincular contratista" icon="person-remove-outline" destructive onPress={() => setTerminationVisible(true)} />
+                </>
+              )}
+            </>
+          ) : (
+            <SecondaryButton label="Recontratar contratista · Próximamente" icon="person-add-outline" disabled onPress={() => {}} />
+          )}
+        </View>
+      )}
+      <ChangeContractorContractModal
+        visible={changeContractVisible}
+        contractor={contractor}
+        contractTypes={contractTypes}
+        onClose={() => setChangeContractVisible(false)}
+        onSaved={async () => {
+          setChangeContractVisible(false);
+          await onChanged();
+          onContractorRefreshed(await loadContractorProfile(contractor.id));
+        }}
+      />
       {context.role === "Director" && contractor.contractStatus === "PENDIENTE" && (
         <ContractorActivationDocumentsCard
           ref={activationRef}
@@ -5109,13 +5150,8 @@ function ContractorProfile({
           onChanged={onChanged}
         />
       )}
-      {(context.role === "Director" || context.role === "Coordinador") && contractor.contractStatus !== "INACTIVO" && (
-        <SecondaryButton
-          label="Desvincular contratista"
-          icon="person-remove-outline"
-          destructive
-          onPress={() => setTerminationVisible(true)}
-        />
+      {(context.roleCode === "COORDINATOR" || context.roleCode === "DIRECTOR") && contractor.contractStatus === "PENDIENTE" && (
+        <SecondaryButton label="Desvincular contratista" icon="person-remove-outline" destructive onPress={() => setTerminationVisible(true)} />
       )}
       <TerminateContractorModal
         visible={terminationVisible}
@@ -6263,6 +6299,126 @@ function ContractorDocumentUploadModal({
           setDocumentTypeCode(documentTypes.find((type) => type.id === id)?.code ?? "");
           setSelectorOpen(false);
         }}
+      />
+    </>
+  );
+}
+
+function ChangeContractorContractModal({
+  visible,
+  contractor,
+  contractTypes,
+  onClose,
+  onSaved,
+}: {
+  visible: boolean;
+  contractor: Contractor;
+  contractTypes: AppData["contractTypes"];
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [currentEndDate, setCurrentEndDate] = useState(todayIso());
+  const [newStartDate, setNewStartDate] = useState("");
+  const [newTypeId, setNewTypeId] = useState(0);
+  const [calendar, setCalendar] = useState<"end" | "start" | null>(null);
+  const [typeOpen, setTypeOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const options = contractTypes.filter((type) => type.id !== contractor.contractTypeId);
+  const selectedType = options.find((type) => type.id === newTypeId);
+
+  useEffect(() => {
+    if (!visible) return;
+    const today = todayIso();
+    setCurrentEndDate(today);
+    setNewStartDate(dateToIso(addDays(isoToDate(today), 1)));
+    setNewTypeId(0);
+  }, [visible, contractor.id]);
+
+  const save = () => {
+    const today = todayIso();
+    if (!contractor.contractStartDate || currentEndDate < contractor.contractStartDate ||
+      currentEndDate > today || newStartDate < today || newStartDate <= currentEndDate ||
+      !selectedType) {
+      showMessage("Revisa las fechas", "El fin debe estar entre el inicio actual y hoy. El nuevo contrato debe iniciar desde hoy, después del fin anterior, con otro tipo.");
+      return;
+    }
+    confirmAction(
+      "Confirmar cambio de contrato",
+      `${contractor.fullName}: ${contractor.contractTypeName} hasta el ${formatDate(currentEndDate)}. Nuevo contrato ${selectedType.name} desde el ${formatDate(newStartDate)}. ¿Guardar este cambio?`,
+      "Guardar cambio",
+      () => {
+        void (async () => {
+          setSaving(true);
+          try {
+            await changeContractorContract({
+              contractorId: contractor.id,
+              currentEndDate,
+              newStartDate,
+              newContractTypeId: newTypeId,
+            });
+            await onSaved();
+            showMessage("Contrato actualizado", "Se guardó el nuevo tipo de contrato.");
+          } catch (cause) {
+            showMessage("No fue posible cambiar el contrato", errorMessage(cause));
+          } finally {
+            setSaving(false);
+          }
+        })();
+      },
+    );
+  };
+
+  return (
+    <>
+      <Modal visible={visible && !calendar && !typeOpen} transparent animationType="fade" onRequestClose={onClose}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.terminationCard}>
+            <ScrollView contentContainerStyle={styles.terminationContent} keyboardShouldPersistTaps="handled">
+              <View style={styles.between}>
+                <Text style={styles.formTitle}>Cambiar contrato</Text>
+                <Pressable style={styles.iconButton} onPress={onClose}>
+                  <Ionicons name="close" size={20} color={C.ink} />
+                </Pressable>
+              </View>
+              <InfoCard title="Contrato actual" rows={[
+                ["Tipo", contractor.contractTypeName],
+                ["Inicio", contractor.contractStartDate ? formatDate(contractor.contractStartDate) : "Sin registrar"],
+              ]} />
+              <Choice label="Fin del contrato actual *" value={formatDate(currentEndDate)} icon="calendar-outline" onPress={() => setCalendar("end")} />
+              <Choice label="Inicio del nuevo contrato *" value={newStartDate ? formatDate(newStartDate) : "Selecciona una fecha"} icon="calendar-outline" onPress={() => setCalendar("start")} />
+              <Choice label="Nuevo tipo de contrato *" value={selectedType?.name ?? "Selecciona un tipo distinto"} icon="document-text-outline" onPress={() => setTypeOpen(true)} />
+              <View style={styles.terminationActions}>
+                <View style={styles.flex}><SecondaryButton label="Cancelar" icon="close-outline" onPress={onClose} /></View>
+                <View style={styles.flex}><PrimaryButton label={saving ? "Guardando..." : "Confirmar cambio"} icon="checkmark-outline" disabled={saving} onPress={save} /></View>
+              </View>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+      <CalendarModal
+        visible={calendar === "end"}
+        selectedDate={currentEndDate}
+        title="Fin del contrato actual"
+        minimumDate={contractor.contractStartDate ?? undefined}
+        maximumDate={todayIso()}
+        onClose={() => setCalendar(null)}
+        onSelect={(date) => { setCurrentEndDate(date); setCalendar(null); }}
+      />
+      <CalendarModal
+        visible={calendar === "start"}
+        selectedDate={newStartDate || null}
+        title="Inicio del nuevo contrato"
+        minimumDate={todayIso()}
+        onClose={() => setCalendar(null)}
+        onSelect={(date) => { setNewStartDate(date); setCalendar(null); }}
+      />
+      <DropdownModal
+        visible={typeOpen}
+        title="Nuevo tipo de contrato"
+        options={options}
+        selectedId={newTypeId}
+        onClose={() => setTypeOpen(false)}
+        onSelect={(id) => { setNewTypeId(id); setTypeOpen(false); }}
       />
     </>
   );
@@ -9959,6 +10115,7 @@ function RequestBadge({ status }: { status: PersonnelRequest["status"] }) {
 
 function ContractStatusPill({ status }: { status: Contractor["contractStatus"] }) {
   if (status === "ACTIVO") return <StatusPill good text="ACTIVO" />;
+  if (status === "PROGRAMADO") return <StatusPill good={false} neutral text="PROGRAMADO" />;
   if (status === "PENDIENTE") return <StatusPill good={false} neutral text="PENDIENTE" />;
   return <StatusPill good={false} text="INACTIVO" />;
 }
