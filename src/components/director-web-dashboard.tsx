@@ -1804,7 +1804,7 @@ export default function DirectorWebDashboard() {
               <Card title="Antigüedad del contrato">
                 <HorizontalBars data={report.tenure} />
               </Card>
-              <Card title="Tipo de contrato">
+              <Card title="Tipo de contrato (activos)">
                 <HorizontalBars data={report.contractTypes} color={BLUE} />
               </Card>
             </View>
