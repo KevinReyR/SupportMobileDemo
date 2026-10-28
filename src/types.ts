@@ -173,6 +173,9 @@ export interface Contractor {
   eps: string | null;
   arl: string | null;
   pensionFund: string | null;
+  residenceDepartment: string;
+  neighborhood: string;
+  address: string;
   transport: string;
   civilState: string;
   city: string;
@@ -690,18 +693,13 @@ export interface ContractorOnboardingSubmission {
   birthDate: string;
   birthPlace: string;
   civilStateId: number;
-  residenceDepartment: string;
-  residenceCity: string;
-  address: string;
   stratum: string;
   phone: string;
   transportTypeId: number;
   educationLevelId: number;
-  eps: string;
   shirtSize: string;
   pantSize: string;
   shoeSize: string;
-  pensionFund: string;
   emergencyContactName: string;
   emergencyContactRelationship: string;
   emergencyContactPhone: string;

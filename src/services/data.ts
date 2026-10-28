@@ -116,6 +116,12 @@ export interface CreateContractorInput {
   birthDate: string;
   phone: string;
   email: string;
+  residenceDepartment: string;
+  residenceCity: string;
+  neighborhood: string;
+  address: string;
+  pensionFund: string;
+  eps: string;
   cedulaPdf: ContractorPdfFile;
 }
 
@@ -244,7 +250,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       supabase
         .from("contractor")
         .select(
-          "id,name,last_name,document_number,profile_photo_file_id,birth_date,birth_place,residence_city,phone_number,email,emergency_contact_name,emergency_contact_relationship,emergency_contact_phone,rh,eps,arl,pension_fund,disponibility,shirt_size,pant_size,shoe_size,hire_date,termination_date,transport_type(name),civil_state_type(name)",
+          "id,name,last_name,document_number,profile_photo_file_id,birth_date,birth_place,residence_department,residence_city,neighborhood,address,phone_number,email,emergency_contact_name,emergency_contact_relationship,emergency_contact_phone,rh,eps,arl,pension_fund,disponibility,shirt_size,pant_size,shoe_size,hire_date,termination_date,transport_type(name),civil_state_type(name)",
         )
         .order("name"),
       supabase
@@ -308,6 +314,9 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
         eps: cleanText(row.eps) || null,
         arl: cleanText(row.arl) || null,
         pensionFund: cleanText(row.pension_fund) || null,
+        residenceDepartment: cleanText(row.residence_department),
+        neighborhood: cleanText(row.neighborhood),
+        address: cleanText(row.address),
         transport: cleanText(firstRelation<any>(row.transport_type)?.name) || "Sin registrar",
         civilState: cleanText(firstRelation<any>(row.civil_state_type)?.name) || "Sin registrar",
         city: cleanText(row.residence_city) || "Sin registrar",
@@ -467,7 +476,7 @@ export async function loadContractorProfile(contractorId: number): Promise<Contr
     supabase
       .from("contractor")
       .select(
-        "id,name,last_name,document_number,profile_photo_file_id,birth_date,birth_place,residence_city,phone_number,email,emergency_contact_name,emergency_contact_relationship,emergency_contact_phone,rh,eps,arl,pension_fund,disponibility,shirt_size,pant_size,shoe_size,hire_date,termination_date,transport_type(name),civil_state_type(name)",
+        "id,name,last_name,document_number,profile_photo_file_id,birth_date,birth_place,residence_department,residence_city,neighborhood,address,phone_number,email,emergency_contact_name,emergency_contact_relationship,emergency_contact_phone,rh,eps,arl,pension_fund,disponibility,shirt_size,pant_size,shoe_size,hire_date,termination_date,transport_type(name),civil_state_type(name)",
       )
       .eq("id", contractorId)
       .single(),
@@ -519,6 +528,9 @@ export async function loadContractorProfile(contractorId: number): Promise<Contr
     eps: cleanText(row.eps) || null,
     arl: cleanText(row.arl) || null,
     pensionFund: cleanText(row.pension_fund) || null,
+    residenceDepartment: cleanText(row.residence_department),
+    neighborhood: cleanText(row.neighborhood),
+    address: cleanText(row.address),
     transport: cleanText(firstRelation<any>(row.transport_type)?.name) || "Sin registrar",
     civilState: cleanText(firstRelation<any>(row.civil_state_type)?.name) || "Sin registrar",
     city: cleanText(row.residence_city) || "Sin registrar",
@@ -743,6 +755,10 @@ async function uploadAndRegisterContractorPdf(
   if (content.byteLength > MAX_CONTRACTOR_DOCUMENT_BYTES) {
     throw new Error("El PDF no puede superar 1 MB.");
   }
+  const header = new Uint8Array(content, 0, Math.min(content.byteLength, 5));
+  if (header.length !== 5 || header.some((byte, index) => byte !== [37, 80, 68, 70, 45][index])) {
+    throw new Error("El archivo seleccionado no contiene un PDF válido.");
+  }
 
   const safeName = (file.name || `${typeCode.toLowerCase()}.pdf`)
     .replace(/[^\w.\-]+/g, "_")
@@ -770,7 +786,7 @@ async function uploadAndRegisterContractorPdf(
 
 export async function createContractorDraft(input: CreateContractorInput): Promise<number> {
   validatePdfFile(input.cedulaPdf);
-  const result = await supabase.rpc("create_contractor_draft", {
+  const result = await supabase.rpc("create_contractor_draft_with_details", {
     p_document_type_id: input.documentTypeId,
     p_document_number: input.documentNumber.trim(),
     p_name: input.name.trim(),
@@ -778,11 +794,33 @@ export async function createContractorDraft(input: CreateContractorInput): Promi
     p_phone_number: input.phone.trim(),
     p_email: input.email.trim().toLowerCase(),
     p_birth_date: input.birthDate,
+    p_residence_department: input.residenceDepartment.trim(),
+    p_residence_city: input.residenceCity.trim(),
+    p_neighborhood: input.neighborhood.trim(),
+    p_address: input.address.trim(),
+    p_pension_fund: input.pensionFund.trim(),
+    p_eps: input.eps.trim(),
   });
   fail(result.error);
   const contractorId = Number(result.data);
   await uploadAndRegisterContractorPdf(contractorId, "CEDULA", input.cedulaPdf);
   return contractorId;
+}
+
+export async function completeContractorRegistrationDetails(
+  contractorId: number,
+  details: Pick<CreateContractorInput, "residenceDepartment" | "residenceCity" | "neighborhood" | "address" | "pensionFund" | "eps">,
+): Promise<void> {
+  const result = await supabase.rpc("complete_contractor_registration_details", {
+    p_contractor_id: contractorId,
+    p_residence_department: details.residenceDepartment.trim(),
+    p_residence_city: details.residenceCity.trim(),
+    p_neighborhood: details.neighborhood.trim(),
+    p_address: details.address.trim(),
+    p_pension_fund: details.pensionFund.trim(),
+    p_eps: details.eps.trim(),
+  });
+  fail(result.error);
 }
 
 export async function uploadContractorActivationDocument(
@@ -813,11 +851,20 @@ export async function uploadContractorDocument(
   await uploadAndRegisterContractorPdf(contractorId, typeCode, file);
 }
 
+async function failOnboardingFunction(error: { message: string; context?: unknown } | null): Promise<void> {
+  if (!error) return;
+  if (error.context instanceof Response) {
+    const body = await error.context.clone().json().catch(() => null);
+    if (typeof body?.error === "string" && body.error.trim()) throw new Error(body.error);
+  }
+  throw new Error(error.message);
+}
+
 export async function sendContractorOnboardingEmail(contractorId: number): Promise<string> {
   const result = await supabase.functions.invoke("send-contractor-onboarding-email", {
     body: { contractorId },
   });
-  fail(result.error);
+  await failOnboardingFunction(result.error);
   if ((result.data as any)?.error) throw new Error((result.data as any).error);
   const email = (result.data as any)?.email;
   return typeof email === "string" ? email : "";
@@ -829,7 +876,7 @@ export async function loadContractorOnboardingForm(
   const result = await supabase.functions.invoke("contractor-onboarding", {
     body: { action: "get", token },
   });
-  fail(result.error);
+  await failOnboardingFunction(result.error);
   if ((result.data as any)?.error) throw new Error((result.data as any).error);
   return result.data as ContractorOnboardingForm;
 }
@@ -841,7 +888,7 @@ export async function submitContractorOnboardingForm(
   const result = await supabase.functions.invoke("contractor-onboarding", {
     body: { action: "submit", token, payload },
   });
-  fail(result.error);
+  await failOnboardingFunction(result.error);
   if ((result.data as any)?.error) throw new Error((result.data as any).error);
 }
 
@@ -851,7 +898,7 @@ export async function loadContractorOnboardingContract(
   const result = await supabase.functions.invoke("contractor-onboarding", {
     body: { action: "get-contract", token },
   });
-  fail(result.error);
+  await failOnboardingFunction(result.error);
   if ((result.data as any)?.error) throw new Error((result.data as any).error);
   return result.data as ContractorOnboardingContract;
 }
@@ -864,7 +911,7 @@ export async function signContractorOnboardingContract(
   const result = await supabase.functions.invoke("contractor-onboarding", {
     body: { action: "sign-contract", token, signatureBase64, evidence },
   });
-  fail(result.error);
+  await failOnboardingFunction(result.error);
   if ((result.data as any)?.error) throw new Error((result.data as any).error);
 }
 
