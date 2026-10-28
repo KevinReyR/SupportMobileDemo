@@ -13,7 +13,7 @@ export interface NamedRecord {
   name: string;
 }
 
-export type ContractStatus = "ACTIVO" | "PENDIENTE" | "INACTIVO";
+export type ContractStatus = "ACTIVO" | "PENDIENTE" | "INACTIVO" | "PROGRAMADO";
 export type WorkwearMovementType = "ENTREGA" | "DEVOLUCION" | "BAJA";
 
 export type ContractorNoveltyType = "INCAPACIDAD" | "PERMISO" | "LICENCIA" | "ASISTENCIA" | "VACACIONES";
@@ -190,6 +190,8 @@ export interface Contractor {
   contractStartDate: string | null;
   contractTypeId: number | null;
   contractTypeName: string;
+  scheduledContractStartDate: string | null;
+  scheduledContractTypeName: string | null;
   lastClient: string;
   lastArea: string;
   lastDate: string | null;

@@ -82,8 +82,34 @@ export type ContractorDocumentTypeOption = { id: number; name: string; code: str
 
 function normalizeContractStatus(value: string | null | undefined): ContractStatus {
   const normalized = cleanText(value).toUpperCase();
-  if (normalized === "PENDIENTE" || normalized === "INACTIVO") return normalized;
-  return "ACTIVO";
+  if (normalized === "PENDIENTE" || normalized === "INACTIVO" || normalized === "PROGRAMADO") return normalized;
+  return normalized === "ACTIVO" ? "ACTIVO" : "INACTIVO";
+}
+
+function effectiveContract(rows: any[]) {
+  const today = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Bogota", year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(new Date());
+  const ordered = [...rows].sort((a, b) =>
+    String(b.start_date).localeCompare(String(a.start_date)) || Number(b.id) - Number(a.id));
+  const scheduled = ordered.find((row) =>
+    row.start_date > today && cleanText(firstRelation<any>(row.contract_status)?.name).toUpperCase() === "PROGRAMADO");
+  const current = ordered.find((row) => {
+    const status = cleanText(firstRelation<any>(row.contract_status)?.name).toUpperCase();
+    return row.start_date <= today && (!row.end_date || row.end_date >= today) &&
+      (status === "ACTIVO" || status === "PROGRAMADO");
+  });
+  const pending = ordered.find((row) =>
+    row.start_date <= today && cleanText(firstRelation<any>(row.contract_status)?.name).toUpperCase() === "PENDIENTE");
+  const displayed = current ?? pending ?? ordered.find((row) => row.start_date <= today);
+  return {
+    status: current ? "ACTIVO" as ContractStatus : pending ? "PENDIENTE" as ContractStatus : "INACTIVO" as ContractStatus,
+    startDate: displayed?.start_date ?? null,
+    typeId: displayed?.contract_type ?? null,
+    typeName: cleanText(firstRelation<any>(displayed?.contract_type_ref)?.name) || "Sin tipo",
+    scheduledStartDate: scheduled?.start_date ?? null,
+    scheduledTypeName: cleanText(firstRelation<any>(scheduled?.contract_type_ref)?.name) || null,
+  };
 }
 
 function uniqueToken() {
@@ -273,20 +299,12 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       }
     }
 
-    const latestContracts = new Map<
-      number,
-      { status: ContractStatus; startDate: string | null; typeId: number | null; typeName: string }
-    >();
+    const contractsByContractor = new Map<number, any[]>();
     for (const row of contractResult.data ?? []) {
       const contractorId = Number((row as any).contractor_id);
-      if (!latestContracts.has(contractorId)) {
-        latestContracts.set(contractorId, {
-          status: normalizeContractStatus(firstRelation<any>((row as any).contract_status)?.name),
-          startDate: (row as any).start_date ?? null,
-          typeId: (row as any).contract_type ?? null,
-          typeName: cleanText(firstRelation<any>((row as any).contract_type_ref)?.name) || "Sin tipo",
-        });
-      }
+      const existing = contractsByContractor.get(contractorId) ?? [];
+      existing.push(row);
+      contractsByContractor.set(contractorId, existing);
     }
 
     contractors = (contractorResult.data ?? []).map((row: any) => {
@@ -294,7 +312,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       const firstName = cleanText(row.name);
       const lastName = cleanText(row.last_name);
       const fullName = `${firstName} ${lastName}`.trim();
-      const latestContract = latestContracts.get(row.id);
+      const latestContract = effectiveContract(contractsByContractor.get(row.id) ?? []);
       return {
         id: row.id,
         name: firstName,
@@ -320,17 +338,19 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
         transport: cleanText(firstRelation<any>(row.transport_type)?.name) || "Sin registrar",
         civilState: cleanText(firstRelation<any>(row.civil_state_type)?.name) || "Sin registrar",
         city: cleanText(row.residence_city) || "Sin registrar",
-        available: Boolean(row.disponibility),
+        available: Boolean(row.disponibility) && latestContract.status === "ACTIVO",
         shirtSize: row.shirt_size,
         pantSize: row.pant_size,
         shoeSize: row.shoe_size,
         hireDate: row.hire_date,
         terminationDate: row.termination_date,
-        active: (latestContract?.status ?? "INACTIVO") === "ACTIVO",
-        contractStatus: latestContract?.status ?? "INACTIVO",
-        contractStartDate: latestContract?.startDate ?? null,
-        contractTypeId: latestContract?.typeId ?? null,
-        contractTypeName: latestContract?.typeName ?? "Sin tipo",
+        active: latestContract.status === "ACTIVO",
+        contractStatus: latestContract.status,
+        contractStartDate: latestContract.startDate,
+        contractTypeId: latestContract.typeId,
+        contractTypeName: latestContract.typeName,
+        scheduledContractStartDate: latestContract.scheduledStartDate,
+        scheduledContractTypeName: latestContract.scheduledTypeName,
         lastClient: cleanText(firstRelation<any>(latest?.clients)?.name) || "Sin operación",
         lastArea: cleanText(firstRelation<any>(latest?.area)?.name) || "Sin área",
         lastDate: latest?.operation_date ?? null,
@@ -490,8 +510,7 @@ export async function loadContractorProfile(contractorId: number): Promise<Contr
       .select("id,contractor_id,start_date,end_date,status_id,contract_type,contract_status(name),contract_type_ref:contract_type(name)")
       .eq("contractor_id", contractorId)
       .order("start_date", { ascending: false })
-      .order("id", { ascending: false })
-      .limit(1),
+      .order("id", { ascending: false }),
   ]);
   fail(contractorResult.error);
   fail(assignmentResult.error);
@@ -502,10 +521,8 @@ export async function loadContractorProfile(contractorId: number): Promise<Contr
     .map((assignment: any) => firstRelation<any>(assignment.operation))
     .filter(Boolean)
     .sort((left: any, right: any) => String(right.operation_date).localeCompare(String(left.operation_date)))[0];
-  const contract = (contractResult.data ?? [])[0] as any;
-  const contractStatus = contract
-    ? normalizeContractStatus(firstRelation<any>(contract.contract_status)?.name)
-    : "INACTIVO";
+  const contract = effectiveContract(contractResult.data ?? []);
+  const contractStatus = contract.status;
   const firstName = cleanText(row.name);
   const lastName = cleanText(row.last_name);
 
@@ -534,7 +551,7 @@ export async function loadContractorProfile(contractorId: number): Promise<Contr
     transport: cleanText(firstRelation<any>(row.transport_type)?.name) || "Sin registrar",
     civilState: cleanText(firstRelation<any>(row.civil_state_type)?.name) || "Sin registrar",
     city: cleanText(row.residence_city) || "Sin registrar",
-    available: Boolean(row.disponibility),
+    available: Boolean(row.disponibility) && contractStatus === "ACTIVO",
     shirtSize: row.shirt_size,
     pantSize: row.pant_size,
     shoeSize: row.shoe_size,
@@ -542,9 +559,11 @@ export async function loadContractorProfile(contractorId: number): Promise<Contr
     terminationDate: row.termination_date,
     active: contractStatus === "ACTIVO",
     contractStatus,
-    contractStartDate: contract?.start_date ?? null,
-    contractTypeId: contract?.contract_type ?? null,
-    contractTypeName: cleanText(firstRelation<any>(contract?.contract_type_ref)?.name) || "Sin tipo",
+    contractStartDate: contract.startDate,
+    contractTypeId: contract.typeId,
+    contractTypeName: contract.typeName,
+    scheduledContractStartDate: contract.scheduledStartDate,
+    scheduledContractTypeName: contract.scheduledTypeName,
     lastClient: cleanText(firstRelation<any>(latestAssignment?.clients)?.name) || "Sin operación",
     lastArea: cleanText(firstRelation<any>(latestAssignment?.area)?.name) || "Sin área",
     lastDate: latestAssignment?.operation_date ?? null,
@@ -1638,6 +1657,21 @@ export async function terminateContractor(input: {
     p_termination_date: input.terminationDate,
     p_reason_id: input.reasonId,
     p_observations: input.observations.trim(),
+  });
+  fail(result.error);
+}
+
+export async function changeContractorContract(input: {
+  contractorId: number;
+  currentEndDate: string;
+  newStartDate: string;
+  newContractTypeId: number;
+}) {
+  const result = await supabase.rpc("change_contractor_contract", {
+    p_contractor_id: input.contractorId,
+    p_current_end_date: input.currentEndDate,
+    p_new_start_date: input.newStartDate,
+    p_new_contract_type_id: input.newContractTypeId,
   });
   fail(result.error);
 }
