@@ -83,6 +83,17 @@ export interface Operation {
   reviewObservations: string | null;
 }
 
+export interface OperationCursor {
+  date: string;
+  id: number;
+}
+
+export interface OperationPage {
+  items: Operation[];
+  nextCursor: OperationCursor | null;
+  hasMore: boolean;
+}
+
 export interface OperationEditInput {
   operationId: number;
   date: string;
@@ -725,6 +736,10 @@ export interface AppData {
   clients: NamedRecord[];
   documentTypes: NamedRecord[];
   operations: Operation[];
+  operationHistoryIds: number[];
+  operationHistoryCursor: OperationCursor | null;
+  hasMoreOperations: boolean;
+  operationHistoryExpanded: boolean;
   requests: PersonnelRequest[];
   contractors: Contractor[];
   clientContractors: ClientContractor[];

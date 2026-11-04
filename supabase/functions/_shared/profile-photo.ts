@@ -1,232 +1,130 @@
 import { Image } from "https://deno.land/x/imagescript@1.2.17/mod.ts";
 
-const OUTPUT_SIZE = 1024;
-const TEMPLATE_OFFSET_Y = 110;
-const EDGE_FEATHER_PX = 10;
-const PERSON_SCALE = 0.86;
-const PERSON_ANCHOR_X = 0.5;
-const PERSON_ANCHOR_Y = 0.27;
+const SIZE = 1024;
+const RETAKE = "No pudimos separar bien el rostro y el cuello. Repite la foto con el rostro centrado, buena luz y un fondo uniforme.";
 
-type Point = readonly [number, number];
-
-const LEFT_COLLAR: readonly Point[] = [
-  [0.369, 0.43],
-  [0.39, 0.488],
-  [0.412, 0.527],
-  [0.388, 0.596],
-  [0.342, 0.508],
-];
-
-const RIGHT_COLLAR: readonly Point[] = LEFT_COLLAR.map(([x, y]) => [1 - x, y]);
-
-function clamp(value: number, minimum = 0, maximum = 1) {
-  return Math.min(maximum, Math.max(minimum, value));
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
 }
 
-function smoothstep(edge0: number, edge1: number, value: number) {
-  const ratio = clamp((value - edge0) / (edge1 - edge0));
-  return ratio * ratio * (3 - 2 * ratio);
+function fade(value: number) {
+  const t = clamp(value, 0, 1);
+  return t * t * (3 - 2 * t);
 }
 
-function blendChannel(foreground: number, background: number, alpha: number) {
-  return Math.round(foreground * alpha + background * (1 - alpha));
+function color(image: Image, x: number, y: number) {
+  return Image.colorToRGBA(image.getPixelAt(x + 1, y + 1));
 }
 
-function reflectIndex(value: number, length: number) {
-  if (value < 0) return Math.min(length - 1, -value - 1);
-  if (value >= length) return Math.max(0, 2 * length - value - 1);
-  return value;
+function backgroundAt(image: Image, y: number) {
+  const left = color(image, 65, y);
+  const right = color(image, SIZE - 66, y);
+  return left[0] + left[1] + left[2] >= right[0] + right[1] + right[2] ? left : right;
 }
 
-function pointInsidePolygon(x: number, y: number, polygon: readonly Point[]) {
-  let inside = false;
-  for (let current = 0, previous = polygon.length - 1; current < polygon.length; previous = current++) {
-    const [currentX, currentY] = polygon[current];
-    const [previousX, previousY] = polygon[previous];
-    const crossesEdge = currentY > y !== previousY > y &&
-      x < ((previousX - currentX) * (y - currentY)) / (previousY - currentY) + currentX;
-    if (crossesEdge) inside = !inside;
+function isPerson(pixel: number[], background: number[]) {
+  const difference = Math.hypot(pixel[0] - background[0], pixel[1] - background[1], pixel[2] - background[2]);
+  const chroma = Math.max(pixel[0], pixel[1], pixel[2]) - Math.min(pixel[0], pixel[1], pixel[2]);
+  return difference > 44 && (chroma > 17 || pixel[0] + pixel[1] + pixel[2] < background[0] + background[1] + background[2] - 102);
+}
+
+function silhouette(image: Image) {
+  const rows: { y: number; left: number; right: number }[] = [];
+  for (let y = 100; y < 720; y += 2) {
+    const background = backgroundAt(image, y);
+    let left = SIZE;
+    let right = -1;
+    for (let x = 160; x < 864; x += 2) {
+      if (isPerson(color(image, x, y), background)) {
+        left = Math.min(left, x);
+        right = x;
+      }
+    }
+    if (right - left >= 45) rows.push({ y, left, right });
   }
-  return inside;
-}
-
-function distanceToSegment(x: number, y: number, start: Point, end: Point) {
-  const deltaX = end[0] - start[0];
-  const deltaY = end[1] - start[1];
-  const squaredLength = deltaX * deltaX + deltaY * deltaY;
-  const position = squaredLength === 0
-    ? 0
-    : clamp(((x - start[0]) * deltaX + (y - start[1]) * deltaY) / squaredLength);
-  return Math.hypot(x - (start[0] + position * deltaX), y - (start[1] + position * deltaY));
-}
-
-function featheredPolygonAlpha(x: number, y: number, polygon: readonly Point[]) {
-  if (!pointInsidePolygon(x, y, polygon)) return 0;
-  let distance = Number.POSITIVE_INFINITY;
-  for (let current = 0; current < polygon.length; current += 1) {
-    distance = Math.min(
-      distance,
-      distanceToSegment(x, y, polygon[current], polygon[(current + 1) % polygon.length]),
-    );
+  const top = rows.find((row, index) => rows.slice(index, index + 12).filter((other) => other.y < row.y + 24).length >= 8)?.y;
+  if (top === undefined || top > 430) throw new Error(RETAKE);
+  const headRows = rows.filter((row) => row.y >= top + 110 && row.y <= top + 300);
+  if (headRows.length < 50) throw new Error(RETAKE);
+  const centers = headRows.map((row) => (row.left + row.right) / 2).sort((a, b) => a - b);
+  const widths = headRows.map((row) => row.right - row.left).sort((a, b) => a - b);
+  const center = Math.round(centers[Math.floor(centers.length / 2)]);
+  const width = widths[Math.floor(widths.length / 2)];
+  const bottom = Math.round(top + width * 1.9);
+  if (center < 300 || center > 724 || width < 200 || width > 530 || bottom > 970) throw new Error(RETAKE);
+  const left = new Int16Array(SIZE).fill(-1);
+  const right = new Int16Array(SIZE).fill(-1);
+  let missing = 0;
+  for (let y = top; y <= bottom; y += 1) {
+    const background = backgroundAt(image, y);
+    const neck = fade((y - top - width * 1.05) / (width * 0.57));
+    const limit = width * (0.68 - 0.46 * neck);
+    for (let x = Math.max(1, Math.floor(center - limit)); x < Math.min(SIZE - 1, Math.ceil(center + limit)); x += 1) {
+      if (isPerson(color(image, x, y), background)) {
+        if (left[y] < 0) left[y] = x;
+        right[y] = x;
+      }
+    }
+    if (right[y] - left[y] < 35) {
+      left[y] = -1;
+      right[y] = -1;
+      if (y < top + width * 1.1) missing += 1;
+    }
   }
-  return smoothstep(0, EDGE_FEATHER_PX / OUTPUT_SIZE, distance);
-}
-
-function collarForegroundAlpha(normalizedX: number, normalizedY: number) {
-  return Math.max(
-    featheredPolygonAlpha(normalizedX, normalizedY, LEFT_COLLAR),
-    featheredPolygonAlpha(normalizedX, normalizedY, RIGHT_COLLAR),
-  );
-}
-
-function personProtectionAlpha(
-  normalizedX: number,
-  normalizedY: number,
-  featherX: number,
-  featherY: number,
-) {
-  const headDistance = Math.sqrt(
-    ((normalizedX - 0.5) / 0.26) ** 2 + ((normalizedY - 0.27) / 0.27) ** 2,
-  );
-  const headProtection = 1 - smoothstep(0.96, 1.04, headDistance);
-  const neckHalfWidth = normalizedY <= 0.58
-    ? 0.15 - 0.04 * clamp((normalizedY - 0.43) / 0.15)
-    : 0.11 * (1 - clamp((normalizedY - 0.58) / 0.11));
-  const insideNeckWidth = 1 - smoothstep(
-    neckHalfWidth,
-    neckHalfWidth + featherX,
-    Math.abs(normalizedX - 0.5),
-  );
-  const belowNeckTop = smoothstep(0.43 - featherY, 0.43 + featherY, normalizedY);
-  const aboveNeckBottom = 1 - smoothstep(0.66, 0.69, normalizedY);
-  const neckProtection = insideNeckWidth * belowNeckTop * aboveNeckBottom;
-
-  return Math.max(headProtection, neckProtection);
-}
-
-function shirtOverlayAlpha(
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  scaledSize: number,
-  offsetX: number,
-  offsetY: number,
-) {
-  const normalizedX = x / width;
-  const normalizedY = y / height;
-  const featherX = EDGE_FEATHER_PX / width;
-  const featherY = EDGE_FEATHER_PX / height;
-  const distanceFromCenter = Math.abs(normalizedX - 0.5);
-  const shoulderDistance = clamp(distanceFromCenter / 0.5);
-  const shirtTop = 0.39 + 0.18 * shoulderDistance ** 1.55;
-  const belowShirtEdge = smoothstep(shirtTop - featherY, shirtTop + featherY, normalizedY);
-
-  if (belowShirtEdge <= 0) return 0;
-
-  const scaledX = x - offsetX;
-  const scaledY = y - offsetY;
-  const isInsideScaledSelfie = scaledX >= 0 && scaledX < scaledSize && scaledY >= 0 && scaledY < scaledSize;
-  const protectedPerson = isInsideScaledSelfie
-    ? personProtectionAlpha(
-      scaledX / scaledSize,
-      scaledY / scaledSize,
-      EDGE_FEATHER_PX / scaledSize,
-      EDGE_FEATHER_PX / scaledSize,
-    )
-    : 0;
-  return belowShirtEdge * (1 - protectedPerson);
+  if (missing > width * 0.07) throw new Error(RETAKE);
+  return { top, bottom, center, width, left, right };
 }
 
 export function composeCorporateProfilePhoto(template: Image, selfie: Image) {
-  const source = selfie.width === OUTPUT_SIZE && selfie.height === OUTPUT_SIZE
-    ? selfie
-    : selfie.cover(OUTPUT_SIZE, OUTPUT_SIZE);
-  const scaledSize = Math.round(OUTPUT_SIZE * PERSON_SCALE);
-  const offsetX = Math.round((OUTPUT_SIZE - scaledSize) * PERSON_ANCHOR_X);
-  const offsetY = Math.round((OUTPUT_SIZE - scaledSize) * PERSON_ANCHOR_Y);
-  const scaledSelfie = source.resize(scaledSize, scaledSize);
-  const result = new Image(OUTPUT_SIZE, OUTPUT_SIZE);
-  const templateHeight = Math.round(template.height * (OUTPUT_SIZE / template.width));
-  const shirtTemplate = template.resize(OUTPUT_SIZE, templateHeight);
-
-  for (let targetY = 1; targetY <= OUTPUT_SIZE; targetY += 1) {
-    const scaledY = reflectIndex(targetY - 1 - offsetY, scaledSize);
-    const templateY = targetY - TEMPLATE_OFFSET_Y;
-
-    for (let targetX = 1; targetX <= OUTPUT_SIZE; targetX += 1) {
-      const scaledX = reflectIndex(targetX - 1 - offsetX, scaledSize);
-      const [selfieR, selfieG, selfieB] = Image.colorToRGBA(
-        scaledSelfie.getPixelAt(scaledX + 1, scaledY + 1),
-      );
-      let resultR = selfieR;
-      let resultG = selfieG;
-      let resultB = selfieB;
-
-      if (templateY >= 1 && templateY <= shirtTemplate.height) {
-        const [shirtR, shirtG, shirtB] = Image.colorToRGBA(shirtTemplate.getPixelAt(targetX, templateY));
-        const shirtAlpha = shirtOverlayAlpha(
-          targetX - 1,
-          targetY - 1,
-          OUTPUT_SIZE,
-          OUTPUT_SIZE,
-          scaledSize,
-          offsetX,
-          offsetY,
-        );
-        resultR = blendChannel(shirtR, resultR, shirtAlpha);
-        resultG = blendChannel(shirtG, resultG, shirtAlpha);
-        resultB = blendChannel(shirtB, resultB, shirtAlpha);
-
-        const collarAlpha = collarForegroundAlpha(
-          (targetX - 1) / OUTPUT_SIZE,
-          (targetY - 1) / OUTPUT_SIZE,
-        );
-        resultR = blendChannel(shirtR, resultR, collarAlpha);
-        resultG = blendChannel(shirtG, resultG, collarAlpha);
-        resultB = blendChannel(shirtB, resultB, collarAlpha);
+  const source = selfie.width === SIZE && selfie.height === SIZE ? selfie : selfie.cover(SIZE, SIZE);
+  const person = silhouette(source);
+  const scale = clamp(310 / person.width, 0.7, 1.08);
+  const dx = Math.round(SIZE / 2 - person.center * scale);
+  const dy = Math.round(100 - person.top * scale);
+  const shirtHeight = Math.round(template.height * SIZE / template.width);
+  const shirt = template.resize(SIZE, shirtHeight);
+  const output = new Image(SIZE, SIZE);
+  for (let y = 0; y < SIZE; y += 1) {
+    for (let x = 0; x < SIZE; x += 1) {
+      const shirtY = clamp(y - 110, 0, shirtHeight - 1);
+      const base = color(shirt, x, shirtY);
+      let [red, green, blue] = base;
+      const sx = Math.round((x - dx) / scale);
+      const sy = Math.round((y - dy) / scale);
+      if (sx >= 0 && sx < SIZE && sy >= person.top && sy <= person.bottom) {
+        const ellipseX = (sx - person.center) / (person.width * 0.68);
+        const ellipseY = (sy - person.top - person.width * 0.68) / (person.width * 0.73);
+        const faceAlpha = 1 - fade((Math.hypot(ellipseX, ellipseY) - 0.84) / 0.16);
+        const neckProgress = clamp((sy - person.top - person.width * 1.2) / (person.width * 0.38), 0, 1);
+        const neckHalfWidth = person.width * (0.33 - 0.12 * neckProgress);
+        const neckAlpha = fade((neckHalfWidth - Math.abs(sx - person.center)) / 18)
+          * fade((sy - person.top - person.width * 1.14) / 15)
+          * (1 - fade((sy - person.top - person.width * 1.75) / (person.width * 0.15)));
+        let alpha = Math.max(faceAlpha, neckAlpha) * fade((sy - person.top) / 12);
+        if (y > 505) {
+          const openingHalfWidth = Math.max(0, 116 * (650 - y) / 145);
+          alpha *= fade((openingHalfWidth - Math.abs(x - SIZE / 2)) / 10);
+          alpha *= 1 - fade((y - 630) / 20);
+        }
+        if (sy < person.top + person.width * 1.15 && person.left[sy] >= 0) {
+          alpha *= fade((sx - person.left[sy] + 15) / 25)
+            * fade((person.right[sy] - sx + 15) / 25);
+        }
+        if (alpha > 0) {
+          const foreground = color(source, sx, sy);
+          if (alpha < 0.98 && !isPerson(foreground, backgroundAt(source, sy))) alpha = 0;
+          red = Math.round(foreground[0] * alpha + red * (1 - alpha));
+          green = Math.round(foreground[1] * alpha + green * (1 - alpha));
+          blue = Math.round(foreground[2] * alpha + blue * (1 - alpha));
+        }
       }
-
-      result.setPixelAt(
-        targetX,
-        targetY,
-        Image.rgbaToColor(
-          resultR,
-          resultG,
-          resultB,
-          255,
-        ),
-      );
+      output.setPixelAt(x + 1, y + 1, Image.rgbaToColor(red, green, blue, 255));
     }
   }
-
-  return result;
-}
-
-async function encodeCompressedProfilePhoto(image: Image) {
-  const attempts = [
-    { size: 768, quality: 78 },
-    { size: 640, quality: 70 },
-    { size: 512, quality: 66 },
-  ];
-  let current = image;
-  let lastBytes: Uint8Array | null = null;
-
-  for (const attempt of attempts) {
-    if (current.width > attempt.size || current.height > attempt.size) {
-      current = current.contain(attempt.size, attempt.size);
-    }
-    lastBytes = await current.encodeJPEG(attempt.quality);
-    if (lastBytes.byteLength <= 1_500_000) return lastBytes;
-  }
-
-  return lastBytes ?? await image.encodeJPEG(66);
+  return output;
 }
 
 export async function createCorporateProfilePhoto(templateBytes: Uint8Array, selfieBytes: Uint8Array) {
-  const [template, selfie] = await Promise.all([
-    Image.decode(templateBytes),
-    Image.decode(selfieBytes),
-  ]);
-  return await encodeCompressedProfilePhoto(composeCorporateProfilePhoto(template, selfie));
+  const [template, selfie] = await Promise.all([Image.decode(templateBytes), Image.decode(selfieBytes)]);
+  return await composeCorporateProfilePhoto(template, selfie).contain(768, 768).encodeJPEG(78);
 }

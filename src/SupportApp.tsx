@@ -56,6 +56,7 @@ import {
   loadAdminData,
   loadAdminPayroll,
   loadAppData,
+  loadContractorLastOperations,
   loadClientContractorProfile,
   loadClientContractorHistory,
   loadContractorDocuments,
@@ -70,6 +71,11 @@ import {
   loadAvailableServiceUnits,
   loadOperationChangeHistory,
   loadOperationAssignments,
+  loadOperationAlerts,
+  loadOperationById,
+  loadOperationsByDate,
+  loadOlderOperations,
+  loadInitialOperations,
   loadDirectorReports,
   loadStatisticsSummary,
   loadUserContext,
@@ -108,6 +114,15 @@ import {
   uploadContractorDocument,
 } from "./services/data";
 import type { ContractorActivationDocumentType, ContractorDocumentTypeOption, ContractorPdfFile } from "./services/data";
+import {
+  createPerformanceTrace,
+  finishPerformanceStage,
+  finishPerformanceTrace,
+  measurePerformanceStage,
+  performanceNow,
+  setPerformanceTraceRole,
+  type PerformanceTrace,
+} from "./services/performance";
 import type {
   AdminData,
   AdminPayrollData,
@@ -282,6 +297,10 @@ const EMPTY_DATA: AppData = {
   clients: [],
   documentTypes: [],
   operations: [],
+  operationHistoryIds: [],
+  operationHistoryCursor: null,
+  hasMoreOperations: false,
+  operationHistoryExpanded: false,
   requests: [],
   contractors: [],
   clientContractors: [],
@@ -295,6 +314,14 @@ const EMPTY_DATA: AppData = {
   contractTypes: [],
   users: [],
 };
+
+function mergeOperationCache(current: Operation[], incoming: Operation[]) {
+  const byId = new Map(current.map((operation) => [operation.id, operation]));
+  for (const operation of incoming) byId.set(operation.id, operation);
+  return [...byId.values()].sort(
+    (left, right) => right.date.localeCompare(left.date) || right.id - left.id,
+  );
+}
 
 const tabsByRole: Record<Role, { label: string; icon: IconName; screen: Screen }[]> = {
   Coordinador: [
@@ -562,6 +589,8 @@ export default function SupportApp() {
   const [session, setSession] = useState<Session | null>(null);
   const [context, setContext] = useState<UserContext | null>(null);
   const [data, setData] = useState<AppData>(EMPTY_DATA);
+  const dataRef = useRef<AppData>(EMPTY_DATA);
+  const [operationFeedLoading, setOperationFeedLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [screen, setScreen] = useState<Screen>("operations");
@@ -573,6 +602,17 @@ export default function SupportApp() {
   const mountedRef = useRef(true);
   const hydrationIdRef = useRef(0);
   const hydratedUserIdRef = useRef<string | null>(null);
+  const activePerformanceTraceRef = useRef<PerformanceTrace | null>(null);
+  const pendingRenderRef = useRef<{ trace: PerformanceTrace; startedAt: number } | null>(null);
+  const initialPerformanceTraceRef = useRef<PerformanceTrace | null>(null);
+  if (!initialPerformanceTraceRef.current) {
+    initialPerformanceTraceRef.current = createPerformanceTrace("session_restore", Platform.OS);
+    activePerformanceTraceRef.current = initialPerformanceTraceRef.current;
+  }
+
+  useEffect(() => {
+    dataRef.current = data;
+  }, [data]);
 
   const hydrate = useCallback(async (nextSession: Session | null) => {
     const hydrationId = ++hydrationIdRef.current;
@@ -588,26 +628,44 @@ export default function SupportApp() {
     setLoading(true);
     setError("");
     let nextContext: UserContext | null = null;
+    const performanceTrace = activePerformanceTraceRef.current
+      ?? createPerformanceTrace("session_restore", Platform.OS);
+    activePerformanceTraceRef.current = performanceTrace;
     try {
-      nextContext = await withTimeout(
-        loadUserContext(nextSession.user.id),
-        12_000,
-        "No fue posible validar la sesión. Revisa tu conexión e inténtalo nuevamente.",
+      nextContext = await measurePerformanceStage(
+        performanceTrace,
+        "context",
+        () => withTimeout(
+          loadUserContext(nextSession.user.id),
+          12_000,
+          "No fue posible validar la sesión. Revisa tu conexión e inténtalo nuevamente.",
+        ),
       );
+      setPerformanceTraceRole(performanceTrace, nextContext.roleCode);
       if (!mountedRef.current || hydrationId !== hydrationIdRef.current) return;
       setContext(nextContext);
       const home: Screen = nextContext.roleCode === "ADMIN" ? "admin-home" : "operations";
       setScreen(home);
       setActiveTab(home);
-      const nextData = await withTimeout(
-        loadAppData(nextContext),
-        15_000,
-        "La carga inicial tardó demasiado. Puedes reintentar desde la aplicación.",
+      const nextData = await measurePerformanceStage(
+        performanceTrace,
+        "data_total",
+        () => withTimeout(
+          loadAppData(nextContext!, performanceTrace),
+          15_000,
+          "La carga inicial tardó demasiado. Puedes reintentar desde la aplicación.",
+        ),
       );
       if (!mountedRef.current || hydrationId !== hydrationIdRef.current) return;
+      pendingRenderRef.current = { trace: performanceTrace, startedAt: performanceNow() };
       setData(nextData);
     } catch (cause) {
       if (!mountedRef.current || hydrationId !== hydrationIdRef.current) return;
+      if (!performanceTrace.role) setPerformanceTraceRole(performanceTrace, "UNKNOWN");
+      finishPerformanceTrace(performanceTrace);
+      if (activePerformanceTraceRef.current?.id === performanceTrace.id) {
+        activePerformanceTraceRef.current = null;
+      }
       const message = errorMessage(cause);
       setError(message);
       hydratedUserIdRef.current = null;
@@ -649,6 +707,16 @@ export default function SupportApp() {
       if (event === "INITIAL_SESSION") {
         initialSessionHandled = true;
         clearTimeout(fallbackTimer);
+        const trace = initialPerformanceTraceRef.current;
+        if (trace) {
+          finishPerformanceStage(trace, "authentication", trace.startedAt, {
+            sessionFound: Boolean(nextSession),
+          });
+          if (!nextSession) {
+            setPerformanceTraceRole(trace, "ANONYMOUS");
+            finishPerformanceTrace(trace);
+          }
+        }
         scheduleHydration();
         return;
       }
@@ -688,18 +756,174 @@ export default function SupportApp() {
     };
   }, [hydrate]);
 
+  useEffect(() => {
+    if (loading || booting || !context || !pendingRenderRef.current) return;
+    const pending = pendingRenderRef.current;
+    pendingRenderRef.current = null;
+    const task = InteractionManager.runAfterInteractions(() => {
+      finishPerformanceStage(pending.trace, "render", pending.startedAt);
+      finishPerformanceTrace(pending.trace);
+      if (activePerformanceTraceRef.current?.id === pending.trace.id) {
+        activePerformanceTraceRef.current = null;
+      }
+    });
+    return () => task.cancel();
+  }, [booting, context, data, loading]);
+
   const refresh = useCallback(async () => {
     if (!context) return;
+    const performanceTrace = createPerformanceTrace("refresh", Platform.OS);
+    setPerformanceTraceRole(performanceTrace, context.roleCode);
+    activePerformanceTraceRef.current = performanceTrace;
     setLoading(true);
     setError("");
     try {
-      setData(await loadAppData(context));
+      const nextData = await measurePerformanceStage(
+        performanceTrace,
+        "data_total",
+        () => loadAppData(context, performanceTrace),
+      );
+      pendingRenderRef.current = { trace: performanceTrace, startedAt: performanceNow() };
+      setData(nextData);
     } catch (cause) {
+      finishPerformanceTrace(performanceTrace);
+      if (activePerformanceTraceRef.current?.id === performanceTrace.id) {
+        activePerformanceTraceRef.current = null;
+      }
       setError(errorMessage(cause));
     } finally {
       setLoading(false);
     }
   }, [context]);
+
+  const commitData = useCallback((update: (current: AppData) => AppData) => {
+    setData((current) => {
+      const next = update(current);
+      dataRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const refreshInitialOperationFeed = useCallback(async () => {
+    setOperationFeedLoading(true);
+    try {
+      const initial = await loadInitialOperations();
+      commitData((current) => ({
+        ...current,
+        operations: initial.items,
+        operationHistoryIds: initial.historyIds,
+        operationHistoryCursor: initial.nextCursor,
+        hasMoreOperations: initial.hasMore,
+        operationHistoryExpanded: false,
+      }));
+    } finally {
+      setOperationFeedLoading(false);
+    }
+  }, [commitData]);
+
+  const refreshOperationAlerts = useCallback(async () => {
+    setOperationFeedLoading(true);
+    try {
+      const alerts = await loadOperationAlerts();
+      commitData((current) => ({
+        ...current,
+        operations: mergeOperationCache(
+          current.operations.filter(
+            (operation) => operation.status !== "PENDIENTE" && operation.status !== "CAMBIOS_SOLICITADOS",
+          ),
+          alerts,
+        ),
+      }));
+    } finally {
+      setOperationFeedLoading(false);
+    }
+  }, [commitData]);
+
+  const loadOperationDate = useCallback(async (date: string) => {
+    setOperationFeedLoading(true);
+    try {
+      const operations = await loadOperationsByDate(date);
+      commitData((current) => ({
+        ...current,
+        operations: mergeOperationCache(current.operations, operations),
+      }));
+      return operations;
+    } finally {
+      setOperationFeedLoading(false);
+    }
+  }, [commitData]);
+
+  const loadMoreOperationHistory = useCallback(async () => {
+    const cursor = dataRef.current.operationHistoryCursor;
+    if (!cursor || operationFeedLoading) return;
+    setOperationFeedLoading(true);
+    try {
+      const page = await loadOlderOperations(cursor);
+      commitData((current) => ({
+        ...current,
+        operations: mergeOperationCache(current.operations, page.items),
+        operationHistoryIds: [
+          ...current.operationHistoryIds,
+          ...page.items
+            .map((operation) => operation.id)
+            .filter((id) => !current.operationHistoryIds.includes(id)),
+        ],
+        operationHistoryCursor: page.nextCursor,
+        hasMoreOperations: page.hasMore,
+        operationHistoryExpanded: true,
+      }));
+    } finally {
+      setOperationFeedLoading(false);
+    }
+  }, [commitData, operationFeedLoading]);
+
+  const refreshSingleOperation = useCallback(async (
+    operationId: number,
+    refreshContractors = true,
+  ) => {
+    const previous = dataRef.current.operations.find((operation) => operation.id === operationId);
+    const updated = await loadOperationById(operationId);
+    const affectedContractorIds = [...new Set([
+      ...(previous?.contractorIds ?? []),
+      ...updated.contractorIds,
+    ])];
+    const lastOperations = context?.roleCode !== "CLIENT" && refreshContractors
+      ? await loadContractorLastOperations(affectedContractorIds)
+      : [];
+    const lastByContractor = new Map(lastOperations.map((item) => [item.contractorId, item]));
+    const today = todayIso();
+    const recentStart = dateToIso(addDays(isoToDate(today), -2));
+
+    commitData((current) => {
+      const mergedOperations = mergeOperationCache(current.operations, [updated]);
+      const historyIdSet = new Set(current.operationHistoryIds);
+      if (
+        (updated.date >= recentStart && updated.date <= today)
+        || updated.status === "EN_CURSO"
+      ) historyIdSet.add(updated.id);
+      const historyIds = mergedOperations
+        .filter((operation) => historyIdSet.has(operation.id))
+        .map((operation) => operation.id);
+      return {
+        ...current,
+        operations: mergedOperations,
+        operationHistoryIds: historyIds,
+        contractors: refreshContractors
+          ? current.contractors.map((contractor) => {
+            if (!affectedContractorIds.includes(contractor.id)) return contractor;
+            const latest = lastByContractor.get(contractor.id);
+            return {
+              ...contractor,
+              lastClient: latest?.lastClient ?? "Sin operación",
+              lastArea: latest?.lastArea ?? "Sin área",
+              lastDate: latest?.lastDate ?? null,
+            };
+          })
+          : current.contractors,
+      };
+    });
+    return updated;
+  }, [commitData, context?.roleCode]);
 
   const navigate = (next: Screen) => {
     setScreen(next);
@@ -725,7 +949,17 @@ export default function SupportApp() {
   if (resetPasswordParams.active) return <ResetPassword params={resetPasswordParams} />;
   if (booting) return <CenteredState label="Cargando Support Colombia..." />;
   if (!session || !context) {
-    return <Login initialError={error} busy={loading} />;
+    return (
+      <Login
+        initialError={error}
+        busy={loading}
+        onAuthenticationStart={() => {
+          const trace = createPerformanceTrace("login", Platform.OS);
+          activePerformanceTraceRef.current = trace;
+          return trace;
+        }}
+      />
+    );
   }
 
   const showTabs = !detailScreens.includes(screen);
@@ -800,8 +1034,14 @@ export default function SupportApp() {
               <Operations
                 context={context}
                 operations={data.operations}
-                loading={loading}
-                onRefresh={refresh}
+                historyIds={data.operationHistoryIds}
+                hasMore={data.hasMoreOperations}
+                historyExpanded={data.operationHistoryExpanded}
+                loading={loading || operationFeedLoading}
+                onRefreshInitial={refreshInitialOperationFeed}
+                onRefreshAlerts={refreshOperationAlerts}
+                onLoadDate={loadOperationDate}
+                onLoadMore={loadMoreOperationHistory}
                 onOpen={openOperation}
                 onInitial={() => navigate("initial")}
               />
@@ -813,7 +1053,7 @@ export default function SupportApp() {
                 onFinal={() => navigate("final")}
                 onEdit={() => navigate("operation-edit")}
                 onChanged={async () => {
-                  await refresh();
+                  await refreshSingleOperation(selectedOperation.id, false);
                   navigate("operations");
                 }}
               />
@@ -824,7 +1064,7 @@ export default function SupportApp() {
                 data={data}
                 operation={selectedOperation}
                 onSaved={async () => {
-                  await refresh();
+                  await refreshSingleOperation(selectedOperation.id);
                   navigate("operation-detail");
                 }}
               />
@@ -833,8 +1073,8 @@ export default function SupportApp() {
               <InitialOperation
                 context={context}
                 data={data}
-                onSaved={async () => {
-                  await refresh();
+                onSaved={async (operationId) => {
+                  await refreshSingleOperation(operationId);
                   navigate("operations");
                 }}
               />
@@ -844,7 +1084,7 @@ export default function SupportApp() {
                 operation={selectedOperation}
                 contractors={data.contractors}
                 onSaved={async () => {
-                  await refresh();
+                  await refreshSingleOperation(selectedOperation.id);
                   navigate("operations");
                 }}
               />
@@ -971,6 +1211,8 @@ function PublicContractorOnboarding({ token }: { token: string }) {
   const [submitted, setSubmitted] = useState(false);
   const [contractReady, setContractReady] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [dataSubmitted, setDataSubmitted] = useState(false);
+  const [submitError, setSubmitError] = useState("");
   const [signing, setSigning] = useState(false);
   const [signatureOpen, setSignatureOpen] = useState(false);
   const [onboardingProgress, setOnboardingProgress] = useState(0);
@@ -1051,7 +1293,23 @@ function PublicContractorOnboarding({ token }: { token: string }) {
   }, [token]);
 
   async function submit() {
-    if (!form) return;
+    if (!form || saving) return;
+    if (dataSubmitted) {
+      setSaving(true);
+      setSubmitError("");
+      setProgress(88, "Abriendo contrato");
+      try {
+        await loadContract();
+        setProgress(100, "Contrato listo");
+      } catch (cause) {
+        const message = errorMessage(cause);
+        setSubmitError(message);
+        showMessage("No fue posible abrir el contrato", message);
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
     const requiredText = [
       fields.bloodType,
       fields.birthDate,
@@ -1066,19 +1324,21 @@ function PublicContractorOnboarding({ token }: { token: string }) {
       fields.emergencyContactPhone,
     ];
     if (requiredText.some((value) => !String(value).trim()) || !fields.civilStateId || !fields.transportTypeId || !fields.educationLevelId) {
-      Alert.alert("Completa el formulario", "Todos los campos son obligatorios.");
+      showMessage("Completa el formulario", "Todos los campos son obligatorios.");
       return;
     }
     if (!selfieUri) {
-      Alert.alert("Falta selfie", "Toma una foto frontal antes de enviar.");
+      showMessage("Falta selfie", "Toma una foto frontal antes de enviar.");
       return;
     }
     if (!fields.acceptsDataPolicy) {
-      Alert.alert("Acepta la política", "Debes aceptar la política de tratamiento de datos personales.");
+      showMessage("Acepta la política", "Debes aceptar la política de tratamiento de datos personales.");
       return;
     }
     setSaving(true);
+    setSubmitError("");
     setProgress(0, "Validando formulario");
+    let saved = false;
     try {
       setProgress(20, "Preparando selfie");
       const selfieBase64 = await imageUriToBase64(selfieUri);
@@ -1090,12 +1350,18 @@ function PublicContractorOnboarding({ token }: { token: string }) {
       };
       setProgress(70, "Procesando datos");
       await submitContractorOnboardingForm(token, payload);
+      saved = true;
+      setDataSubmitted(true);
       setProgress(88, "Generando contrato");
       await loadContract();
       setProgress(100, "Contrato listo");
     } catch (cause) {
       setProgress(0, "");
-      Alert.alert("No fue posible enviar", errorMessage(cause));
+      const message = saved
+        ? `Tus datos se guardaron, pero no pudimos abrir el contrato. Pulsa Abrir contrato para reintentar. ${errorMessage(cause)}`
+        : errorMessage(cause);
+      setSubmitError(message);
+      showMessage("No fue posible enviar", message);
     } finally {
       setSaving(false);
     }
@@ -1114,7 +1380,7 @@ function PublicContractorOnboarding({ token }: { token: string }) {
       setSubmitted(true);
     } catch (cause) {
       setProgress(0, "");
-      Alert.alert("No fue posible firmar", errorMessage(cause));
+      showMessage("No fue posible firmar", errorMessage(cause));
     } finally {
       setSigning(false);
     }
@@ -1287,11 +1553,12 @@ function PublicContractorOnboarding({ token }: { token: string }) {
             </Pressable>
           </FormCard>
           <PrimaryButton
-            label={saving ? `${onboardingStepLabel || "Enviando"}... ${onboardingProgress}%` : "Enviar información"}
+            label={saving ? `${onboardingStepLabel || "Enviando"}... ${onboardingProgress}%` : dataSubmitted ? "Abrir contrato" : "Enviar información"}
             icon="send-outline"
             disabled={saving}
             onPress={submit}
           />
+          {submitError ? <Notice icon="alert-circle-outline" text={submitError} tone="error" /> : null}
           {saving ? (
             <View style={styles.activationProgressWrap}>
               <View style={[styles.activationProgressFill, { width: `${onboardingProgress}%` }]} />
@@ -1548,7 +1815,15 @@ function SignatureModal({
   );
 }
 
-function Login({ initialError, busy }: { initialError: string; busy: boolean }) {
+function Login({
+  initialError,
+  busy,
+  onAuthenticationStart,
+}: {
+  initialError: string;
+  busy: boolean;
+  onAuthenticationStart: () => PerformanceTrace;
+}) {
   const [email, setEmail] = useState("coordinador.demo@supportcolombia.com");
   const [password, setPassword] = useState("");
   const [secure, setSecure] = useState(true);
@@ -1567,6 +1842,8 @@ function Login({ initialError, busy }: { initialError: string; busy: boolean }) 
     }
     setSubmitting(true);
     setMessage("");
+    const performanceTrace = onAuthenticationStart();
+    const authenticationStartedAt = performanceNow();
     try {
       const result = await withTimeout(
         supabase.auth.signInWithPassword({
@@ -1576,8 +1853,20 @@ function Login({ initialError, busy }: { initialError: string; busy: boolean }) 
         15_000,
         "El inicio de sesión tardó demasiado. Revisa tu conexión e inténtalo nuevamente.",
       );
-      if (result.error) setMessage("Correo o contraseña incorrectos.");
+      finishPerformanceStage(performanceTrace, "authentication", authenticationStartedAt, {
+        success: !result.error,
+      });
+      if (result.error) {
+        setPerformanceTraceRole(performanceTrace, "UNAUTHENTICATED");
+        finishPerformanceTrace(performanceTrace);
+        setMessage("Correo o contraseña incorrectos.");
+      }
     } catch (cause) {
+      finishPerformanceStage(performanceTrace, "authentication", authenticationStartedAt, {
+        success: false,
+      });
+      setPerformanceTraceRole(performanceTrace, "UNAUTHENTICATED");
+      finishPerformanceTrace(performanceTrace);
       setMessage(errorMessage(cause));
     } finally {
       setSubmitting(false);
@@ -1867,19 +2156,32 @@ function Header({
 function Operations({
   context,
   operations,
+  historyIds,
+  hasMore,
+  historyExpanded,
   loading,
-  onRefresh,
+  onRefreshInitial,
+  onRefreshAlerts,
+  onLoadDate,
+  onLoadMore,
   onOpen,
   onInitial,
 }: {
   context: UserContext;
   operations: Operation[];
+  historyIds: number[];
+  hasMore: boolean;
+  historyExpanded: boolean;
   loading: boolean;
-  onRefresh: () => void;
+  onRefreshInitial: () => Promise<void>;
+  onRefreshAlerts: () => Promise<void>;
+  onLoadDate: (date: string) => Promise<Operation[]>;
+  onLoadMore: () => Promise<void>;
   onOpen: (id: number) => void;
   onInitial: () => void;
 }) {
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const [selectedDateIds, setSelectedDateIds] = useState<number[]>([]);
   const [calendarVisible, setCalendarVisible] = useState(false);
   const [changesRequestedOnly, setChangesRequestedOnly] = useState(false);
   const pending = operations.filter((item) => item.status === "PENDIENTE");
@@ -1890,16 +2192,35 @@ function Operations({
     todayOperations.flatMap((item) => item.contractorIds),
   ).size;
   const inProgressToday = todayOperations.filter((item) => item.status === "EN_CURSO").length;
-  const threeDayStart = dateToIso(addDays(isoToDate(today), -2));
-  const visibleOperations = operations.filter((operation) => {
-    if (changesRequestedOnly && operation.status !== "CAMBIOS_SOLICITADOS") return false;
-    if (selectedDate) return operation.date === selectedDate;
-    if (changesRequestedOnly) return true;
-    return operation.date >= threeDayStart && operation.date <= today;
-  });
+  const historyOperations = historyIds
+    .map((id) => operations.find((operation) => operation.id === id))
+    .filter(Boolean) as Operation[];
+  const dateOperations = selectedDateIds
+    .map((id) => operations.find((operation) => operation.id === id))
+    .filter(Boolean) as Operation[];
+  const visibleOperations = changesRequestedOnly
+    ? (selectedDate ? dateOperations : changesRequested)
+      .filter((operation) => operation.status === "CAMBIOS_SOLICITADOS")
+    : selectedDate
+      ? dateOperations
+      : historyOperations;
   const totalToday = todayOperations.reduce((total, item) => total + item.people, 0);
+  const refreshVisibleOperations = async () => {
+    try {
+      if (selectedDate) {
+        const rows = await onLoadDate(selectedDate);
+        setSelectedDateIds(rows.map((operation) => operation.id));
+      } else if (changesRequestedOnly) {
+        await onRefreshAlerts();
+      } else {
+        await onRefreshInitial();
+      }
+    } catch (cause) {
+      showMessage("No fue posible actualizar", errorMessage(cause));
+    }
+  };
   return (
-    <Page loading={loading} onRefresh={onRefresh}>
+    <Page loading={loading} onRefresh={refreshVisibleOperations}>
       <View>
         <Text style={styles.eyebrow}>OPERACIÓN EN TIEMPO REAL</Text>
         <Text style={styles.greeting}>
@@ -1977,7 +2298,7 @@ function Operations({
         <Pressable style={styles.dateFilterButton} onPress={() => setCalendarVisible(true)}>
           <Ionicons name="calendar-outline" size={17} color={C.navy} />
           <Text style={styles.dateFilterText}>
-            {selectedDate ? formatDate(selectedDate) : "Últimos 3 días"}
+            {selectedDate ? formatDate(selectedDate) : historyExpanded ? "Historial cargado" : "Recientes y activas"}
           </Text>
           <Ionicons name="chevron-down" size={15} color={C.navy} />
         </Pressable>
@@ -2001,29 +2322,47 @@ function Operations({
                 ? "No hay operaciones con cambios solicitados."
                 : selectedDate
               ? `No hay operaciones para el ${formatDate(selectedDate)}.`
-              : "No hay operaciones registradas en los últimos 3 días."
+              : "No hay operaciones recientes ni activas."
           }
         />
       ) : (
-        visibleOperations.map((operation) => (
-          <OperationCard
-            key={operation.id}
-            operation={operation}
-            hideStatus={context.role === "Cliente"}
-            onPress={() => onOpen(operation.id)}
-          />
-        ))
+        <>
+          {visibleOperations.map((operation) => (
+            <OperationCard
+              key={operation.id}
+              operation={operation}
+              hideStatus={context.role === "Cliente"}
+              onPress={() => onOpen(operation.id)}
+            />
+          ))}
+          {!selectedDate && !changesRequestedOnly && hasMore && (
+            <SecondaryButton
+              label={loading ? "Cargando..." : "Cargar operaciones anteriores"}
+              icon="chevron-down-outline"
+              disabled={loading}
+              onPress={() => void onLoadMore().catch((cause) => {
+                showMessage("No fue posible cargar el historial", errorMessage(cause));
+              })}
+            />
+          )}
+        </>
       )}
       <CalendarModal
         visible={calendarVisible}
         selectedDate={selectedDate}
         onClose={() => setCalendarVisible(false)}
         onSelect={(date) => {
-          setSelectedDate(date);
           setCalendarVisible(false);
+          void onLoadDate(date)
+            .then((rows) => {
+              setSelectedDate(date);
+              setSelectedDateIds(rows.map((operation) => operation.id));
+            })
+            .catch((cause) => showMessage("No fue posible cargar la fecha", errorMessage(cause)));
         }}
         onReset={() => {
           setSelectedDate(null);
+          setSelectedDateIds([]);
           setCalendarVisible(false);
         }}
       />
@@ -2681,7 +3020,7 @@ function InitialOperation({
 }: {
   context: UserContext;
   data: AppData;
-  onSaved: () => void;
+  onSaved: (operationId: number) => void;
 }) {
   const firstClient = context.clients[0];
   const activeContractors = data.contractors.filter((contractor) => contractor.active);
@@ -2755,20 +3094,21 @@ function InitialOperation({
     }
     setSaving(true);
     try {
+      let operationId: number;
       if (operationType === "DESCARGUE") {
-        await createDischargeOperation({
+        operationId = await createDischargeOperation({
           date: operationDate, clientId, areaId, serviceUnitTypeId,
           plannedUnits: unitCount, contractorIds: added.map((item) => item.id),
         });
       } else {
-        await createOperation({
+        operationId = await createOperation({
           date: operationDate, clientId, areaId, shiftId,
           contractorIds: added.map((item) => item.id),
           confirmedSecondShiftContractorIds,
         });
       }
       showMessage("Registro guardado", "La operación quedó EN CURSO.");
-      await onSaved();
+      await onSaved(operationId);
     } catch (cause) {
       showMessage("No fue posible guardar", errorMessage(cause));
     } finally {

@@ -756,6 +756,8 @@ Deno.serve(async (req) => {
       throw new Error("Selecciona estado civil, transporte y grado de escolaridad.");
     }
 
+    const generatedBytes = await generateCorporateProfilePhoto(serviceClient, selfieBytes);
+
     const photoPath = `contractor/${invite.contractor_id}/profile/original/${crypto.randomUUID()}.jpg`;
     const upload = await serviceClient.storage
       .from(PROFILE_PHOTO_BUCKET)
@@ -765,7 +767,7 @@ Deno.serve(async (req) => {
       });
     if (upload.error) throw new Error(upload.error.message);
 
-    const { data: photoFile, error: photoFileError } = await serviceClient
+    const { error: photoFileError } = await serviceClient
       .from("app_files")
       .insert({
         provider: "supabase",
@@ -774,42 +776,32 @@ Deno.serve(async (req) => {
         original_name: "selfie-original.jpg",
         mime_type: "image/jpeg",
         size_bytes: selfieBytes.byteLength,
+      });
+    if (photoFileError) throw new Error(photoFileError.message);
+
+    const generatedPath = `contractor/${invite.contractor_id}/profile/generated/${crypto.randomUUID()}.jpg`;
+    const generatedUpload = await serviceClient.storage
+      .from(PROFILE_PHOTO_BUCKET)
+      .upload(generatedPath, generatedBytes, {
+        contentType: "image/jpeg",
+        upsert: false,
+      });
+    if (generatedUpload.error) throw new Error(generatedUpload.error.message);
+
+    const { data: generatedFile, error: generatedFileError } = await serviceClient
+      .from("app_files")
+      .insert({
+        provider: "supabase",
+        bucket: PROFILE_PHOTO_BUCKET,
+        path: generatedPath,
+        original_name: "foto-perfil-empresarial.jpg",
+        mime_type: "image/jpeg",
+        size_bytes: generatedBytes.byteLength,
       })
       .select("id")
       .single();
-    if (photoFileError) throw new Error(photoFileError.message);
-
-    let profilePhotoFileId = photoFile.id;
-    try {
-      const generatedBytes = await generateCorporateProfilePhoto(serviceClient, selfieBytes);
-      if (generatedBytes) {
-        const generatedPath = `contractor/${invite.contractor_id}/profile/generated/${crypto.randomUUID()}.jpg`;
-        const generatedUpload = await serviceClient.storage
-          .from(PROFILE_PHOTO_BUCKET)
-          .upload(generatedPath, generatedBytes, {
-            contentType: "image/jpeg",
-            upsert: false,
-          });
-        if (generatedUpload.error) throw new Error(generatedUpload.error.message);
-
-        const { data: generatedFile, error: generatedFileError } = await serviceClient
-          .from("app_files")
-          .insert({
-            provider: "supabase",
-            bucket: PROFILE_PHOTO_BUCKET,
-            path: generatedPath,
-            original_name: "foto-perfil-empresarial.jpg",
-            mime_type: "image/jpeg",
-            size_bytes: generatedBytes.byteLength,
-          })
-          .select("id")
-          .single();
-        if (generatedFileError) throw new Error(generatedFileError.message);
-        profilePhotoFileId = generatedFile.id;
-      }
-    } catch (photoError) {
-      console.error("Corporate profile photo generation failed", photoError);
-    }
+    if (generatedFileError) throw new Error(generatedFileError.message);
+    const profilePhotoFileId = generatedFile.id;
 
     const { data: policyFile } = await serviceClient
       .from("app_files")
