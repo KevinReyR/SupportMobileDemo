@@ -6798,13 +6798,18 @@ function TerminateContractorModal({
   const executeTermination = async () => {
     setSaving(true);
     try {
-      await terminateContractor({
+      const result = await terminateContractor({
         contractorId: contractor.id,
         terminationDate,
         reasonId,
         observations,
       });
-      showMessage("Contratista desvinculado", "El contrato quedó en estado INACTIVO.");
+      showMessage(
+        "Contratista desvinculado",
+        result.emailSent
+          ? `El contrato quedó INACTIVO y se notificó a ${result.recipients} ${result.recipients === 1 ? "Director" : "Directores"}.`
+          : `El contrato quedó INACTIVO, pero no fue posible enviar la notificación: ${result.notificationError || "error desconocido"}`,
+      );
       await onTerminated();
     } catch (cause) {
       showMessage("No fue posible desvincular", errorMessage(cause));
