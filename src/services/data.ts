@@ -1827,6 +1827,22 @@ export async function terminateContractor(input: {
     p_observations: input.observations.trim(),
   });
   fail(result.error);
+  const notification = await supabase.functions.invoke("send-contractor-termination-email", {
+    body: { contractorId: input.contractorId },
+  });
+  let notificationError = "";
+  if (notification.error?.context instanceof Response) {
+    const body = await notification.error.context.clone().json().catch(() => null);
+    notificationError = typeof body?.error === "string" ? body.error : "";
+  }
+  if (!notificationError && notification.error) notificationError = notification.error.message;
+  const response = notification.data as { ok?: boolean; sent?: number; failed?: number; error?: string } | null;
+  if (!notificationError && response?.error) notificationError = response.error;
+  return {
+    emailSent: !notificationError && response?.ok === true,
+    recipients: Number(response?.sent ?? 0),
+    notificationError,
+  };
 }
 
 export async function changeContractorContract(input: {
