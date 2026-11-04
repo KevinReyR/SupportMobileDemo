@@ -2,6 +2,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { missingContractorRegistrationDetails } from "../_shared/contractor-details.ts";
 import { PDFDocument, StandardFonts, rgb } from "https://esm.sh/pdf-lib@1.17.1";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
+import { createIndependentPendingPdf, signIndependentPendingPdf } from "../_shared/independent-contract.mjs";
 import { createCorporateProfilePhoto } from "../_shared/profile-photo.ts";
 import {
   colombiaNow,
@@ -18,6 +19,8 @@ const CONTRACTOR_DOCUMENT_BUCKET = "contractor-documents";
 const PENDING_CONTRACT_DOCUMENT_CODE = "CONTRATO_PENDIENTE";
 const SIGNED_CONTRACT_DOCUMENT_CODE = "CONTRATO_FIRMADO";
 const CONTRACT_TEMPLATE_PATH = "templates/plantilla_contrato_contratistas_supportV2_acroform.pdf";
+const INDEPENDENT_CONTRACT_TEMPLATE_PATH = "templates/Formato_contrato_support_contratistas_2026.pdf";
+const INDEPENDENT_PENDING_NAME = "contrato-operativo-2026-pendiente.pdf";
 const CONTRACT_ACCEPTANCE_TEXT =
   "El firmante declaró haber leído, entendido y aceptado el contenido del documento antes de firmar";
 const ACCEPTANCE_TEXT =
@@ -240,13 +243,9 @@ function wrapText(text: string, font: any, fontSize: number, maxWidth: number) {
   return lines;
 }
 
-async function createContractPdf(
+async function createLegacyContractPdf(
   serviceClient: any,
   contract: Record<string, string>,
-  signature?: {
-    bytes: Uint8Array;
-    evidenceLines: string[];
-  },
 ) {
   const { data, error } = await serviceClient.storage.from(POLICY_BUCKET).download(CONTRACT_TEMPLATE_PATH);
   if (error || !data) {
@@ -255,9 +254,7 @@ async function createContractPdf(
 
   const pdf = await PDFDocument.load(new Uint8Array(await data.arrayBuffer()));
   const regular = await pdf.embedFont(StandardFonts.Helvetica);
-  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
   const form = pdf.getForm();
-  const pages = pdf.getPages();
   const contractFieldFontSize = 19;
 
   const setTextField = (name: string, value: string) => {
@@ -315,27 +312,29 @@ async function createContractPdf(
   form.updateFieldAppearances(regular);
   form.flatten();
 
-  if (signature) {
-    const page = pages[4];
-    if (!page) throw new Error("La pagina de firma no esta disponible en la plantilla.");
-    const embeddedSignature = await pdf.embedPng(signature.bytes);
-    const signatureY = 126;
-    page.drawImage(embeddedSignature, { x: 153.9, y: signatureY, width: 250, height: 82 });
-    let evidenceY = 200;
-    const evidenceX = Math.min(page.getWidth() - 170, 650);
-    const evidenceWidth = Math.max(120, page.getWidth() - evidenceX - 24);
-    page.drawText("Evidencia de firma", { x: evidenceX, y: evidenceY, size: 13, font: bold, color: rgb(0.08, 0.16, 0.35) });
-    evidenceY -= 16;
-    for (const line of signature.evidenceLines) {
-      const evidenceWrapped = wrapText(line, regular, 10, evidenceWidth);
-      for (const evidenceLine of evidenceWrapped) {
-        if (evidenceY < 40) break;
-        page.drawText(evidenceLine, { x: evidenceX, y: evidenceY, size: 10, font: regular, color: rgb(0.08, 0.13, 0.22) });
-        evidenceY -= 12;
-      }
+  return await pdf.save();
+}
+
+async function signLegacyPendingPdf(pendingBytes: Uint8Array, signatureBytes: Uint8Array, evidenceLines: string[]) {
+  const pdf = await PDFDocument.load(pendingBytes);
+  const page = pdf.getPages()[4];
+  if (!page) throw new Error("La pagina de firma no esta disponible en la plantilla anterior.");
+  const regular = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const embeddedSignature = await pdf.embedPng(signatureBytes);
+  page.drawImage(embeddedSignature, { x: 153.9, y: 126, width: 250, height: 82 });
+  let evidenceY = 200;
+  const evidenceX = Math.min(page.getWidth() - 170, 650);
+  const evidenceWidth = Math.max(120, page.getWidth() - evidenceX - 24);
+  page.drawText("Evidencia de firma", { x: evidenceX, y: evidenceY, size: 13, font: bold, color: rgb(0.08, 0.16, 0.35) });
+  evidenceY -= 16;
+  for (const line of evidenceLines) {
+    for (const evidenceLine of wrapText(line, regular, 10, evidenceWidth)) {
+      if (evidenceY < 40) break;
+      page.drawText(evidenceLine, { x: evidenceX, y: evidenceY, size: 10, font: regular, color: rgb(0.08, 0.13, 0.22) });
+      evidenceY -= 12;
     }
   }
-
   return await pdf.save();
 }
 
@@ -349,13 +348,24 @@ async function getContractValues(serviceClient: any, contractorId: number, invit
 
   const { data: currentContract, error: contractError } = await serviceClient
     .from("contractor_contract")
-    .select("id,start_date,end_date")
+    .select("id,contract_type,start_date,end_date")
     .eq("contractor_id", contractorId)
     .order("start_date", { ascending: false })
     .order("id", { ascending: false })
     .limit(1)
     .maybeSingle();
   if (contractError) throw new Error(contractError.message);
+
+  let contractTypeName = "";
+  if (currentContract?.contract_type) {
+    const { data: contractType, error: typeError } = await serviceClient
+      .from("contract_type")
+      .select("name")
+      .eq("id", currentContract.contract_type)
+      .single();
+    if (typeError) throw new Error(typeError.message);
+    contractTypeName = contractType.name.toLocaleUpperCase("es-CO");
+  }
 
   const startDate = currentContract?.start_date ?? todayColombiaDate();
   const endDate = currentContract?.end_date ?? addMonthsMinusOneDay(startDate, 1);
@@ -367,6 +377,15 @@ async function getContractValues(serviceClient: any, contractorId: number, invit
 
   return {
     contractorContractId: currentContract?.id ?? null,
+    contractTypeName,
+    independentValues: {
+      name: contractorFullName,
+      documentType: firstRelation<{ name?: string }>(contractor.document_type)?.name ?? "",
+      documentNumber: contractor.document_number ?? "",
+      address: contractor.address ?? "",
+      phone: contractor.phone_number ?? "",
+      email: contractor.email ?? inviteEmail,
+    },
     values: {
       nombrecontratista: contractorFullName,
       tipodocumentocontratista: firstRelation<{ name?: string }>(contractor.document_type)?.name ?? "cedula de ciudadania",
@@ -462,13 +481,25 @@ async function registerSignedContractDocument(
 
 async function createPendingContract(serviceClient: any, invite: InviteRow) {
   const contract = await getContractValues(serviceClient, invite.contractor_id, invite.email);
-  const pdfBytes = await createContractPdf(serviceClient, contract.values);
+  const useIndependentTemplate = ["SOLO ARL", "PAQUETE COMPLETO"].includes(contract.contractTypeName);
+  let pdfBytes: Uint8Array;
+  if (useIndependentTemplate) {
+    const { data, error } = await serviceClient.storage.from(POLICY_BUCKET).download(INDEPENDENT_CONTRACT_TEMPLATE_PATH);
+    if (error || !data) {
+      throw new Error(`No fue posible cargar la nueva plantilla del contrato: ${error?.message ?? "archivo no disponible"}`);
+    }
+    pdfBytes = await createIndependentPendingPdf(new Uint8Array(await data.arrayBuffer()), contract.independentValues, {
+      PDFDocument, StandardFonts, rgb,
+    });
+  } else {
+    pdfBytes = await createLegacyContractPdf(serviceClient, contract.values);
+  }
   const fileId = await uploadContractPdfArtifact(
     serviceClient,
     invite.contractor_id,
     PENDING_CONTRACT_DOCUMENT_CODE,
     pdfBytes,
-    "contrato-pendiente-firma.pdf",
+    useIndependentTemplate ? INDEPENDENT_PENDING_NAME : "contrato-pendiente-firma.pdf",
   );
 
   const { error } = await serviceClient
@@ -620,7 +651,19 @@ Deno.serve(async (req) => {
         throw new Error("Debes permitir la ubicacion para firmar el contrato.");
       }
 
-      const contract = await getContractValues(serviceClient, invite.contractor_id, invite.email);
+      const { data: pendingContract, error: pendingError } = await serviceClient
+        .from("contractor_contract_signatures")
+        .select("contractor_contract_id,app_files:unsigned_contract_file_id(bucket,path,original_name)")
+        .eq("invite_id", invite.id)
+        .single();
+      if (pendingError) throw new Error(pendingError.message);
+      const pendingFile = firstRelation<{ bucket?: string; path?: string; original_name?: string }>(pendingContract.app_files);
+      if (!pendingFile?.bucket || !pendingFile?.path) throw new Error("El contrato pendiente no está disponible.");
+      const { data: pendingPdf, error: downloadError } = await serviceClient.storage
+        .from(pendingFile.bucket)
+        .download(pendingFile.path);
+      if (downloadError || !pendingPdf) throw new Error(`No fue posible cargar el contrato revisado: ${downloadError?.message ?? "archivo no disponible"}`);
+      const pendingBytes = new Uint8Array(await pendingPdf.arrayBuffer());
       const signedAt = colombiaNow();
       const ipAddress = req.headers.get("x-forwarded-for") ?? null;
       const userAgent = req.headers.get("user-agent") ?? evidence.userAgent ?? null;
@@ -634,7 +677,11 @@ Deno.serve(async (req) => {
         `Precision: ${Number.isFinite(Number(evidence.location?.accuracy)) ? `${evidence.location?.accuracy} m` : "No disponible"}`,
         CONTRACT_ACCEPTANCE_TEXT,
       ];
-      const signedPdfBytes = await createContractPdf(serviceClient, contract.values, { bytes: signatureBytes, evidenceLines });
+      const signedPdfBytes = pendingFile.original_name === INDEPENDENT_PENDING_NAME
+        ? await signIndependentPendingPdf(pendingBytes, signatureBytes, evidenceLines, signedAt.slice(0, 10), {
+          PDFDocument, StandardFonts, rgb,
+        })
+        : await signLegacyPendingPdf(pendingBytes, signatureBytes, evidenceLines);
       const signatureFileId = await uploadContractSignatureArtifact(
         serviceClient,
         invite.contractor_id,
@@ -652,7 +699,7 @@ Deno.serve(async (req) => {
       const { error: signatureError } = await serviceClient
         .from("contractor_contract_signatures")
         .update({
-          contractor_contract_id: contract.contractorContractId,
+          contractor_contract_id: pendingContract.contractor_contract_id,
           signature_file_id: signatureFileId,
           signed_contract_file_id: signedContractFileId,
           status: "SIGNED",
