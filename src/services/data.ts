@@ -1,4 +1,10 @@
 import { supabase } from "../lib/supabase";
+import {
+  finishPerformanceStage,
+  measurePerformanceStage,
+  performanceNow,
+  type PerformanceTrace,
+} from "./performance";
 import type {
   AdminUser,
   AdminData,
@@ -21,8 +27,10 @@ import type {
   DirectorDashboard,
   DirectorPayrollReport,
   Operation,
+  OperationCursor,
   OperationChangeHistoryItem,
   OperationEditInput,
+  OperationPage,
   PersonnelRequest,
   Role,
   RoleCode,
@@ -42,6 +50,25 @@ const roleNames: Record<RoleCode, Role> = {
   COORDINATOR: "Coordinador",
   CLIENT: "Cliente",
 };
+
+const OPERATION_SELECT =
+  "id,operation_date,client_id,area_id,operation_type_id,shift_id,service_unit_type_id,planned_units,actual_units,status,observations,review_observations,clients(name),area(name),operation_type(code,name),shift(name),service_unit_type(name),operation_assignment(id,contractor_id,planned_quantity,worked_quantity,extra_hours,deleted_at)";
+const OPERATION_HISTORY_PAGE_SIZE = 30;
+
+function colombiaTodayIso() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Bogota",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+function addIsoDays(value: string, days: number) {
+  const date = new Date(`${value}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
 
 function fail(error: { message: string } | null) {
   if (error) throw new Error(error.message);
@@ -190,17 +217,186 @@ export async function loadUserContext(userId: string): Promise<UserContext> {
   };
 }
 
-export async function loadAppData(context: UserContext): Promise<AppData> {
+function mapOperationRow(row: any): Operation {
+  const assignments = (row.operation_assignment ?? []).filter(
+    (assignment: any) => assignment.deleted_at === null,
+  );
+  return {
+    id: Number(row.id),
+    date: row.operation_date,
+    clientId: Number(row.client_id),
+    client: cleanText(firstRelation<any>(row.clients)?.name),
+    areaId: Number(row.area_id),
+    area: cleanText(firstRelation<any>(row.area)?.name),
+    operationType: (firstRelation<any>(row.operation_type)?.code ?? "TURNO") as "TURNO" | "DESCARGUE",
+    operationTypeName: cleanText(firstRelation<any>(row.operation_type)?.name) || "Turno",
+    shiftId: row.shift_id === null ? null : Number(row.shift_id),
+    shift: cleanText(firstRelation<any>(row.shift)?.name) || "Sin turno",
+    serviceUnitTypeId: row.service_unit_type_id === null ? null : Number(row.service_unit_type_id),
+    serviceUnitType: cleanText(firstRelation<any>(row.service_unit_type)?.name) || null,
+    plannedUnits: row.planned_units === null ? null : Number(row.planned_units),
+    actualUnits: row.actual_units === null ? null : Number(row.actual_units),
+    people: assignments.length,
+    contractorIds: assignments
+      .filter((assignment: any) => assignment.contractor_id !== null && assignment.contractor_id !== undefined)
+      .map((assignment: any) => Number(assignment.contractor_id)),
+    worked: assignments.reduce(
+      (total: number, assignment: any) => total + Number(assignment.worked_quantity ?? 0),
+      0,
+    ),
+    extraHours: assignments.reduce(
+      (total: number, assignment: any) => total + Number(assignment.extra_hours ?? 0),
+      0,
+    ),
+    status: row.status,
+    observations: row.observations,
+    reviewObservations: row.review_observations,
+  };
+}
+
+function mapOperationRows(rows: any[] | null): Operation[] {
+  return (rows ?? []).map(mapOperationRow);
+}
+
+function mergeOperations(...groups: Operation[][]): Operation[] {
+  const byId = new Map<number, Operation>();
+  for (const group of groups) {
+    for (const operation of group) byId.set(operation.id, operation);
+  }
+  return [...byId.values()].sort(
+    (left, right) => right.date.localeCompare(left.date) || right.id - left.id,
+  );
+}
+
+export interface InitialOperationsLoad {
+  items: Operation[];
+  historyIds: number[];
+  nextCursor: OperationCursor | null;
+  hasMore: boolean;
+}
+
+export interface ContractorLastOperation {
+  contractorId: number;
+  lastClient: string;
+  lastArea: string;
+  lastDate: string | null;
+}
+
+export async function loadOperationAlerts(): Promise<Operation[]> {
+  const result = await supabase
+    .from("operation")
+    .select(OPERATION_SELECT)
+    .in("status", ["PENDIENTE", "CAMBIOS_SOLICITADOS"])
+    .order("operation_date", { ascending: false })
+    .order("id", { ascending: false });
+  fail(result.error);
+  return mapOperationRows(result.data);
+}
+
+export async function loadInitialOperations(): Promise<InitialOperationsLoad> {
+  const today = colombiaTodayIso();
+  const recentStart = addIsoDays(today, -2);
+  const [recentResult, activeResult, alerts, olderProbe] = await Promise.all([
+    supabase
+      .from("operation")
+      .select(OPERATION_SELECT)
+      .gte("operation_date", recentStart)
+      .lte("operation_date", today)
+      .order("operation_date", { ascending: false })
+      .order("id", { ascending: false }),
+    supabase
+      .from("operation")
+      .select(OPERATION_SELECT)
+      .eq("status", "EN_CURSO")
+      .order("operation_date", { ascending: false })
+      .order("id", { ascending: false }),
+    loadOperationAlerts(),
+    supabase.from("operation").select("id").lt("operation_date", recentStart).limit(1),
+  ]);
+  fail(recentResult.error);
+  fail(activeResult.error);
+  fail(olderProbe.error);
+  const recent = mapOperationRows(recentResult.data);
+  const active = mapOperationRows(activeResult.data);
+  const initialHistory = mergeOperations(recent, active);
+  return {
+    items: mergeOperations(recent, active, alerts),
+    historyIds: initialHistory.map((operation) => operation.id),
+    nextCursor: (olderProbe.data?.length ?? 0) > 0 ? { date: recentStart, id: 0 } : null,
+    hasMore: (olderProbe.data?.length ?? 0) > 0,
+  };
+}
+
+export async function loadOperationsByDate(date: string): Promise<Operation[]> {
+  const result = await supabase
+    .from("operation")
+    .select(OPERATION_SELECT)
+    .eq("operation_date", date)
+    .order("id", { ascending: false });
+  fail(result.error);
+  return mapOperationRows(result.data);
+}
+
+export async function loadOlderOperations(
+  cursor: OperationCursor,
+  limit = OPERATION_HISTORY_PAGE_SIZE,
+): Promise<OperationPage> {
+  let query = supabase
+    .from("operation")
+    .select(OPERATION_SELECT)
+    .order("operation_date", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(limit + 1);
+  query = cursor.id > 0
+    ? query.or(`operation_date.lt.${cursor.date},and(operation_date.eq.${cursor.date},id.lt.${cursor.id})`)
+    : query.lt("operation_date", cursor.date);
+  const result = await query;
+  fail(result.error);
+  const rows = result.data ?? [];
+  const hasMore = rows.length > limit;
+  const items = mapOperationRows(rows.slice(0, limit));
+  const last = items.at(-1);
+  return {
+    items,
+    nextCursor: hasMore && last ? { date: last.date, id: last.id } : null,
+    hasMore,
+  };
+}
+
+export async function loadOperationById(operationId: number): Promise<Operation> {
+  const result = await supabase
+    .from("operation")
+    .select(OPERATION_SELECT)
+    .eq("id", operationId)
+    .single();
+  fail(result.error);
+  return mapOperationRow(result.data);
+}
+
+export async function loadContractorLastOperations(
+  contractorIds?: number[],
+): Promise<ContractorLastOperation[]> {
+  if (contractorIds && contractorIds.length === 0) return [];
+  const result = await supabase.rpc("get_contractor_last_operations", {
+    p_contractor_ids: contractorIds ?? null,
+  });
+  fail(result.error);
+  return (result.data ?? []).map((row: any) => ({
+    contractorId: Number(row.contractor_id),
+    lastClient: cleanText(row.last_client) || "Sin operación",
+    lastArea: cleanText(row.last_area) || "Sin área",
+    lastDate: row.last_operation_date ?? null,
+  }));
+}
+
+export async function loadAppData(context: UserContext, performanceTrace?: PerformanceTrace): Promise<AppData> {
+  const operationsQuery = () => loadInitialOperations();
   const common = await Promise.all([
     supabase.from("clients").select("id,name").eq("is_active", true).order("id"),
     supabase.from("document_type").select("id,name").order("id"),
-    supabase
-      .from("operation")
-      .select(
-        "id,operation_date,client_id,area_id,operation_type_id,shift_id,service_unit_type_id,planned_units,actual_units,status,observations,review_observations,clients(name),area(name),operation_type(code,name),shift(name),service_unit_type(name),operation_assignment(id,contractor_id,planned_quantity,worked_quantity,extra_hours,deleted_at)",
-      )
-      .order("operation_date", { ascending: false })
-      .order("id", { ascending: false }),
+    performanceTrace
+      ? measurePerformanceStage(performanceTrace, "operations", async () => await operationsQuery())
+      : operationsQuery(),
     supabase
       .from("personnel_request")
       .select("id,client_id,area_id,shift_id,required_quantity,description,required_date,required_end_date,status,clients(name),area(name),shift(name)")
@@ -215,44 +411,12 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
     supabase.from("service_unit_type").select("id,name").eq("is_active", true).order("name"),
   ]);
 
-  common.forEach((result) => fail(result.error));
-
-  const operations: Operation[] = (common[2].data ?? []).map((row: any) => {
-    const assignments = (row.operation_assignment ?? []).filter(
-      (assignment: any) => assignment.deleted_at === null,
-    );
-    return {
-      id: row.id,
-      date: row.operation_date,
-      clientId: row.client_id,
-      client: cleanText(firstRelation<any>(row.clients)?.name),
-      areaId: row.area_id,
-      area: cleanText(firstRelation<any>(row.area)?.name),
-      operationType: (firstRelation<any>(row.operation_type)?.code ?? "TURNO") as "TURNO" | "DESCARGUE",
-      operationTypeName: cleanText(firstRelation<any>(row.operation_type)?.name) || "Turno",
-      shiftId: row.shift_id,
-      shift: cleanText(firstRelation<any>(row.shift)?.name) || "Sin turno",
-      serviceUnitTypeId: row.service_unit_type_id ?? null,
-      serviceUnitType: cleanText(firstRelation<any>(row.service_unit_type)?.name) || null,
-      plannedUnits: row.planned_units === null ? null : Number(row.planned_units),
-      actualUnits: row.actual_units === null ? null : Number(row.actual_units),
-      people: assignments.length,
-      contractorIds: assignments
-        .filter((assignment: any) => assignment.contractor_id !== null && assignment.contractor_id !== undefined)
-        .map((assignment: any) => Number(assignment.contractor_id)),
-      worked: assignments.reduce(
-        (total: number, assignment: any) => total + Number(assignment.worked_quantity ?? 0),
-        0,
-      ),
-      extraHours: assignments.reduce(
-        (total: number, assignment: any) => total + Number(assignment.extra_hours ?? 0),
-        0,
-      ),
-      status: row.status,
-      observations: row.observations,
-      reviewObservations: row.review_observations,
-    };
+  common.forEach((result, index) => {
+    if (index !== 2) fail((result as any).error);
   });
+
+  const initialOperations = common[2] as InitialOperationsLoad;
+  const operations = initialOperations.items;
 
   const requests: PersonnelRequest[] = (common[3].data ?? []).map((row: any) => ({
     id: row.id,
@@ -271,8 +435,9 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
 
   let contractors: Contractor[] = [];
   let clientContractors: ClientContractor[] = [];
+  const contractorsStartedAt = performanceNow();
   if (context.roleCode !== "CLIENT") {
-    const [contractorResult, contractResult] = await Promise.all([
+    const [contractorResult, contractResult, lastOperations] = await Promise.all([
       supabase
         .from("contractor")
         .select(
@@ -284,20 +449,14 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
         .select("id,contractor_id,start_date,end_date,status_id,contract_type,contract_status(name),contract_type_ref:contract_type(name)")
         .order("start_date", { ascending: false })
         .order("id", { ascending: false }),
+      loadContractorLastOperations(),
     ]);
     fail(contractorResult.error);
     fail(contractResult.error);
 
-    const lastAssignments = new Map<number, any>();
-    for (const operation of common[2].data ?? []) {
-      for (const assignment of (operation as any).operation_assignment ?? []) {
-        if (assignment.deleted_at !== null) continue;
-        const contractorId = Number(assignment.contractor_id);
-        if (!lastAssignments.has(contractorId)) {
-          lastAssignments.set(contractorId, operation);
-        }
-      }
-    }
+    const lastOperationsByContractor = new Map(
+      lastOperations.map((item) => [item.contractorId, item]),
+    );
 
     const contractsByContractor = new Map<number, any[]>();
     for (const row of contractResult.data ?? []) {
@@ -308,7 +467,7 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
     }
 
     contractors = (contractorResult.data ?? []).map((row: any) => {
-      const latest = lastAssignments.get(row.id);
+      const latest = lastOperationsByContractor.get(Number(row.id));
       const firstName = cleanText(row.name);
       const lastName = cleanText(row.last_name);
       const fullName = `${firstName} ${lastName}`.trim();
@@ -351,9 +510,9 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
         contractTypeName: latestContract.typeName,
         scheduledContractStartDate: latestContract.scheduledStartDate,
         scheduledContractTypeName: latestContract.scheduledTypeName,
-        lastClient: cleanText(firstRelation<any>(latest?.clients)?.name) || "Sin operación",
-        lastArea: cleanText(firstRelation<any>(latest?.area)?.name) || "Sin área",
-        lastDate: latest?.operation_date ?? null,
+        lastClient: latest?.lastClient ?? "Sin operación",
+        lastArea: latest?.lastArea ?? "Sin área",
+        lastDate: latest?.lastDate ?? null,
       };
     });
   } else {
@@ -378,6 +537,11 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
         lastArea: cleanText(row.last_area) || "Sin área",
         lastDate: row.last_operation_date,
       };
+    });
+  }
+  if (performanceTrace) {
+    finishPerformanceStage(performanceTrace, "contractors", contractorsStartedAt, {
+      count: context.roleCode === "CLIENT" ? clientContractors.length : contractors.length,
     });
   }
 
@@ -426,6 +590,10 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       name: cleanText(documentType.name),
     })),
     operations,
+    operationHistoryIds: initialOperations.historyIds,
+    operationHistoryCursor: initialOperations.nextCursor,
+    hasMoreOperations: initialOperations.hasMore,
+    operationHistoryExpanded: false,
     requests,
     contractors,
     clientContractors,
