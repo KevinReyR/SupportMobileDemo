@@ -469,6 +469,12 @@ function formatShortCurrency(value: number) {
   return `$${formatShortNumber(value)}`;
 }
 
+function showPdfError(cause: unknown) {
+  const message = errorMessage(cause);
+  if (Platform.OS === "web") window.alert(`No fue posible generar el PDF\n${message}`);
+  else Alert.alert("No fue posible generar el PDF", message);
+}
+
 function errorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : "Ocurrió un error inesperado.";
   const postgresMessage = message.match(/P0001:\s*([^\n]+)/);
@@ -4886,7 +4892,7 @@ function CedulaCaptureFlow({
       const file = await buildCedulaPdfFromPhotos(frontUri, backUri || undefined);
       onPdfReady(file);
     } catch (cause) {
-      Alert.alert("No fue posible generar el PDF", errorMessage(cause));
+      showPdfError(cause);
     } finally {
       setGenerating(false);
     }
@@ -6551,7 +6557,7 @@ function ContractorActivationCard({
       const file = await pickGalleryPdf("certificado-arl-foto.pdf");
       if (file) setArlPdf(file);
     } catch (cause) {
-      Alert.alert("No fue posible generar el PDF", errorMessage(cause));
+      showPdfError(cause);
     } finally {
       setPreparing(false);
     }
@@ -6677,7 +6683,7 @@ function ContractorDocumentUploadModal({
       const file = await pickGalleryPdf(name);
       if (file) setSelectedFile(file);
     } catch (cause) {
-      Alert.alert("No fue posible generar el PDF", errorMessage(cause));
+      showPdfError(cause);
     } finally {
       setPreparing(false);
     }
@@ -7142,7 +7148,7 @@ const ContractorActivationDocumentsCard = forwardRef<
       const file = await pickGalleryPdf(name);
       if (file) setSelectedFiles((current) => ({ ...current, [typeCode]: file }));
     } catch (cause) {
-      Alert.alert("No fue posible generar el PDF", errorMessage(cause));
+      showPdfError(cause);
     } finally {
       setPreparingType(null);
     }
