@@ -60,6 +60,7 @@ import {
   loadClientContractorProfile,
   loadClientContractorHistory,
   loadContractorDocuments,
+  loadContractorActivationDocuments,
   loadContractorHistory,
   loadContractorNovelties,
   loadContractorProfile,
@@ -5510,7 +5511,12 @@ function ContractorProfile({
               )}
             </>
           ) : (
-            <SecondaryButton label="Recontratar contratista · Próximamente" icon="person-add-outline" disabled onPress={() => {}} />
+            <RehireContractor contractor={contractor} onSaved={async () => { await onChanged(); onContractorRefreshed(await loadContractorProfile(contractor.id)); }} />
+          )}
+          {contractor.contractStatus === "INACTIVO" && contractor.terminationSummary && (
+            <Text selectable style={styles.caption}>
+              {`Desvinculación: ${contractor.terminationSummary.date ? formatDate(contractor.terminationSummary.date) : "Sin registrar"} · Causa: ${contractor.terminationSummary.reason} · Observación: ${contractor.terminationSummary.observations} · Duración: ${contractor.terminationSummary.durationDays === null ? "No disponible" : `${contractor.terminationSummary.durationDays} ${contractor.terminationSummary.durationDays === 1 ? "día" : "días"}`}`}
+            </Text>
           )}
         </View>
       )}
@@ -5546,6 +5552,7 @@ function ContractorProfile({
           await onChanged();
         }}
       />
+      {context.roleCode === "DIRECTOR" && contractor.contractStatus === "ACTIVO" && <ContractorOnboardingStatus contractorId={contractor.id} />}
       <ContractorDocumentsSection
         ref={documentsRef}
         contractorId={contractor.id}
@@ -5572,6 +5579,72 @@ function ContractorProfile({
       ))}
     </Page>
   );
+}
+
+function ContractorOnboardingStatus({ contractorId }: { contractorId: number }) {
+  const [status, setStatus] = useState("Cargando...");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const refresh = useCallback(async () => {
+    try {
+      const contract = await supabase.from("contractor_contract").select("id").eq("contractor_id", contractorId).order("start_date", { ascending: false }).order("id", { ascending: false }).limit(1).single();
+      if (contract.error) throw contract.error;
+      const result = await supabase.from("contractor_onboarding_invites").select("status,expires_at").eq("contractor_contract_id", contract.data.id).order("created_at", { ascending: false }).limit(1).maybeSingle();
+      if (result.error) throw result.error;
+      const invite = result.data;
+      setStatus(!invite ? "No enviado" : invite.status === "SUBMITTED" ? "Firmado" : invite.status === "EXPIRED" || new Date(invite.expires_at + "-05:00").getTime() < Date.now() ? "Vencido" : invite.status === "DATA_SUBMITTED" ? "Datos enviados" : "Invitado");
+      setError("");
+    } catch (cause) { setError(errorMessage(cause)); }
+  }, [contractorId]);
+  useEffect(() => { void refresh(); }, [refresh]);
+  return <FormCard title="Onboarding del contrato actual">
+    <Text>{status}</Text>{!!error && <Text accessibilityRole="alert">{error}</Text>}
+    <SecondaryButton label="Actualizar estado" icon="refresh-outline" onPress={refresh} disabled={busy} />
+    {status !== "Firmado" && <SecondaryButton label={busy ? "Enviando..." : "Enviar / reenviar onboarding"} icon="mail-outline" disabled={busy || status === "Cargando..."} onPress={async () => {
+      setBusy(true); try { await sendContractorOnboardingEmail(contractorId); await refresh(); } catch (cause) { setError(errorMessage(cause)); } finally { setBusy(false); }
+    }} />}
+  </FormCard>;
+}
+
+function RehireContractor({ contractor, onSaved }: { contractor: Contractor; onSaved: () => Promise<void> }) {
+  const [visible, setVisible] = useState(false);
+  const [phone, setPhone] = useState("");
+  const [email, setEmail] = useState("");
+  const [details, setDetails] = useState(emptyContractorRegistrationDetails);
+  const [errors, setErrors] = useState<string[]>([]);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const open = () => {
+    setPhone(contractor.phone ?? ""); setEmail(contractor.email ?? ""); setError("");
+    setDetails({ residenceDepartment: contractor.residenceDepartment, residenceCity: contractor.city === "Sin registrar" ? "" : contractor.city,
+      neighborhood: contractor.neighborhood, address: contractor.address, pensionFund: contractor.pensionFund ?? "", eps: contractor.eps ?? "" });
+    setVisible(true);
+  };
+  const save = async () => {
+    if (saving) return;
+    const validation = [...errors, ...missingRegistrationDetails(details)];
+    if (!/^3[0-9]{9}$/.test(phone.trim())) validation.push("Telefono: ingresa 10 digitos comenzando por 3.");
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) validation.push("Correo no valido.");
+    if (validation.length) { setError(validation.join("\n")); return; }
+    setSaving(true); setError("");
+    try {
+      const result = await supabase.rpc("rehire_contractor", { p_contractor_id: contractor.id, p_phone_number: phone.trim(), p_email: email.trim().toLowerCase(),
+        p_residence_department: details.residenceDepartment, p_residence_city: details.residenceCity, p_neighborhood: details.neighborhood,
+        p_address: details.address, p_pension_fund: details.pensionFund, p_eps: details.eps });
+      if (result.error) throw result.error;
+      setVisible(false); await onSaved();
+    } catch (cause) { setError(errorMessage(cause)); } finally { setSaving(false); }
+  };
+  return <>
+    <SecondaryButton label="Recontratar contratista" icon="person-add-outline" onPress={open} />
+    {visible && <AdminModalShell visible title="Recontratar contratista" saving={saving} onClose={() => setVisible(false)} onSave={save}>
+      <Notice icon="information-circle-outline" text="Confirma los datos actualizados. El nuevo contrato quedará PENDIENTE de documentos del Director." />
+      <Label text="Teléfono *" /><Input icon="call-outline" value={phone} onChangeText={setPhone} keyboardType="phone-pad" />
+      <Label text="Correo *" /><Input icon="mail-outline" value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" />
+      <ContractorRegistrationFields details={details} onChange={setDetails} onValidation={setErrors} />
+      {!!error && <Text accessibilityRole="alert" style={{ color: C.red }}>{error}</Text>}
+    </AdminModalShell>}
+  </>;
 }
 
 function ContractorRegistrationDetailsModal({
@@ -7002,7 +7075,7 @@ const ContractorActivationDocumentsCard = forwardRef<
   const refreshDocuments = useCallback(async () => {
     setLoadingDocuments(true);
     try {
-      const documents = await loadContractorDocuments(contractor.id);
+      const documents = await loadContractorActivationDocuments(contractor.id);
       setExistingCodes(
         activationDocumentOptions
           .map((item) => item.typeCode)
@@ -7024,15 +7097,10 @@ const ContractorActivationDocumentsCard = forwardRef<
   }, [contractTypes, contractor.contractTypeId, contractor.id]);
 
   useImperativeHandle(ref, () => ({
-    replaceDocuments(documents) {
-      setExistingCodes(
-        activationDocumentOptions
-          .map((item) => item.typeCode)
-          .filter((code) => documents.some((document) => document.typeCode === code)),
-      );
-      setLoadingDocuments(false);
+    replaceDocuments(_documents) {
+      void refreshDocuments();
     },
-  }), []);
+  }), [refreshDocuments]);
 
   const pickDocument = async (typeCode: ContractorActivationDocumentType, title: string) => {
     try {
@@ -7113,7 +7181,7 @@ const ContractorActivationDocumentsCard = forwardRef<
       }
       setSelectedFiles({});
       updateProgress(60, "Verificando documentos requeridos");
-      const documents = await loadContractorDocuments(contractor.id);
+      const documents = await loadContractorActivationDocuments(contractor.id);
       const completed = activationDocumentOptions.every((item) =>
         documents.some((document) => document.typeCode === item.typeCode),
       );

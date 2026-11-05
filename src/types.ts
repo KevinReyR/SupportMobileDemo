@@ -196,6 +196,12 @@ export interface Contractor {
   shoeSize: string | null;
   hireDate: string | null;
   terminationDate: string | null;
+  terminationSummary?: {
+    date: string | null;
+    reason: string;
+    observations: string;
+    durationDays: number | null;
+  } | null;
   active: boolean;
   contractStatus: ContractStatus;
   contractStartDate: string | null;
