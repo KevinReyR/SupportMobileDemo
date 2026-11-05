@@ -30,6 +30,7 @@ const ACCEPTANCE_TEXT =
 type InviteRow = {
   id: string;
   contractor_id: number;
+  contractor_contract_id: number;
   email: string;
   status: string;
   expires_at: string;
@@ -383,7 +384,7 @@ async function signLegacyPendingPdf(pendingBytes: Uint8Array, signatureBytes: Ui
   return await pdf.save();
 }
 
-async function getContractValues(serviceClient: any, contractorId: number, inviteEmail: string) {
+async function getContractValues(serviceClient: any, contractorId: number, inviteEmail: string, contractId: number) {
   const { data: contractor, error: contractorError } = await serviceClient
     .from("contractor")
     .select("id,name,last_name,document_number,address,phone_number,email,document_type(name)")
@@ -395,11 +396,13 @@ async function getContractValues(serviceClient: any, contractorId: number, invit
     .from("contractor_contract")
     .select("id,contract_type,start_date,end_date")
     .eq("contractor_id", contractorId)
+    .eq("id", contractId)
     .order("start_date", { ascending: false })
     .order("id", { ascending: false })
     .limit(1)
     .maybeSingle();
   if (contractError) throw new Error(contractError.message);
+  if (!currentContract) throw new Error("El contrato de esta invitacion no existe.");
 
   let contractTypeName = "";
   if (currentContract?.contract_type) {
@@ -505,6 +508,7 @@ async function registerSignedContractDocument(
   serviceClient: any,
   contractorId: number,
   fileId: string,
+  contractId: number,
 ) {
   const { data: documentType, error: typeError } = await serviceClient
     .from("contractor_document_types")
@@ -520,12 +524,13 @@ async function registerSignedContractDocument(
       contractor_id: contractorId,
       document_type_id: documentType.id,
       file_id: fileId,
+      contractor_contract_id: contractId,
     }, { onConflict: "file_id" });
   if (error) throw new Error(error.message);
 }
 
 async function createPendingContract(serviceClient: any, invite: InviteRow) {
-  const contract = await getContractValues(serviceClient, invite.contractor_id, invite.email);
+  const contract = await getContractValues(serviceClient, invite.contractor_id, invite.email, invite.contractor_contract_id);
   const useIndependentTemplate = ["SOLO ARL", "PAQUETE COMPLETO"].includes(contract.contractTypeName);
   let pdfBytes: Uint8Array;
   if (useIndependentTemplate) {
@@ -565,11 +570,17 @@ async function getInvite(serviceClient: any, token: string, allowedStatuses = ["
   const tokenHash = await sha256Hex(token);
   const { data, error } = await serviceClient
     .from("contractor_onboarding_invites")
-    .select("id,contractor_id,email,status,expires_at,contractor(name,last_name,document_number)")
+    .select("id,contractor_id,contractor_contract_id,email,status,expires_at,contractor(name,last_name,document_number)")
     .eq("token_hash", tokenHash)
-    .maybeSingle<InviteRow>();
+    .maybeSingle();
   if (error) throw new Error(error.message);
   if (!data) throw new Error("El enlace no es valido.");
+  if (!data.contractor_contract_id) throw new Error("Solicita una nueva invitacion al Director.");
+  const boundContract = await serviceClient.from("contractor_contract")
+    .select("id,contract_status(name)").eq("id", data.contractor_contract_id).eq("contractor_id", data.contractor_id).single();
+  if (boundContract.error || firstRelation<{ name: string }>(boundContract.data?.contract_status)?.name.toUpperCase() !== "ACTIVO") {
+    throw new Error("El contrato de esta invitacion ya no esta activo.");
+  }
   if (!allowedStatuses.includes(data.status)) throw new Error("Este enlace ya fue utilizado o no esta disponible.");
   if (data.expires_at < colombiaNow()) {
     await serviceClient
@@ -739,7 +750,7 @@ Deno.serve(async (req) => {
         signedPdfBytes,
         "contrato-firmado.pdf",
       );
-      await registerSignedContractDocument(serviceClient, invite.contractor_id, signedContractFileId);
+      await registerSignedContractDocument(serviceClient, invite.contractor_id, signedContractFileId, invite.contractor_contract_id);
 
       const { error: signatureError } = await serviceClient
         .from("contractor_contract_signatures")

@@ -1,4 +1,5 @@
 import { supabase } from "../lib/supabase";
+import { inclusiveContractDays } from "../lib/contract-duration";
 import {
   finishPerformanceStage,
   measurePerformanceStage,
@@ -129,7 +130,15 @@ function effectiveContract(rows: any[]) {
   const pending = ordered.find((row) =>
     row.start_date <= today && cleanText(firstRelation<any>(row.contract_status)?.name).toUpperCase() === "PENDIENTE");
   const displayed = current ?? pending ?? ordered.find((row) => row.start_date <= today);
+  const terminated = rows.filter(row => row.terminated_at).sort((a, b) =>
+    Date.parse(b.terminated_at) - Date.parse(a.terminated_at) || Number(b.id) - Number(a.id))[0];
   return {
+    terminationSummary: terminated ? {
+      date: terminated.end_date ?? null,
+      reason: cleanText(firstRelation<any>(terminated.termination_reason)?.name) || "Sin registrar",
+      observations: cleanText(terminated.termination_observations) || "Sin registrar",
+      durationDays: inclusiveContractDays(terminated.start_date, terminated.end_date),
+    } : null,
     status: current ? "ACTIVO" as ContractStatus : pending ? "PENDIENTE" as ContractStatus : "INACTIVO" as ContractStatus,
     startDate: displayed?.start_date ?? null,
     typeId: displayed?.contract_type ?? null,
@@ -446,7 +455,7 @@ export async function loadAppData(context: UserContext, performanceTrace?: Perfo
         .order("name"),
       supabase
         .from("contractor_contract")
-        .select("id,contractor_id,start_date,end_date,status_id,contract_type,contract_status(name),contract_type_ref:contract_type(name)")
+        .select("id,contractor_id,start_date,end_date,status_id,contract_type,contract_status(name),contract_type_ref:contract_type(name),terminated_at,termination_observations,termination_reason:contractor_termination_reasons(name)")
         .order("start_date", { ascending: false })
         .order("id", { ascending: false }),
       loadContractorLastOperations(),
@@ -503,6 +512,7 @@ export async function loadAppData(context: UserContext, performanceTrace?: Perfo
         shoeSize: row.shoe_size,
         hireDate: row.hire_date,
         terminationDate: row.termination_date,
+        terminationSummary: latestContract.terminationSummary,
         active: latestContract.status === "ACTIVO",
         contractStatus: latestContract.status,
         contractStartDate: latestContract.startDate,
@@ -675,7 +685,7 @@ export async function loadContractorProfile(contractorId: number): Promise<Contr
       .is("deleted_at", null),
     supabase
       .from("contractor_contract")
-      .select("id,contractor_id,start_date,end_date,status_id,contract_type,contract_status(name),contract_type_ref:contract_type(name)")
+      .select("id,contractor_id,start_date,end_date,status_id,contract_type,contract_status(name),contract_type_ref:contract_type(name),terminated_at,termination_observations,termination_reason:contractor_termination_reasons(name)")
       .eq("contractor_id", contractorId)
       .order("start_date", { ascending: false })
       .order("id", { ascending: false }),
@@ -725,6 +735,7 @@ export async function loadContractorProfile(contractorId: number): Promise<Contr
     shoeSize: row.shoe_size,
     hireDate: row.hire_date,
     terminationDate: row.termination_date,
+    terminationSummary: contract.terminationSummary,
     active: contractStatus === "ACTIVO",
     contractStatus,
     contractStartDate: contract.startDate,
@@ -868,6 +879,16 @@ export async function loadClientContractorHistory(contractorId: number): Promise
     extraHours: Number(row.extra_hours ?? 0),
     observations: null,
   }));
+}
+
+export async function loadContractorActivationDocuments(contractorId: number): Promise<ContractorDocument[]> {
+  const contract = await supabase.from("contractor_contract").select("id").eq("contractor_id", contractorId)
+    .order("start_date", { ascending: false }).order("id", { ascending: false }).limit(1).single();
+  fail(contract.error);
+  const documents = await supabase.from("contractor_documents").select("id").eq("contractor_id", contractorId).eq("contractor_contract_id", contract.data!.id);
+  fail(documents.error);
+  const ids = new Set((documents.data ?? []).map(row => row.id));
+  return (await loadContractorDocuments(contractorId)).filter(row => ids.has(row.id));
 }
 
 export async function loadContractorDocuments(

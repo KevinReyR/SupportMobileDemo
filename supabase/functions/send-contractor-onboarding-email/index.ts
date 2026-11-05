@@ -72,11 +72,16 @@ Deno.serve(async (req) => {
     return jsonResponse({ error: `Completa internamente estos datos antes de enviar la invitacion: ${missingDetails.join(", ")}.` }, 400);
   }
 
+  const { data: currentContract, error: currentContractError } = await serviceClient.from("contractor_contract")
+    .select("id").eq("contractor_id", contractorId).lte("start_date", colombiaNow().slice(0,10))
+    .order("start_date", { ascending: false }).order("id", { ascending: false }).limit(1).single();
+  if (currentContractError || !currentContract) return jsonResponse({ error: "Contrato no disponible" }, 400);
+
   await serviceClient
     .from("contractor_onboarding_invites")
     .update({ status: "EXPIRED", updated_at: colombiaNow() })
     .eq("contractor_id", contractorId)
-    .eq("status", "PENDING");
+    .in("status", ["PENDING", "DATA_SUBMITTED"]);
 
   const token = randomToken();
   const tokenHash = await sha256Hex(token);
@@ -87,6 +92,7 @@ Deno.serve(async (req) => {
 
   const { error: inviteError } = await serviceClient.from("contractor_onboarding_invites").insert({
     contractor_id: contractorId,
+    contractor_contract_id: currentContract.id,
     email: contractor.email,
     token_hash: tokenHash,
     expires_at: expiresAt,
