@@ -15,6 +15,7 @@ import {
 } from "../_shared/onboarding.ts";
 
 const MAX_SELFIE_BYTES = 2_097_152;
+declare const EdgeRuntime: { waitUntil(task: Promise<unknown>): void };
 const CONTRACTOR_DOCUMENT_BUCKET = "contractor-documents";
 const PENDING_CONTRACT_DOCUMENT_CODE = "CONTRATO_PENDIENTE";
 const SIGNED_CONTRACT_DOCUMENT_CODE = "CONTRATO_FIRMADO";
@@ -224,6 +225,50 @@ async function loadShirtTemplate(serviceClient: any) {
 async function generateCorporateProfilePhoto(serviceClient: any, selfieBytes: Uint8Array) {
   const templateBytes = await loadShirtTemplate(serviceClient);
   return await createCorporateProfilePhoto(templateBytes, selfieBytes);
+}
+
+async function saveProfilePhotoInBackground(serviceClient: any, contractorId: number, selfieBytes: Uint8Array) {
+  const path = `contractor/${contractorId}/profile/generated/${crypto.randomUUID()}.jpg`;
+  let uploaded = false;
+  let fileId: string | null = null;
+  try {
+    console.info("profile_photo_processing", { contractorId });
+    const { data: before, error: beforeError } = await serviceClient.from("contractor")
+      .select("profile_photo_file_id").eq("id", contractorId).single();
+    if (beforeError) throw beforeError;
+    const bytes = await generateCorporateProfilePhoto(serviceClient, selfieBytes);
+    const upload = await serviceClient.storage.from(PROFILE_PHOTO_BUCKET)
+      .upload(path, bytes, { contentType: "image/jpeg", upsert: false });
+    if (upload.error) throw upload.error;
+    uploaded = true;
+    const { data: file, error: fileError } = await serviceClient.from("app_files").insert({
+      provider: "supabase", bucket: PROFILE_PHOTO_BUCKET, path,
+      original_name: "foto-perfil-empresarial.jpg", mime_type: "image/jpeg", size_bytes: bytes.byteLength,
+    }).select("id").single();
+    if (fileError) throw fileError;
+    fileId = file.id;
+    // Do not overwrite a photo changed while the provider was processing.
+    let update = serviceClient.from("contractor").update({ profile_photo_file_id: fileId }).eq("id", contractorId);
+    update = before.profile_photo_file_id
+      ? update.eq("profile_photo_file_id", before.profile_photo_file_id)
+      : update.is("profile_photo_file_id", null);
+    const { data: changed, error: updateError } = await update.select("id");
+    if (updateError || !changed?.length) throw new Error("photo_update_conflict");
+    console.info("profile_photo_completed", { contractorId });
+  } catch {
+    console.error("profile_photo_failed", { contractorId });
+    if (fileId) {
+      const cleanup = await serviceClient.from("app_files").delete().eq("id", fileId);
+      if (cleanup.error) {
+        console.error("profile_photo_cleanup_failed", { contractorId });
+        return;
+      }
+    }
+    if (uploaded) {
+      const cleanup = await serviceClient.storage.from(PROFILE_PHOTO_BUCKET).remove([path]);
+      if (cleanup.error) console.error("profile_photo_cleanup_failed", { contractorId });
+    }
+  }
 }
 
 function wrapText(text: string, font: any, fontSize: number, maxWidth: number) {
@@ -738,6 +783,10 @@ Deno.serve(async (req) => {
     if (action !== "submit") return jsonResponse({ error: "Accion no valida." }, 400);
 
     const payload = body?.payload ?? {};
+    const emergencyPhone = requireString(payload.emergencyContactPhone, "Telefono de emergencia").trim();
+    if (!/^3[0-9]{9}$/.test(emergencyPhone)) {
+      throw new Error("Telefono de emergencia: ingresa 10 digitos comenzando por 3. Ejemplo: 3001234567.");
+    }
     await requireRegistrationDetails(serviceClient, invite.contractor_id);
     if (!payload.acceptsDataPolicy) {
       throw new Error("Debes aceptar la politica de tratamiento de datos personales.");
@@ -755,8 +804,6 @@ Deno.serve(async (req) => {
     if (!Number.isFinite(civilStateId) || !Number.isFinite(transportTypeId) || !Number.isFinite(educationLevelId)) {
       throw new Error("Selecciona estado civil, transporte y grado de escolaridad.");
     }
-
-    const generatedBytes = await generateCorporateProfilePhoto(serviceClient, selfieBytes);
 
     const photoPath = `contractor/${invite.contractor_id}/profile/original/${crypto.randomUUID()}.jpg`;
     const upload = await serviceClient.storage
@@ -779,30 +826,6 @@ Deno.serve(async (req) => {
       });
     if (photoFileError) throw new Error(photoFileError.message);
 
-    const generatedPath = `contractor/${invite.contractor_id}/profile/generated/${crypto.randomUUID()}.jpg`;
-    const generatedUpload = await serviceClient.storage
-      .from(PROFILE_PHOTO_BUCKET)
-      .upload(generatedPath, generatedBytes, {
-        contentType: "image/jpeg",
-        upsert: false,
-      });
-    if (generatedUpload.error) throw new Error(generatedUpload.error.message);
-
-    const { data: generatedFile, error: generatedFileError } = await serviceClient
-      .from("app_files")
-      .insert({
-        provider: "supabase",
-        bucket: PROFILE_PHOTO_BUCKET,
-        path: generatedPath,
-        original_name: "foto-perfil-empresarial.jpg",
-        mime_type: "image/jpeg",
-        size_bytes: generatedBytes.byteLength,
-      })
-      .select("id")
-      .single();
-    if (generatedFileError) throw new Error(generatedFileError.message);
-    const profilePhotoFileId = generatedFile.id;
-
     const { data: policyFile } = await serviceClient
       .from("app_files")
       .select("id")
@@ -815,19 +838,16 @@ Deno.serve(async (req) => {
       .update({
         rh: requireString(payload.bloodType, "Tipo de sangre"),
         birth_date: requireString(payload.birthDate, "Fecha de nacimiento"),
-        birth_place: requireString(payload.birthPlace, "Lugar de nacimiento"),
+        birth_place: requireString(payload.birthPlace, "Lugar de nacimiento").trim().toUpperCase(),
         civil_state_id: civilStateId,
-        stratum: requireString(payload.stratum, "Estrato"),
-        phone_number: requireString(payload.phone, "Telefono"),
         type_transport_id: transportTypeId,
         education_level_id: educationLevelId,
         shirt_size: requireString(payload.shirtSize, "Talla de camisa"),
         pant_size: requireString(payload.pantSize, "Talla de pantalon"),
         shoe_size: requireString(payload.shoeSize, "Talla de zapatos"),
-        emergency_contact_name: requireString(payload.emergencyContactName, "Contacto de emergencia"),
-        emergency_contact_relationship: requireString(payload.emergencyContactRelationship, "Parentesco"),
-        emergency_contact_phone: requireString(payload.emergencyContactPhone, "Telefono de emergencia"),
-        profile_photo_file_id: profilePhotoFileId,
+        emergency_contact_name: requireString(payload.emergencyContactName, "Contacto de emergencia").trim().toUpperCase(),
+        emergency_contact_relationship: requireString(payload.emergencyContactRelationship, "Parentesco").trim().toUpperCase(),
+        emergency_contact_phone: emergencyPhone,
         data_policy_accepted_at: colombiaNow(),
       })
       .eq("id", invite.contractor_id);
@@ -855,7 +875,9 @@ Deno.serve(async (req) => {
       .eq("id", invite.id);
     if (inviteError) throw new Error(inviteError.message);
 
-    return jsonResponse({ ok: true, nextStep: "CONTRACT_SIGNATURE" });
+    // Start only after successful submission; errors never roll back onboarding.
+    EdgeRuntime.waitUntil(saveProfilePhotoInBackground(serviceClient, invite.contractor_id, selfieBytes));
+    return jsonResponse({ ok: true, nextStep: "CONTRACT_SIGNATURE", photoStatus: "PROCESSING" });
   } catch (error) {
     const message = error instanceof Error ? error.message : "No fue posible procesar el formulario.";
     return jsonResponse({ error: message }, 400);

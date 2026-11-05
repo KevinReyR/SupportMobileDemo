@@ -1219,7 +1219,7 @@ function PublicContractorOnboarding({ token }: { token: string }) {
   const [onboardingStepLabel, setOnboardingStepLabel] = useState("");
   const [calendarOpen, setCalendarOpen] = useState(false);
   const [picker, setPicker] = useState<
-    null | "blood" | "civil" | "transport" | "education" | "stratum" | "shirt" | "pant" | "shoe"
+    null | "blood" | "civil" | "transport" | "education" | "shirt" | "pant" | "shoe"
   >(null);
   const [selfieOpen, setSelfieOpen] = useState(false);
   const [selfieUri, setSelfieUri] = useState("");
@@ -1228,8 +1228,6 @@ function PublicContractorOnboarding({ token }: { token: string }) {
     birthDate: "",
     birthPlace: "",
     civilStateId: 0,
-    stratum: "",
-    phone: "",
     transportTypeId: 0,
     educationLevelId: 0,
     shirtSize: "",
@@ -1259,7 +1257,6 @@ function PublicContractorOnboarding({ token }: { token: string }) {
         civilStateId: current.civilStateId || nextForm.catalogs.civilStates[0]?.id || 0,
         transportTypeId: current.transportTypeId || nextForm.catalogs.transportTypes[0]?.id || 0,
         educationLevelId: current.educationLevelId || nextForm.catalogs.educationLevels[0]?.id || 0,
-        stratum: current.stratum || nextForm.catalogs.stratum[0] || "",
         shirtSize: current.shirtSize || nextForm.catalogs.shirtSizes[0] || "",
         pantSize: current.pantSize || nextForm.catalogs.pantSizes[0] || "",
         shoeSize: current.shoeSize || nextForm.catalogs.shoeSizes[0] || "",
@@ -1314,8 +1311,6 @@ function PublicContractorOnboarding({ token }: { token: string }) {
       fields.bloodType,
       fields.birthDate,
       fields.birthPlace,
-      fields.stratum,
-      fields.phone,
       fields.shirtSize,
       fields.pantSize,
       fields.shoeSize,
@@ -1325,6 +1320,12 @@ function PublicContractorOnboarding({ token }: { token: string }) {
     ];
     if (requiredText.some((value) => !String(value).trim()) || !fields.civilStateId || !fields.transportTypeId || !fields.educationLevelId) {
       showMessage("Completa el formulario", "Todos los campos son obligatorios.");
+      return;
+    }
+    if (!/^3[0-9]{9}$/.test(fields.emergencyContactPhone.trim())) {
+      const message = "Telefono de emergencia: ingresa 10 digitos comenzando por 3. Ejemplo: 3001234567.";
+      setSubmitError(message);
+      showMessage("Telefono de emergencia no valido", message);
       return;
     }
     if (!selfieUri) {
@@ -1461,12 +1462,6 @@ function PublicContractorOnboarding({ token }: { token: string }) {
       selectedId: fields.educationLevelId,
       onSelect: (id: number) => update("educationLevelId", id),
     },
-    stratum: {
-      title: "Estrato",
-      options: stringOptions(form.catalogs.stratum),
-      selectedId: currentStringId(form.catalogs.stratum, fields.stratum),
-      onSelect: (id: number) => update("stratum", form.catalogs.stratum[id - 1] ?? ""),
-    },
     shirt: {
       title: "Talla de camisa",
       options: stringOptions(form.catalogs.shirtSizes),
@@ -1505,13 +1500,8 @@ function PublicContractorOnboarding({ token }: { token: string }) {
             <Choice label="Tipo de sangre *" value={fields.bloodType} icon="water-outline" onPress={() => setPicker("blood")} />
             <Choice label="Fecha de nacimiento *" value={fields.birthDate || "Selecciona fecha"} icon="calendar-outline" onPress={() => setCalendarOpen(true)} />
             <Label text="Lugar de nacimiento *" />
-            <Input icon="location-outline" value={fields.birthPlace} onChangeText={(value) => update("birthPlace", value)} autoCapitalize="words" />
+            <Input icon="location-outline" value={fields.birthPlace} onChangeText={(value) => update("birthPlace", value.toUpperCase())} autoCapitalize="characters" />
             <Choice label="Estado civil *" value={selectedName(form.catalogs.civilStates, fields.civilStateId)} icon="heart-outline" onPress={() => setPicker("civil")} />
-          </FormCard>
-          <FormCard title="Contacto">
-            <Choice label="Estrato *" value={fields.stratum} icon="layers-outline" onPress={() => setPicker("stratum")} />
-            <Label text="Teléfono *" />
-            <Input icon="call-outline" value={fields.phone} onChangeText={(value) => update("phone", value)} keyboardType="phone-pad" />
           </FormCard>
           <FormCard title="Información laboral y logística">
             <Choice label="Medio de transporte *" value={selectedName(form.catalogs.transportTypes, fields.transportTypeId)} icon="car-outline" onPress={() => setPicker("transport")} />
@@ -1522,11 +1512,12 @@ function PublicContractorOnboarding({ token }: { token: string }) {
           </FormCard>
           <FormCard title="Contacto de emergencia">
             <Label text="Nombre *" />
-            <Input icon="person-outline" value={fields.emergencyContactName} onChangeText={(value) => update("emergencyContactName", value)} autoCapitalize="words" />
+            <Input icon="person-outline" value={fields.emergencyContactName} onChangeText={(value) => update("emergencyContactName", value.toUpperCase())} autoCapitalize="characters" />
             <Label text="Parentesco *" />
-            <Input icon="people-outline" value={fields.emergencyContactRelationship} onChangeText={(value) => update("emergencyContactRelationship", value)} autoCapitalize="words" />
+            <Input icon="people-outline" value={fields.emergencyContactRelationship} onChangeText={(value) => update("emergencyContactRelationship", value.toUpperCase())} autoCapitalize="characters" />
             <Label text="Teléfono *" />
             <Input icon="call-outline" value={fields.emergencyContactPhone} onChangeText={(value) => update("emergencyContactPhone", value)} keyboardType="phone-pad" />
+            {!!fields.emergencyContactPhone && !/^3[0-9]{9}$/.test(fields.emergencyContactPhone.trim()) && <Text style={{ color: C.red }}>Ingresa 10 digitos comenzando por 3. Ejemplo: 3001234567.</Text>}
           </FormCard>
           <FormCard title="Foto de perfil">
             <Notice icon="camera-outline" text="Tómate una foto frontal, con buena luz y el rostro centrado. Esta será tu foto de perfil." />
@@ -4345,17 +4336,44 @@ function missingRegistrationDetails(details: ContractorRegistrationDetails): str
 function ContractorRegistrationFields({
   details,
   onChange,
+  onValidation,
 }: {
   details: ContractorRegistrationDetails;
   onChange: (details: ContractorRegistrationDetails) => void;
+  onValidation: (errors: string[]) => void;
 }) {
-  const [picker, setPicker] = useState<"department" | "city" | null>(null);
+  const [picker, setPicker] = useState<"department" | "city" | "pensionFund" | "eps" | null>(null);
+  const [catalogs, setCatalogs] = useState<{ pensionFund: string[]; eps: string[] } | null>(null);
+  const [catalogError, setCatalogError] = useState("");
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    let active = true;
+    setCatalogs(null);
+    setCatalogError("");
+    Promise.all([
+      supabase.from("pension_funds").select("name").eq("is_active", true).order("id"),
+      supabase.from("health_insurers").select("name").eq("is_active", true).order("id"),
+    ]).then(([funds, insurers]) => {
+      if (!active) return;
+      if (funds.error || insurers.error || !funds.data?.length || !insurers.data?.length) {
+        setCatalogError("No se pudieron cargar pensiones y EPS. Reintenta antes de guardar.");
+        return;
+      }
+      setCatalogs({ pensionFund: funds.data.map((row) => row.name), eps: insurers.data.map((row) => row.name) });
+    }).catch(() => { if (active) setCatalogError("No se pudieron cargar pensiones y EPS. Reintenta antes de guardar."); });
+    return () => { active = false; };
+  }, [retry]);
+  const pensionError = catalogs && !catalogs.pensionFund.includes(details.pensionFund) ? "Fondo de pensiones: selecciona una opcion activa del catalogo." : "";
+  const epsError = catalogs && !catalogs.eps.includes(details.eps) ? "EPS: selecciona una opcion activa del catalogo." : "";
+  useEffect(() => {
+    onValidation(!catalogs ? [catalogError || "Espera la carga de pensiones y EPS."] : [pensionError, epsError].filter(Boolean));
+  }, [catalogs, catalogError, pensionError, epsError, onValidation]);
   const departments = Array.from(COLOMBIA_DEPARTMENTS);
   const cities = details.residenceDepartment
     ? COLOMBIA_MUNICIPALITIES_BY_DEPARTMENT[details.residenceDepartment] ?? []
     : [];
-  const options = picker === "department" ? departments : cities;
-  const selected = picker === "department" ? details.residenceDepartment : details.residenceCity;
+  const options = picker === "department" ? departments : picker === "pensionFund" || picker === "eps" ? catalogs?.[picker] ?? [] : cities;
+  const selected = picker === "department" ? details.residenceDepartment : picker === "pensionFund" || picker === "eps" ? details[picker] : details.residenceCity;
   const update = (key: keyof ContractorRegistrationDetails, value: string) => onChange({ ...details, [key]: value });
 
   return (
@@ -4364,16 +4382,18 @@ function ContractorRegistrationFields({
       <Choice label="Ciudad *" value={details.residenceCity || (details.residenceDepartment ? "Selecciona ciudad" : "Selecciona departamento primero")}
         icon="business-outline" disabled={!details.residenceDepartment || !cities.length} onPress={() => setPicker("city")} />
       <Label text="Barrio *" />
-      <Input icon="location-outline" value={details.neighborhood} onChangeText={(value) => update("neighborhood", value)} autoCapitalize="words" />
+      <Input icon="location-outline" value={details.neighborhood} onChangeText={(value) => update("neighborhood", value.toUpperCase())} autoCapitalize="characters" />
       <Label text="Dirección *" />
       <Input icon="home-outline" value={details.address} onChangeText={(value) => update("address", value)} />
-      <Label text="Fondo de pensiones *" />
-      <Input icon="business-outline" value={details.pensionFund} onChangeText={(value) => update("pensionFund", value)} autoCapitalize="words" />
-      <Label text="EPS *" />
-      <Input icon="medkit-outline" value={details.eps} onChangeText={(value) => update("eps", value)} autoCapitalize="words" />
+      <Choice label="Fondo de pensiones *" value={details.pensionFund || "Selecciona una opcion"} icon="business-outline" disabled={!catalogs} onPress={() => setPicker("pensionFund")} />
+      {!!pensionError && <Text style={{ color: "#b42318" }}>{pensionError}</Text>}
+      <Choice label="EPS *" value={details.eps || "Selecciona una opcion"} icon="medkit-outline" disabled={!catalogs} onPress={() => setPicker("eps")} />
+      {!!epsError && <Text style={{ color: "#b42318" }}>{epsError}</Text>}
+      {!catalogs && <Text style={{ color: "#b42318" }}>{catalogError || "Cargando pensiones y EPS..."}</Text>}
+      {!!catalogError && <Pressable onPress={() => setRetry((value) => value + 1)}><Text>Reintentar carga de catalogos</Text></Pressable>}
       <DropdownModal
         visible={picker !== null}
-        title={picker === "department" ? "Departamento de residencia" : "Ciudad de residencia"}
+        title={picker === "department" ? "Departamento de residencia" : picker === "pensionFund" ? "Fondo de pensiones" : picker === "eps" ? "EPS" : "Ciudad de residencia"}
         options={options.map((name, index) => ({ id: index + 1, name }))}
         selectedId={Math.max(0, options.indexOf(selected) + 1)}
         searchable
@@ -4381,7 +4401,7 @@ function ContractorRegistrationFields({
         onSelect={(id) => {
           const value = options[id - 1] ?? "";
           if (picker === "department") onChange({ ...details, residenceDepartment: value, residenceCity: "" });
-          else update("residenceCity", value);
+          else update(picker === "pensionFund" || picker === "eps" ? picker : "residenceCity", value);
           setPicker(null);
         }}
       />
@@ -4479,6 +4499,13 @@ function CreateContractor({
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
   const [registrationDetails, setRegistrationDetails] = useState(emptyContractorRegistrationDetails);
+  const [catalogErrors, setCatalogErrors] = useState<string[]>(["Espera la carga de pensiones y EPS."]);
+  const [attempted, setAttempted] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const nameError = !name.trim() ? "Nombres: campo obligatorio." : "";
+  const lastNameError = !lastName.trim() ? "Apellidos: campo obligatorio." : "";
+  const phoneError = !/^3[0-9]{9}$/.test(phone.trim()) ? "Telefono: ingresa 10 digitos comenzando por 3. Ejemplo: 3001234567." : "";
+  const emailError = !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()) ? "Correo: ingresa una direccion como elcorreo@dominio.com." : "";
   const [cedulaPdf, setCedulaPdf] = useState<ContractorPdfFile | null>(null);
   const [selectorOpen, setSelectorOpen] = useState(false);
   const [birthDateCalendarOpen, setBirthDateCalendarOpen] = useState(false);
@@ -4544,6 +4571,15 @@ function CreateContractor({
 
   const save = async () => {
     const normalizedEmail = email.trim().toLowerCase();
+    setAttempted(true);
+    setSaveError("");
+    const validation = [nameError, lastNameError, phoneError, emailError, ...catalogErrors,
+      ...missingRegistrationDetails(registrationDetails).map((field) => `${field}: completa o corrige este campo.`),
+      ...(!documentTypeId || !documentNumber.trim() ? ["Completa tipo y numero de documento."] : []),
+      ...(!birthDate ? ["Selecciona fecha de nacimiento."] : []),
+      ...(!cedulaPdf ? ["Adjunta la cedula en PDF."] : []),
+    ].filter(Boolean);
+    if (validation.length) { setSaveError(validation.join("\n")); return; }
     const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail);
     if (!documentTypeId || !documentNumber.trim() || !name.trim() || !lastName.trim() || !birthDate || !phone.trim() || !normalizedEmail) {
       Alert.alert("Completa el contratista", "Todos los campos son obligatorios en esta fase.");
@@ -4567,8 +4603,8 @@ function CreateContractor({
       const contractorId = await createContractorDraft({
         documentTypeId,
         documentNumber,
-        name,
-        lastName,
+        name: name.trim().toUpperCase(),
+        lastName: lastName.trim().toUpperCase(),
         birthDate,
         phone,
         email: normalizedEmail,
@@ -4578,6 +4614,7 @@ function CreateContractor({
       Alert.alert("Contratista creado", "El contrato quedó PENDIENTE hasta que el Director adjunte el Certificado ARL.");
       await onSaved(contractorId);
     } catch (cause) {
+      setSaveError(errorMessage(cause));
       Alert.alert("No fue posible crear", errorMessage(cause));
     } finally {
       setSaving(false);
@@ -4601,9 +4638,11 @@ function CreateContractor({
         <Label text="Documento *" />
         <Input icon="document-text-outline" value={documentNumber} onChangeText={setDocumentNumber} keyboardType="number-pad" />
         <Label text="Nombres *" />
-        <Input icon="person-outline" value={name} onChangeText={setName} autoCapitalize="words" />
+        <Input icon="person-outline" value={name} onChangeText={(value) => setName(value.toUpperCase())} autoCapitalize="characters" />
+        {attempted && !!nameError && <Text style={{ color: "#b42318" }}>{nameError}</Text>}
         <Label text="Apellidos *" />
-        <Input icon="person-outline" value={lastName} onChangeText={setLastName} autoCapitalize="words" />
+        <Input icon="person-outline" value={lastName} onChangeText={(value) => setLastName(value.toUpperCase())} autoCapitalize="characters" />
+        {attempted && !!lastNameError && <Text style={{ color: "#b42318" }}>{lastNameError}</Text>}
         <Choice
           label="Fecha de nacimiento *"
           value={birthDate || "Selecciona fecha"}
@@ -4612,11 +4651,14 @@ function CreateContractor({
         />
         <Label text="Teléfono *" />
         <Input icon="call-outline" value={phone} onChangeText={setPhone} keyboardType="phone-pad" />
+        {attempted && !!phoneError && <Text style={{ color: "#b42318" }}>{phoneError}</Text>}
         <Label text="Correo *" />
         <Input icon="mail-outline" value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" />
+        {attempted && !!emailError && <Text style={{ color: "#b42318" }}>{emailError}</Text>}
       </FormCard>
       <FormCard title="Residencia y seguridad social">
-        <ContractorRegistrationFields details={registrationDetails} onChange={setRegistrationDetails} />
+        <ContractorRegistrationFields details={registrationDetails} onChange={setRegistrationDetails} onValidation={setCatalogErrors} />
+        {attempted && !registrationDetails.neighborhood.trim() && <Text style={{ color: "#b42318" }}>Barrio: campo obligatorio.</Text>}
       </FormCard>
       <FormCard title="Documento obligatorio">
         <Pressable style={styles.uploadCard} onPress={() => setCedulaSourceOpen(true)}>
@@ -4636,6 +4678,7 @@ function CreateContractor({
           <Ionicons name="cloud-upload-outline" size={20} color={C.navy} />
         </Pressable>
       </FormCard>
+      {!!saveError && <Text accessibilityRole="alert" style={{ color: "#b42318" }}>{saveError}</Text>}
       <PrimaryButton label={saving ? "Creando..." : "Guardar contratista"} icon="save-outline" disabled={saving} onPress={save} />
       <DropdownModal
         visible={selectorOpen}
@@ -5543,6 +5586,8 @@ function ContractorRegistrationDetailsModal({
   onSaved: () => Promise<void>;
 }) {
   const [details, setDetails] = useState(emptyContractorRegistrationDetails);
+  const [catalogErrors, setCatalogErrors] = useState<string[]>(["Espera la carga de pensiones y EPS."]);
+  const [detailsError, setDetailsError] = useState("");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -5559,6 +5604,11 @@ function ContractorRegistrationDetailsModal({
 
   const save = async () => {
     const missing = missingRegistrationDetails(details);
+    setDetailsError("");
+    if (catalogErrors.length || missing.length) {
+      setDetailsError([...catalogErrors, ...missing.map((field) => `${field}: completa o corrige este campo.`)].join("\n"));
+      return;
+    }
     if (missing.length) {
       Alert.alert("Completa los datos", `Faltan: ${missing.join(", ")}.`);
       return;
@@ -5568,6 +5618,7 @@ function ContractorRegistrationDetailsModal({
       await completeContractorRegistrationDetails(contractor.id, details);
       await onSaved();
     } catch (cause) {
+      setDetailsError(errorMessage(cause));
       Alert.alert("No fue posible guardar", errorMessage(cause));
     } finally {
       setSaving(false);
@@ -5576,7 +5627,8 @@ function ContractorRegistrationDetailsModal({
 
   return (
     <AdminModalShell visible={visible} title="Residencia y seguridad social" saving={saving} onClose={onClose} onSave={save}>
-      <ContractorRegistrationFields details={details} onChange={setDetails} />
+      <ContractorRegistrationFields details={details} onChange={setDetails} onValidation={setCatalogErrors} />
+      {!!detailsError && <Text accessibilityRole="alert" style={{ color: "#b42318" }}>{detailsError}</Text>}
     </AdminModalShell>
   );
 }
