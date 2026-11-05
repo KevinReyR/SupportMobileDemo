@@ -706,8 +706,6 @@ export interface ContractorOnboardingSubmission {
   birthDate: string;
   birthPlace: string;
   civilStateId: number;
-  stratum: string;
-  phone: string;
   transportTypeId: number;
   educationLevelId: number;
   shirtSize: string;
