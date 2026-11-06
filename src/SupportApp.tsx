@@ -7853,7 +7853,7 @@ function DirectorReportTabContent({
 }
 
 function reportPercentChange(current: number, previous: number) {
-  if (previous === 0) return current === 0 ? 0 : 100;
+  if (previous === 0) return current === 0 ? 0 : null;
   return ((current - previous) * 100) / Math.abs(previous);
 }
 
@@ -7871,17 +7871,17 @@ function DirectorReportMetricCard({
   value: string;
   icon: IconName;
   color: string;
-  delta: number;
+  delta: number | null;
   deltaUnit: "pp" | "%";
   series?: number[];
   width: number | `${number}%`;
 }) {
-  const positive = delta >= 0;
-  const directionColor = positive ? C.green : C.red;
+  const positive = delta !== null && delta >= 0;
+  const directionColor = delta === null ? C.muted : positive ? C.green : C.red;
   return (
     <View
       accessible
-      accessibilityLabel={`${title}: ${value}. ${formatNumber(Math.abs(delta))} ${deltaUnit === "pp" ? "puntos porcentuales" : "por ciento"} ${positive ? "más" : "menos"} que el período anterior.`}
+      accessibilityLabel={delta === null ? `${title}: ${value}. Sin base de comparación.` : `${title}: ${value}. ${formatNumber(Math.abs(delta))} ${deltaUnit === "pp" ? "puntos porcentuales" : "por ciento"} ${positive ? "más" : "menos"} que el período anterior.`}
       style={[styles.reportMetricCard, { width }]}
     >
       <View style={styles.reportMetricHeader}>
@@ -7894,8 +7894,8 @@ function DirectorReportMetricCard({
         {value}
       </Text>
       <View style={styles.reportMetricDeltaRow}>
-        <Ionicons name={positive ? "arrow-up" : "arrow-down"} size={14} color={directionColor} />
-        <Text style={[styles.reportMetricDelta, { color: directionColor }]}>{formatNumber(Math.abs(delta))}{deltaUnit}</Text>
+        {delta !== null && <Ionicons name={positive ? "arrow-up" : "arrow-down"} size={14} color={directionColor} />}
+        <Text style={[styles.reportMetricDelta, { color: directionColor }]}>{delta === null ? "Sin base de comparación" : `${formatNumber(Math.abs(delta))}${deltaUnit}`}</Text>
       </View>
       <Text style={styles.reportMetricDeltaCaption}>vs. período anterior</Text>
       {series && series.length > 0 ? <DirectorReportSparkline values={series} color={color} /> : <View style={styles.reportMetricChartSpacer} />}
