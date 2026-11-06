@@ -1,6 +1,8 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { missingContractorRegistrationDetails } from "../_shared/contractor-details.ts";
 import { PDFDocument, StandardFonts, rgb } from "https://esm.sh/pdf-lib@1.17.1";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
+import { createIndependentPendingPdf, signIndependentPendingPdf } from "../_shared/independent-contract.mjs";
 import { createCorporateProfilePhoto } from "../_shared/profile-photo.ts";
 import {
   colombiaNow,
@@ -13,10 +15,13 @@ import {
 } from "../_shared/onboarding.ts";
 
 const MAX_SELFIE_BYTES = 2_097_152;
+declare const EdgeRuntime: { waitUntil(task: Promise<unknown>): void };
 const CONTRACTOR_DOCUMENT_BUCKET = "contractor-documents";
 const PENDING_CONTRACT_DOCUMENT_CODE = "CONTRATO_PENDIENTE";
 const SIGNED_CONTRACT_DOCUMENT_CODE = "CONTRATO_FIRMADO";
 const CONTRACT_TEMPLATE_PATH = "templates/plantilla_contrato_contratistas_supportV2_acroform.pdf";
+const INDEPENDENT_CONTRACT_TEMPLATE_PATH = "templates/Formato_contrato_support_contratistas_2026.pdf";
+const INDEPENDENT_PENDING_NAME = "contrato-operativo-2026-pendiente.pdf";
 const CONTRACT_ACCEPTANCE_TEXT =
   "El firmante declaró haber leído, entendido y aceptado el contenido del documento antes de firmar";
 const ACCEPTANCE_TEXT =
@@ -25,6 +30,7 @@ const ACCEPTANCE_TEXT =
 type InviteRow = {
   id: string;
   contractor_id: number;
+  contractor_contract_id: number;
   email: string;
   status: string;
   expires_at: string;
@@ -222,6 +228,50 @@ async function generateCorporateProfilePhoto(serviceClient: any, selfieBytes: Ui
   return await createCorporateProfilePhoto(templateBytes, selfieBytes);
 }
 
+async function saveProfilePhotoInBackground(serviceClient: any, contractorId: number, selfieBytes: Uint8Array) {
+  const path = `contractor/${contractorId}/profile/generated/${crypto.randomUUID()}.jpg`;
+  let uploaded = false;
+  let fileId: string | null = null;
+  try {
+    console.info("profile_photo_processing", { contractorId });
+    const { data: before, error: beforeError } = await serviceClient.from("contractor")
+      .select("profile_photo_file_id").eq("id", contractorId).single();
+    if (beforeError) throw beforeError;
+    const bytes = await generateCorporateProfilePhoto(serviceClient, selfieBytes);
+    const upload = await serviceClient.storage.from(PROFILE_PHOTO_BUCKET)
+      .upload(path, bytes, { contentType: "image/jpeg", upsert: false });
+    if (upload.error) throw upload.error;
+    uploaded = true;
+    const { data: file, error: fileError } = await serviceClient.from("app_files").insert({
+      provider: "supabase", bucket: PROFILE_PHOTO_BUCKET, path,
+      original_name: "foto-perfil-empresarial.jpg", mime_type: "image/jpeg", size_bytes: bytes.byteLength,
+    }).select("id").single();
+    if (fileError) throw fileError;
+    fileId = file.id;
+    // Do not overwrite a photo changed while the provider was processing.
+    let update = serviceClient.from("contractor").update({ profile_photo_file_id: fileId }).eq("id", contractorId);
+    update = before.profile_photo_file_id
+      ? update.eq("profile_photo_file_id", before.profile_photo_file_id)
+      : update.is("profile_photo_file_id", null);
+    const { data: changed, error: updateError } = await update.select("id");
+    if (updateError || !changed?.length) throw new Error("photo_update_conflict");
+    console.info("profile_photo_completed", { contractorId });
+  } catch {
+    console.error("profile_photo_failed", { contractorId });
+    if (fileId) {
+      const cleanup = await serviceClient.from("app_files").delete().eq("id", fileId);
+      if (cleanup.error) {
+        console.error("profile_photo_cleanup_failed", { contractorId });
+        return;
+      }
+    }
+    if (uploaded) {
+      const cleanup = await serviceClient.storage.from(PROFILE_PHOTO_BUCKET).remove([path]);
+      if (cleanup.error) console.error("profile_photo_cleanup_failed", { contractorId });
+    }
+  }
+}
+
 function wrapText(text: string, font: any, fontSize: number, maxWidth: number) {
   const words = text.split(/\s+/).filter(Boolean);
   const lines: string[] = [];
@@ -239,13 +289,9 @@ function wrapText(text: string, font: any, fontSize: number, maxWidth: number) {
   return lines;
 }
 
-async function createContractPdf(
+async function createLegacyContractPdf(
   serviceClient: any,
   contract: Record<string, string>,
-  signature?: {
-    bytes: Uint8Array;
-    evidenceLines: string[];
-  },
 ) {
   const { data, error } = await serviceClient.storage.from(POLICY_BUCKET).download(CONTRACT_TEMPLATE_PATH);
   if (error || !data) {
@@ -254,9 +300,7 @@ async function createContractPdf(
 
   const pdf = await PDFDocument.load(new Uint8Array(await data.arrayBuffer()));
   const regular = await pdf.embedFont(StandardFonts.Helvetica);
-  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
   const form = pdf.getForm();
-  const pages = pdf.getPages();
   const contractFieldFontSize = 19;
 
   const setTextField = (name: string, value: string) => {
@@ -314,31 +358,33 @@ async function createContractPdf(
   form.updateFieldAppearances(regular);
   form.flatten();
 
-  if (signature) {
-    const page = pages[4];
-    if (!page) throw new Error("La pagina de firma no esta disponible en la plantilla.");
-    const embeddedSignature = await pdf.embedPng(signature.bytes);
-    const signatureY = 126;
-    page.drawImage(embeddedSignature, { x: 153.9, y: signatureY, width: 250, height: 82 });
-    let evidenceY = 200;
-    const evidenceX = Math.min(page.getWidth() - 170, 650);
-    const evidenceWidth = Math.max(120, page.getWidth() - evidenceX - 24);
-    page.drawText("Evidencia de firma", { x: evidenceX, y: evidenceY, size: 13, font: bold, color: rgb(0.08, 0.16, 0.35) });
-    evidenceY -= 16;
-    for (const line of signature.evidenceLines) {
-      const evidenceWrapped = wrapText(line, regular, 10, evidenceWidth);
-      for (const evidenceLine of evidenceWrapped) {
-        if (evidenceY < 40) break;
-        page.drawText(evidenceLine, { x: evidenceX, y: evidenceY, size: 10, font: regular, color: rgb(0.08, 0.13, 0.22) });
-        evidenceY -= 12;
-      }
-    }
-  }
-
   return await pdf.save();
 }
 
-async function getContractValues(serviceClient: any, contractorId: number, inviteEmail: string) {
+async function signLegacyPendingPdf(pendingBytes: Uint8Array, signatureBytes: Uint8Array, evidenceLines: string[]) {
+  const pdf = await PDFDocument.load(pendingBytes);
+  const page = pdf.getPages()[4];
+  if (!page) throw new Error("La pagina de firma no esta disponible en la plantilla anterior.");
+  const regular = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const embeddedSignature = await pdf.embedPng(signatureBytes);
+  page.drawImage(embeddedSignature, { x: 153.9, y: 126, width: 250, height: 82 });
+  let evidenceY = 200;
+  const evidenceX = Math.min(page.getWidth() - 170, 650);
+  const evidenceWidth = Math.max(120, page.getWidth() - evidenceX - 24);
+  page.drawText("Evidencia de firma", { x: evidenceX, y: evidenceY, size: 13, font: bold, color: rgb(0.08, 0.16, 0.35) });
+  evidenceY -= 16;
+  for (const line of evidenceLines) {
+    for (const evidenceLine of wrapText(line, regular, 10, evidenceWidth)) {
+      if (evidenceY < 40) break;
+      page.drawText(evidenceLine, { x: evidenceX, y: evidenceY, size: 10, font: regular, color: rgb(0.08, 0.13, 0.22) });
+      evidenceY -= 12;
+    }
+  }
+  return await pdf.save();
+}
+
+async function getContractValues(serviceClient: any, contractorId: number, inviteEmail: string, contractId: number) {
   const { data: contractor, error: contractorError } = await serviceClient
     .from("contractor")
     .select("id,name,last_name,document_number,address,phone_number,email,document_type(name)")
@@ -348,13 +394,26 @@ async function getContractValues(serviceClient: any, contractorId: number, invit
 
   const { data: currentContract, error: contractError } = await serviceClient
     .from("contractor_contract")
-    .select("id,start_date,end_date")
+    .select("id,contract_type,start_date,end_date")
     .eq("contractor_id", contractorId)
+    .eq("id", contractId)
     .order("start_date", { ascending: false })
     .order("id", { ascending: false })
     .limit(1)
     .maybeSingle();
   if (contractError) throw new Error(contractError.message);
+  if (!currentContract) throw new Error("El contrato de esta invitacion no existe.");
+
+  let contractTypeName = "";
+  if (currentContract?.contract_type) {
+    const { data: contractType, error: typeError } = await serviceClient
+      .from("contract_type")
+      .select("name")
+      .eq("id", currentContract.contract_type)
+      .single();
+    if (typeError) throw new Error(typeError.message);
+    contractTypeName = contractType.name.toLocaleUpperCase("es-CO");
+  }
 
   const startDate = currentContract?.start_date ?? todayColombiaDate();
   const endDate = currentContract?.end_date ?? addMonthsMinusOneDay(startDate, 1);
@@ -366,6 +425,15 @@ async function getContractValues(serviceClient: any, contractorId: number, invit
 
   return {
     contractorContractId: currentContract?.id ?? null,
+    contractTypeName,
+    independentValues: {
+      name: contractorFullName,
+      documentType: firstRelation<{ name?: string }>(contractor.document_type)?.name ?? "",
+      documentNumber: contractor.document_number ?? "",
+      address: contractor.address ?? "",
+      phone: contractor.phone_number ?? "",
+      email: contractor.email ?? inviteEmail,
+    },
     values: {
       nombrecontratista: contractorFullName,
       tipodocumentocontratista: firstRelation<{ name?: string }>(contractor.document_type)?.name ?? "cedula de ciudadania",
@@ -440,6 +508,7 @@ async function registerSignedContractDocument(
   serviceClient: any,
   contractorId: number,
   fileId: string,
+  contractId: number,
 ) {
   const { data: documentType, error: typeError } = await serviceClient
     .from("contractor_document_types")
@@ -455,19 +524,32 @@ async function registerSignedContractDocument(
       contractor_id: contractorId,
       document_type_id: documentType.id,
       file_id: fileId,
+      contractor_contract_id: contractId,
     }, { onConflict: "file_id" });
   if (error) throw new Error(error.message);
 }
 
 async function createPendingContract(serviceClient: any, invite: InviteRow) {
-  const contract = await getContractValues(serviceClient, invite.contractor_id, invite.email);
-  const pdfBytes = await createContractPdf(serviceClient, contract.values);
+  const contract = await getContractValues(serviceClient, invite.contractor_id, invite.email, invite.contractor_contract_id);
+  const useIndependentTemplate = ["SOLO ARL", "PAQUETE COMPLETO"].includes(contract.contractTypeName);
+  let pdfBytes: Uint8Array;
+  if (useIndependentTemplate) {
+    const { data, error } = await serviceClient.storage.from(POLICY_BUCKET).download(INDEPENDENT_CONTRACT_TEMPLATE_PATH);
+    if (error || !data) {
+      throw new Error(`No fue posible cargar la nueva plantilla del contrato: ${error?.message ?? "archivo no disponible"}`);
+    }
+    pdfBytes = await createIndependentPendingPdf(new Uint8Array(await data.arrayBuffer()), contract.independentValues, {
+      PDFDocument, StandardFonts, rgb,
+    });
+  } else {
+    pdfBytes = await createLegacyContractPdf(serviceClient, contract.values);
+  }
   const fileId = await uploadContractPdfArtifact(
     serviceClient,
     invite.contractor_id,
     PENDING_CONTRACT_DOCUMENT_CODE,
     pdfBytes,
-    "contrato-pendiente-firma.pdf",
+    useIndependentTemplate ? INDEPENDENT_PENDING_NAME : "contrato-pendiente-firma.pdf",
   );
 
   const { error } = await serviceClient
@@ -488,11 +570,17 @@ async function getInvite(serviceClient: any, token: string, allowedStatuses = ["
   const tokenHash = await sha256Hex(token);
   const { data, error } = await serviceClient
     .from("contractor_onboarding_invites")
-    .select("id,contractor_id,email,status,expires_at,contractor(name,last_name,document_number)")
+    .select("id,contractor_id,contractor_contract_id,email,status,expires_at,contractor(name,last_name,document_number)")
     .eq("token_hash", tokenHash)
-    .maybeSingle<InviteRow>();
+    .maybeSingle();
   if (error) throw new Error(error.message);
   if (!data) throw new Error("El enlace no es valido.");
+  if (!data.contractor_contract_id) throw new Error("Solicita una nueva invitacion al Director.");
+  const boundContract = await serviceClient.from("contractor_contract")
+    .select("id,contract_status(name)").eq("id", data.contractor_contract_id).eq("contractor_id", data.contractor_id).single();
+  if (boundContract.error || firstRelation<{ name: string }>(boundContract.data?.contract_status)?.name.toUpperCase() !== "ACTIVO") {
+    throw new Error("El contrato de esta invitacion ya no esta activo.");
+  }
   if (!allowedStatuses.includes(data.status)) throw new Error("Este enlace ya fue utilizado o no esta disponible.");
   if (data.expires_at < colombiaNow()) {
     await serviceClient
@@ -502,6 +590,18 @@ async function getInvite(serviceClient: any, token: string, allowedStatuses = ["
     throw new Error("El enlace ya vencio. Solicita uno nuevo a Support Colombia.");
   }
   return data;
+}
+
+async function requireRegistrationDetails(serviceClient: any, contractorId: number) {
+  const { data, error } = await serviceClient.from("contractor")
+    .select("residence_department,residence_city,neighborhood,address,pension_fund,eps")
+    .eq("id", contractorId)
+    .single();
+  if (error) throw new Error(error.message);
+  const missing = missingContractorRegistrationDetails(data);
+  if (missing.length) {
+    throw new Error(`Support Colombia debe completar estos datos antes de continuar: ${missing.join(", ")}.`);
+  }
 }
 
 Deno.serve(async (req) => {
@@ -528,6 +628,9 @@ Deno.serve(async (req) => {
     const invite = await getInvite(serviceClient, token, allowedStatuses);
 
     if (action === "get") {
+      if (invite.status === "PENDING") {
+        await requireRegistrationDetails(serviceClient, invite.contractor_id);
+      }
       const [civilStates, transportTypes, educationLevels, policyFile] = await Promise.all([
         serviceClient.from("civil_state_type").select("id,name").order("id"),
         serviceClient.from("transport_type").select("id,name").order("id"),
@@ -604,7 +707,19 @@ Deno.serve(async (req) => {
         throw new Error("Debes permitir la ubicacion para firmar el contrato.");
       }
 
-      const contract = await getContractValues(serviceClient, invite.contractor_id, invite.email);
+      const { data: pendingContract, error: pendingError } = await serviceClient
+        .from("contractor_contract_signatures")
+        .select("contractor_contract_id,app_files:unsigned_contract_file_id(bucket,path,original_name)")
+        .eq("invite_id", invite.id)
+        .single();
+      if (pendingError) throw new Error(pendingError.message);
+      const pendingFile = firstRelation<{ bucket?: string; path?: string; original_name?: string }>(pendingContract.app_files);
+      if (!pendingFile?.bucket || !pendingFile?.path) throw new Error("El contrato pendiente no está disponible.");
+      const { data: pendingPdf, error: downloadError } = await serviceClient.storage
+        .from(pendingFile.bucket)
+        .download(pendingFile.path);
+      if (downloadError || !pendingPdf) throw new Error(`No fue posible cargar el contrato revisado: ${downloadError?.message ?? "archivo no disponible"}`);
+      const pendingBytes = new Uint8Array(await pendingPdf.arrayBuffer());
       const signedAt = colombiaNow();
       const ipAddress = req.headers.get("x-forwarded-for") ?? null;
       const userAgent = req.headers.get("user-agent") ?? evidence.userAgent ?? null;
@@ -618,7 +733,11 @@ Deno.serve(async (req) => {
         `Precision: ${Number.isFinite(Number(evidence.location?.accuracy)) ? `${evidence.location?.accuracy} m` : "No disponible"}`,
         CONTRACT_ACCEPTANCE_TEXT,
       ];
-      const signedPdfBytes = await createContractPdf(serviceClient, contract.values, { bytes: signatureBytes, evidenceLines });
+      const signedPdfBytes = pendingFile.original_name === INDEPENDENT_PENDING_NAME
+        ? await signIndependentPendingPdf(pendingBytes, signatureBytes, evidenceLines, signedAt.slice(0, 10), {
+          PDFDocument, StandardFonts, rgb,
+        })
+        : await signLegacyPendingPdf(pendingBytes, signatureBytes, evidenceLines);
       const signatureFileId = await uploadContractSignatureArtifact(
         serviceClient,
         invite.contractor_id,
@@ -631,12 +750,12 @@ Deno.serve(async (req) => {
         signedPdfBytes,
         "contrato-firmado.pdf",
       );
-      await registerSignedContractDocument(serviceClient, invite.contractor_id, signedContractFileId);
+      await registerSignedContractDocument(serviceClient, invite.contractor_id, signedContractFileId, invite.contractor_contract_id);
 
       const { error: signatureError } = await serviceClient
         .from("contractor_contract_signatures")
         .update({
-          contractor_contract_id: contract.contractorContractId,
+          contractor_contract_id: pendingContract.contractor_contract_id,
           signature_file_id: signatureFileId,
           signed_contract_file_id: signedContractFileId,
           status: "SIGNED",
@@ -675,6 +794,11 @@ Deno.serve(async (req) => {
     if (action !== "submit") return jsonResponse({ error: "Accion no valida." }, 400);
 
     const payload = body?.payload ?? {};
+    const emergencyPhone = requireString(payload.emergencyContactPhone, "Telefono de emergencia").trim();
+    if (!/^3[0-9]{9}$/.test(emergencyPhone)) {
+      throw new Error("Telefono de emergencia: ingresa 10 digitos comenzando por 3. Ejemplo: 3001234567.");
+    }
+    await requireRegistrationDetails(serviceClient, invite.contractor_id);
     if (!payload.acceptsDataPolicy) {
       throw new Error("Debes aceptar la politica de tratamiento de datos personales.");
     }
@@ -701,7 +825,7 @@ Deno.serve(async (req) => {
       });
     if (upload.error) throw new Error(upload.error.message);
 
-    const { data: photoFile, error: photoFileError } = await serviceClient
+    const { error: photoFileError } = await serviceClient
       .from("app_files")
       .insert({
         provider: "supabase",
@@ -710,42 +834,8 @@ Deno.serve(async (req) => {
         original_name: "selfie-original.jpg",
         mime_type: "image/jpeg",
         size_bytes: selfieBytes.byteLength,
-      })
-      .select("id")
-      .single();
+      });
     if (photoFileError) throw new Error(photoFileError.message);
-
-    let profilePhotoFileId = photoFile.id;
-    try {
-      const generatedBytes = await generateCorporateProfilePhoto(serviceClient, selfieBytes);
-      if (generatedBytes) {
-        const generatedPath = `contractor/${invite.contractor_id}/profile/generated/${crypto.randomUUID()}.jpg`;
-        const generatedUpload = await serviceClient.storage
-          .from(PROFILE_PHOTO_BUCKET)
-          .upload(generatedPath, generatedBytes, {
-            contentType: "image/jpeg",
-            upsert: false,
-          });
-        if (generatedUpload.error) throw new Error(generatedUpload.error.message);
-
-        const { data: generatedFile, error: generatedFileError } = await serviceClient
-          .from("app_files")
-          .insert({
-            provider: "supabase",
-            bucket: PROFILE_PHOTO_BUCKET,
-            path: generatedPath,
-            original_name: "foto-perfil-empresarial.jpg",
-            mime_type: "image/jpeg",
-            size_bytes: generatedBytes.byteLength,
-          })
-          .select("id")
-          .single();
-        if (generatedFileError) throw new Error(generatedFileError.message);
-        profilePhotoFileId = generatedFile.id;
-      }
-    } catch (photoError) {
-      console.error("Corporate profile photo generation failed", photoError);
-    }
 
     const { data: policyFile } = await serviceClient
       .from("app_files")
@@ -759,24 +849,16 @@ Deno.serve(async (req) => {
       .update({
         rh: requireString(payload.bloodType, "Tipo de sangre"),
         birth_date: requireString(payload.birthDate, "Fecha de nacimiento"),
-        birth_place: requireString(payload.birthPlace, "Lugar de nacimiento"),
+        birth_place: requireString(payload.birthPlace, "Lugar de nacimiento").trim().toUpperCase(),
         civil_state_id: civilStateId,
-        residence_department: requireString(payload.residenceDepartment, "Departamento de residencia"),
-        residence_city: requireString(payload.residenceCity, "Ciudad de residencia"),
-        address: requireString(payload.address, "Direccion de residencia"),
-        stratum: requireString(payload.stratum, "Estrato"),
-        phone_number: requireString(payload.phone, "Telefono"),
         type_transport_id: transportTypeId,
         education_level_id: educationLevelId,
-        eps: requireString(payload.eps, "EPS"),
         shirt_size: requireString(payload.shirtSize, "Talla de camisa"),
         pant_size: requireString(payload.pantSize, "Talla de pantalon"),
         shoe_size: requireString(payload.shoeSize, "Talla de zapatos"),
-        pension_fund: requireString(payload.pensionFund, "Fondo de pensiones"),
-        emergency_contact_name: requireString(payload.emergencyContactName, "Contacto de emergencia"),
-        emergency_contact_relationship: requireString(payload.emergencyContactRelationship, "Parentesco"),
-        emergency_contact_phone: requireString(payload.emergencyContactPhone, "Telefono de emergencia"),
-        profile_photo_file_id: profilePhotoFileId,
+        emergency_contact_name: requireString(payload.emergencyContactName, "Contacto de emergencia").trim().toUpperCase(),
+        emergency_contact_relationship: requireString(payload.emergencyContactRelationship, "Parentesco").trim().toUpperCase(),
+        emergency_contact_phone: emergencyPhone,
         data_policy_accepted_at: colombiaNow(),
       })
       .eq("id", invite.contractor_id);
@@ -804,7 +886,9 @@ Deno.serve(async (req) => {
       .eq("id", invite.id);
     if (inviteError) throw new Error(inviteError.message);
 
-    return jsonResponse({ ok: true, nextStep: "CONTRACT_SIGNATURE" });
+    // Start only after successful submission; errors never roll back onboarding.
+    EdgeRuntime.waitUntil(saveProfilePhotoInBackground(serviceClient, invite.contractor_id, selfieBytes));
+    return jsonResponse({ ok: true, nextStep: "CONTRACT_SIGNATURE", photoStatus: "PROCESSING" });
   } catch (error) {
     const message = error instanceof Error ? error.message : "No fue posible procesar el formulario.";
     return jsonResponse({ error: message }, 400);

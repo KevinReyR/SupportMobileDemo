@@ -1,232 +1,71 @@
 import { Image } from "https://deno.land/x/imagescript@1.2.17/mod.ts";
 
-const OUTPUT_SIZE = 1024;
-const TEMPLATE_OFFSET_Y = 110;
-const EDGE_FEATHER_PX = 10;
-const PERSON_SCALE = 0.86;
-const PERSON_ANCHOR_X = 0.5;
-const PERSON_ANCHOR_Y = 0.27;
+const PHOTO_ERROR = "No pudimos preparar la foto institucional. Intenta enviar nuevamente; tus datos no se han enviado.";
+const PROMPT = `Edit ONLY the clothing in image 1 (the original selfie).
+Image 1 is the base photograph and the sole source of the person's identity,
+anatomy, pose, framing, head size, shoulders, neck length and proportions.
+Image 2 is ONLY a garment and logo reference, NOT a body template.
+Replace the existing clothing with the white Support Colombia institutional
+button-down shirt shown in image 2, including its original logo, lettering,
+colors and placement on the wearer's left chest. Fit the shirt naturally to
+the ORIGINAL body and shoulders. Keep the collar BELOW the original jaw,
+leaving the original neck visible. Match the garment lighting to the selfie.
+Do not paste, replace, resize, reposition or regenerate the head or body.
+Do not beautify, smooth skin, correct asymmetry, improve the face, change age,
+expression, skin tone, hair, beard, ears, eyes, nose, mouth or eyebrows.
+Preserve the face and exposed neck exactly as photographed, including texture,
+imperfections, shadows and original proportions. Preserve the background and
+camera framing. Do not add accessories. Return one photorealistic edited selfie.`;
 
-type Point = readonly [number, number];
-
-const LEFT_COLLAR: readonly Point[] = [
-  [0.369, 0.43],
-  [0.39, 0.488],
-  [0.412, 0.527],
-  [0.388, 0.596],
-  [0.342, 0.508],
-];
-
-const RIGHT_COLLAR: readonly Point[] = LEFT_COLLAR.map(([x, y]) => [1 - x, y]);
-
-function clamp(value: number, minimum = 0, maximum = 1) {
-  return Math.min(maximum, Math.max(minimum, value));
-}
-
-function smoothstep(edge0: number, edge1: number, value: number) {
-  const ratio = clamp((value - edge0) / (edge1 - edge0));
-  return ratio * ratio * (3 - 2 * ratio);
-}
-
-function blendChannel(foreground: number, background: number, alpha: number) {
-  return Math.round(foreground * alpha + background * (1 - alpha));
-}
-
-function reflectIndex(value: number, length: number) {
-  if (value < 0) return Math.min(length - 1, -value - 1);
-  if (value >= length) return Math.max(0, 2 * length - value - 1);
-  return value;
-}
-
-function pointInsidePolygon(x: number, y: number, polygon: readonly Point[]) {
-  let inside = false;
-  for (let current = 0, previous = polygon.length - 1; current < polygon.length; previous = current++) {
-    const [currentX, currentY] = polygon[current];
-    const [previousX, previousY] = polygon[previous];
-    const crossesEdge = currentY > y !== previousY > y &&
-      x < ((previousX - currentX) * (y - currentY)) / (previousY - currentY) + currentX;
-    if (crossesEdge) inside = !inside;
-  }
-  return inside;
-}
-
-function distanceToSegment(x: number, y: number, start: Point, end: Point) {
-  const deltaX = end[0] - start[0];
-  const deltaY = end[1] - start[1];
-  const squaredLength = deltaX * deltaX + deltaY * deltaY;
-  const position = squaredLength === 0
-    ? 0
-    : clamp(((x - start[0]) * deltaX + (y - start[1]) * deltaY) / squaredLength);
-  return Math.hypot(x - (start[0] + position * deltaX), y - (start[1] + position * deltaY));
-}
-
-function featheredPolygonAlpha(x: number, y: number, polygon: readonly Point[]) {
-  if (!pointInsidePolygon(x, y, polygon)) return 0;
-  let distance = Number.POSITIVE_INFINITY;
-  for (let current = 0; current < polygon.length; current += 1) {
-    distance = Math.min(
-      distance,
-      distanceToSegment(x, y, polygon[current], polygon[(current + 1) % polygon.length]),
-    );
-  }
-  return smoothstep(0, EDGE_FEATHER_PX / OUTPUT_SIZE, distance);
-}
-
-function collarForegroundAlpha(normalizedX: number, normalizedY: number) {
-  return Math.max(
-    featheredPolygonAlpha(normalizedX, normalizedY, LEFT_COLLAR),
-    featheredPolygonAlpha(normalizedX, normalizedY, RIGHT_COLLAR),
-  );
-}
-
-function personProtectionAlpha(
-  normalizedX: number,
-  normalizedY: number,
-  featherX: number,
-  featherY: number,
+// High input fidelity reduces unwanted edits; it does not guarantee pixel identity.
+export async function createCorporateProfilePhoto(
+  templateBytes: Uint8Array,
+  selfieBytes: Uint8Array,
+  options: { apiKey?: string; fetcher?: typeof fetch } = {},
 ) {
-  const headDistance = Math.sqrt(
-    ((normalizedX - 0.5) / 0.26) ** 2 + ((normalizedY - 0.27) / 0.27) ** 2,
-  );
-  const headProtection = 1 - smoothstep(0.96, 1.04, headDistance);
-  const neckHalfWidth = normalizedY <= 0.58
-    ? 0.15 - 0.04 * clamp((normalizedY - 0.43) / 0.15)
-    : 0.11 * (1 - clamp((normalizedY - 0.58) / 0.11));
-  const insideNeckWidth = 1 - smoothstep(
-    neckHalfWidth,
-    neckHalfWidth + featherX,
-    Math.abs(normalizedX - 0.5),
-  );
-  const belowNeckTop = smoothstep(0.43 - featherY, 0.43 + featherY, normalizedY);
-  const aboveNeckBottom = 1 - smoothstep(0.66, 0.69, normalizedY);
-  const neckProtection = insideNeckWidth * belowNeckTop * aboveNeckBottom;
+  const apiKey = options.apiKey ?? Deno.env.get("OPENAI_API_KEY");
+  if (!apiKey) throw new Error("La foto institucional no esta configurada. Contacta al coordinador.");
 
-  return Math.max(headProtection, neckProtection);
-}
+  const form = new FormData();
+  form.set("model", "gpt-image-1.5");
+  form.set("input_fidelity", "high");
+  form.set("quality", "high");
+  form.set("size", "1024x1024");
+  form.set("output_format", "jpeg");
+  form.set("n", "1");
+  form.set("prompt", PROMPT);
+  form.append("image[]", new Blob([new Uint8Array(selfieBytes)], { type: "image/jpeg" }), "selfie.jpg");
+  form.append("image[]", new Blob([new Uint8Array(templateBytes)], { type: "image/png" }), "shirt-reference.png");
 
-function shirtOverlayAlpha(
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  scaledSize: number,
-  offsetX: number,
-  offsetY: number,
-) {
-  const normalizedX = x / width;
-  const normalizedY = y / height;
-  const featherX = EDGE_FEATHER_PX / width;
-  const featherY = EDGE_FEATHER_PX / height;
-  const distanceFromCenter = Math.abs(normalizedX - 0.5);
-  const shoulderDistance = clamp(distanceFromCenter / 0.5);
-  const shirtTop = 0.39 + 0.18 * shoulderDistance ** 1.55;
-  const belowShirtEdge = smoothstep(shirtTop - featherY, shirtTop + featherY, normalizedY);
-
-  if (belowShirtEdge <= 0) return 0;
-
-  const scaledX = x - offsetX;
-  const scaledY = y - offsetY;
-  const isInsideScaledSelfie = scaledX >= 0 && scaledX < scaledSize && scaledY >= 0 && scaledY < scaledSize;
-  const protectedPerson = isInsideScaledSelfie
-    ? personProtectionAlpha(
-      scaledX / scaledSize,
-      scaledY / scaledSize,
-      EDGE_FEATHER_PX / scaledSize,
-      EDGE_FEATHER_PX / scaledSize,
-    )
-    : 0;
-  return belowShirtEdge * (1 - protectedPerson);
-}
-
-export function composeCorporateProfilePhoto(template: Image, selfie: Image) {
-  const source = selfie.width === OUTPUT_SIZE && selfie.height === OUTPUT_SIZE
-    ? selfie
-    : selfie.cover(OUTPUT_SIZE, OUTPUT_SIZE);
-  const scaledSize = Math.round(OUTPUT_SIZE * PERSON_SCALE);
-  const offsetX = Math.round((OUTPUT_SIZE - scaledSize) * PERSON_ANCHOR_X);
-  const offsetY = Math.round((OUTPUT_SIZE - scaledSize) * PERSON_ANCHOR_Y);
-  const scaledSelfie = source.resize(scaledSize, scaledSize);
-  const result = new Image(OUTPUT_SIZE, OUTPUT_SIZE);
-  const templateHeight = Math.round(template.height * (OUTPUT_SIZE / template.width));
-  const shirtTemplate = template.resize(OUTPUT_SIZE, templateHeight);
-
-  for (let targetY = 1; targetY <= OUTPUT_SIZE; targetY += 1) {
-    const scaledY = reflectIndex(targetY - 1 - offsetY, scaledSize);
-    const templateY = targetY - TEMPLATE_OFFSET_Y;
-
-    for (let targetX = 1; targetX <= OUTPUT_SIZE; targetX += 1) {
-      const scaledX = reflectIndex(targetX - 1 - offsetX, scaledSize);
-      const [selfieR, selfieG, selfieB] = Image.colorToRGBA(
-        scaledSelfie.getPixelAt(scaledX + 1, scaledY + 1),
-      );
-      let resultR = selfieR;
-      let resultG = selfieG;
-      let resultB = selfieB;
-
-      if (templateY >= 1 && templateY <= shirtTemplate.height) {
-        const [shirtR, shirtG, shirtB] = Image.colorToRGBA(shirtTemplate.getPixelAt(targetX, templateY));
-        const shirtAlpha = shirtOverlayAlpha(
-          targetX - 1,
-          targetY - 1,
-          OUTPUT_SIZE,
-          OUTPUT_SIZE,
-          scaledSize,
-          offsetX,
-          offsetY,
-        );
-        resultR = blendChannel(shirtR, resultR, shirtAlpha);
-        resultG = blendChannel(shirtG, resultG, shirtAlpha);
-        resultB = blendChannel(shirtB, resultB, shirtAlpha);
-
-        const collarAlpha = collarForegroundAlpha(
-          (targetX - 1) / OUTPUT_SIZE,
-          (targetY - 1) / OUTPUT_SIZE,
-        );
-        resultR = blendChannel(shirtR, resultR, collarAlpha);
-        resultG = blendChannel(shirtG, resultG, collarAlpha);
-        resultB = blendChannel(shirtB, resultB, collarAlpha);
-      }
-
-      result.setPixelAt(
-        targetX,
-        targetY,
-        Image.rgbaToColor(
-          resultR,
-          resultG,
-          resultB,
-          255,
-        ),
-      );
+  const controller = new AbortController();
+  // Leave time for Storage and contract generation before the Edge request expires.
+  const timeout = setTimeout(() => controller.abort(), 120_000);
+  try {
+    const response = await (options.fetcher ?? fetch)("https://api.openai.com/v1/images/edits", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: form,
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      // Never log selfies, credentials, or raw provider error bodies.
+      console.error("corporate_photo_edit_failed", { status: response.status, requestId: response.headers.get("x-request-id") });
+      throw new Error(PHOTO_ERROR);
     }
-  }
-
-  return result;
-}
-
-async function encodeCompressedProfilePhoto(image: Image) {
-  const attempts = [
-    { size: 768, quality: 78 },
-    { size: 640, quality: 70 },
-    { size: 512, quality: 66 },
-  ];
-  let current = image;
-  let lastBytes: Uint8Array | null = null;
-
-  for (const attempt of attempts) {
-    if (current.width > attempt.size || current.height > attempt.size) {
-      current = current.contain(attempt.size, attempt.size);
+    const result = await response.json();
+    const encoded = result?.data?.[0]?.b64_json;
+    if (typeof encoded !== "string" || !encoded.length) throw new Error(PHOTO_ERROR);
+    const bytes = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
+    const image = await Image.decode(bytes);
+    if (image.width !== 1024 || image.height !== 1024) throw new Error(PHOTO_ERROR);
+    return await image.resize(768, 768).encodeJPEG(90);
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error("La foto institucional tardo demasiado. Intenta enviar nuevamente en unos minutos.");
     }
-    lastBytes = await current.encodeJPEG(attempt.quality);
-    if (lastBytes.byteLength <= 1_500_000) return lastBytes;
+    if (error instanceof Error && error.message === PHOTO_ERROR) throw error;
+    throw new Error(PHOTO_ERROR);
+  } finally {
+    clearTimeout(timeout);
   }
-
-  return lastBytes ?? await image.encodeJPEG(66);
-}
-
-export async function createCorporateProfilePhoto(templateBytes: Uint8Array, selfieBytes: Uint8Array) {
-  const [template, selfie] = await Promise.all([
-    Image.decode(templateBytes),
-    Image.decode(selfieBytes),
-  ]);
-  return await encodeCompressedProfilePhoto(composeCorporateProfilePhoto(template, selfie));
 }

@@ -24,25 +24,29 @@ import { Ionicons } from "@expo/vector-icons";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
+import * as ImagePicker from "expo-image-picker";
 import * as Linking from "expo-linking";
 import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
 import { LinearGradient } from "expo-linear-gradient";
-import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import Svg, { Line, Polyline, Rect, Text as SvgText } from "react-native-svg";
 import type { Session } from "@supabase/supabase-js";
 
 import PdfViewer from "./components/pdf-viewer";
 import DirectorWebDashboard from "./components/director-web-dashboard";
 import { COLOMBIA_DEPARTMENTS, COLOMBIA_MUNICIPALITIES_BY_DEPARTMENT } from "./data/colombia-locations";
-import { buildCedulaPdfFromPhotos } from "./lib/cedula-pdf";
+import { buildCedulaPdfFromPhotos, buildPdfFromPhotos } from "./lib/cedula-pdf";
 import { supabase } from "./lib/supabase";
 import {
   cancelPersonnelRequest,
+  changeContractorContract,
   checkContractorShiftAssignment,
   calculateAdminDirectPayroll,
   closeAdminDirectPayroll,
   createAdminUser,
   createContractorDraft,
+  completeContractorRegistrationDetails,
+  createContractorNovelty,
   createContractorDocumentSignedUrl,
   createContractorProfilePhotoSignedUrl,
   createOperation,
@@ -53,10 +57,13 @@ import {
   loadAdminData,
   loadAdminPayroll,
   loadAppData,
+  loadContractorLastOperations,
   loadClientContractorProfile,
   loadClientContractorHistory,
   loadContractorDocuments,
+  loadContractorActivationDocuments,
   loadContractorHistory,
+  loadContractorNovelties,
   loadContractorProfile,
   loadContractorWorkwearMovements,
   loadContractorWorkwearSummary,
@@ -66,6 +73,11 @@ import {
   loadAvailableServiceUnits,
   loadOperationChangeHistory,
   loadOperationAssignments,
+  loadOperationAlerts,
+  loadOperationById,
+  loadOperationsByDate,
+  loadOlderOperations,
+  loadInitialOperations,
   loadDirectorReports,
   loadStatisticsSummary,
   loadUserContext,
@@ -81,6 +93,7 @@ import {
   saveAdminCostRule,
   saveAdminPayrollRule,
   saveAdminExtraHourRate,
+  saveAdminDirectExtraHourRate,
   saveAdminServiceUnitRate,
   saveAdminServiceUnitType,
   saveAdminServiceRate,
@@ -96,12 +109,22 @@ import {
   toggleUserClient,
   updateInProgressOperation,
   updateAdminContractor,
+  updateContractorNovelty,
   updateAdminDirectPayrollPeriod,
   updateAdminUserProfile,
   uploadContractorActivationDocument,
   uploadContractorDocument,
 } from "./services/data";
 import type { ContractorActivationDocumentType, ContractorDocumentTypeOption, ContractorPdfFile } from "./services/data";
+import {
+  createPerformanceTrace,
+  finishPerformanceStage,
+  finishPerformanceTrace,
+  measurePerformanceStage,
+  performanceNow,
+  setPerformanceTraceRole,
+  type PerformanceTrace,
+} from "./services/performance";
 import type {
   AdminData,
   AdminPayrollData,
@@ -111,6 +134,10 @@ import type {
   Contractor,
   ContractorDocument,
   ContractorHistory,
+  ContractorNovelty,
+  ContractorNoveltyInput,
+  ContractorNoveltySubtype,
+  ContractorNoveltyType,
   ContractorOnboardingContract,
   ContractorOnboardingForm,
   ContractorOnboardingSubmission,
@@ -272,6 +299,10 @@ const EMPTY_DATA: AppData = {
   clients: [],
   documentTypes: [],
   operations: [],
+  operationHistoryIds: [],
+  operationHistoryCursor: null,
+  hasMoreOperations: false,
+  operationHistoryExpanded: false,
   requests: [],
   contractors: [],
   clientContractors: [],
@@ -285,6 +316,14 @@ const EMPTY_DATA: AppData = {
   contractTypes: [],
   users: [],
 };
+
+function mergeOperationCache(current: Operation[], incoming: Operation[]) {
+  const byId = new Map(current.map((operation) => [operation.id, operation]));
+  for (const operation of incoming) byId.set(operation.id, operation);
+  return [...byId.values()].sort(
+    (left, right) => right.date.localeCompare(left.date) || right.id - left.id,
+  );
+}
 
 const tabsByRole: Record<Role, { label: string; icon: IconName; screen: Screen }[]> = {
   Coordinador: [
@@ -339,6 +378,17 @@ function formatDateRange(startDate: string, endDate: string) {
 function formatColombiaDateTime(value: string) {
   const [date, time = ""] = value.replace("T", " ").split(" ");
   return `${formatDate(date)}${time ? ` ⋅ ${time.slice(0, 5)}` : ""}`;
+}
+
+function formatBogotaTimestamp(value: string) {
+  return new Intl.DateTimeFormat("es-CO", {
+    timeZone: "America/Bogota",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
 }
 
 function todayIso() {
@@ -431,6 +481,12 @@ function formatShortNumber(value: number) {
 
 function formatShortCurrency(value: number) {
   return `$${formatShortNumber(value)}`;
+}
+
+function showPdfError(cause: unknown) {
+  const message = errorMessage(cause);
+  if (Platform.OS === "web") window.alert(`No fue posible generar el PDF\n${message}`);
+  else Alert.alert("No fue posible generar el PDF", message);
 }
 
 function errorMessage(error: unknown) {
@@ -554,6 +610,8 @@ export default function SupportApp() {
   const [session, setSession] = useState<Session | null>(null);
   const [context, setContext] = useState<UserContext | null>(null);
   const [data, setData] = useState<AppData>(EMPTY_DATA);
+  const dataRef = useRef<AppData>(EMPTY_DATA);
+  const [operationFeedLoading, setOperationFeedLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [screen, setScreen] = useState<Screen>("operations");
@@ -565,6 +623,17 @@ export default function SupportApp() {
   const mountedRef = useRef(true);
   const hydrationIdRef = useRef(0);
   const hydratedUserIdRef = useRef<string | null>(null);
+  const activePerformanceTraceRef = useRef<PerformanceTrace | null>(null);
+  const pendingRenderRef = useRef<{ trace: PerformanceTrace; startedAt: number } | null>(null);
+  const initialPerformanceTraceRef = useRef<PerformanceTrace | null>(null);
+  if (!initialPerformanceTraceRef.current) {
+    initialPerformanceTraceRef.current = createPerformanceTrace("session_restore", Platform.OS);
+    activePerformanceTraceRef.current = initialPerformanceTraceRef.current;
+  }
+
+  useEffect(() => {
+    dataRef.current = data;
+  }, [data]);
 
   const hydrate = useCallback(async (nextSession: Session | null) => {
     const hydrationId = ++hydrationIdRef.current;
@@ -579,31 +648,53 @@ export default function SupportApp() {
     }
     setLoading(true);
     setError("");
+    let nextContext: UserContext | null = null;
+    const performanceTrace = activePerformanceTraceRef.current
+      ?? createPerformanceTrace("session_restore", Platform.OS);
+    activePerformanceTraceRef.current = performanceTrace;
     try {
-      const nextContext = await withTimeout(
-        loadUserContext(nextSession.user.id),
-        12_000,
-        "No fue posible validar la sesión. Revisa tu conexión e inténtalo nuevamente.",
+      nextContext = await measurePerformanceStage(
+        performanceTrace,
+        "context",
+        () => withTimeout(
+          loadUserContext(nextSession.user.id),
+          12_000,
+          "No fue posible validar la sesión. Revisa tu conexión e inténtalo nuevamente.",
+        ),
       );
-      const nextData = await withTimeout(
-        loadAppData(nextContext),
-        15_000,
-        "La carga inicial tardó demasiado. Puedes reintentar desde la aplicación.",
-      );
+      setPerformanceTraceRole(performanceTrace, nextContext.roleCode);
       if (!mountedRef.current || hydrationId !== hydrationIdRef.current) return;
-      const home: Screen = nextContext.roleCode === "ADMIN" ? "admin-home" : "operations";
       setContext(nextContext);
-      setData(nextData);
+      const home: Screen = nextContext.roleCode === "ADMIN" ? "admin-home" : "operations";
       setScreen(home);
       setActiveTab(home);
+      const nextData = await measurePerformanceStage(
+        performanceTrace,
+        "data_total",
+        () => withTimeout(
+          loadAppData(nextContext!, performanceTrace),
+          15_000,
+          "La carga inicial tardó demasiado. Puedes reintentar desde la aplicación.",
+        ),
+      );
+      if (!mountedRef.current || hydrationId !== hydrationIdRef.current) return;
+      pendingRenderRef.current = { trace: performanceTrace, startedAt: performanceNow() };
+      setData(nextData);
     } catch (cause) {
       if (!mountedRef.current || hydrationId !== hydrationIdRef.current) return;
+      if (!performanceTrace.role) setPerformanceTraceRole(performanceTrace, "UNKNOWN");
+      finishPerformanceTrace(performanceTrace);
+      if (activePerformanceTraceRef.current?.id === performanceTrace.id) {
+        activePerformanceTraceRef.current = null;
+      }
       const message = errorMessage(cause);
       setError(message);
       hydratedUserIdRef.current = null;
-      setSession(null);
-      setContext(null);
       setData(EMPTY_DATA);
+      if (!nextContext) {
+        setSession(null);
+        setContext(null);
+      }
     } finally {
       if (mountedRef.current && hydrationId === hydrationIdRef.current) {
         setLoading(false);
@@ -637,6 +728,16 @@ export default function SupportApp() {
       if (event === "INITIAL_SESSION") {
         initialSessionHandled = true;
         clearTimeout(fallbackTimer);
+        const trace = initialPerformanceTraceRef.current;
+        if (trace) {
+          finishPerformanceStage(trace, "authentication", trace.startedAt, {
+            sessionFound: Boolean(nextSession),
+          });
+          if (!nextSession) {
+            setPerformanceTraceRole(trace, "ANONYMOUS");
+            finishPerformanceTrace(trace);
+          }
+        }
         scheduleHydration();
         return;
       }
@@ -676,18 +777,174 @@ export default function SupportApp() {
     };
   }, [hydrate]);
 
+  useEffect(() => {
+    if (loading || booting || !context || !pendingRenderRef.current) return;
+    const pending = pendingRenderRef.current;
+    pendingRenderRef.current = null;
+    const task = InteractionManager.runAfterInteractions(() => {
+      finishPerformanceStage(pending.trace, "render", pending.startedAt);
+      finishPerformanceTrace(pending.trace);
+      if (activePerformanceTraceRef.current?.id === pending.trace.id) {
+        activePerformanceTraceRef.current = null;
+      }
+    });
+    return () => task.cancel();
+  }, [booting, context, data, loading]);
+
   const refresh = useCallback(async () => {
     if (!context) return;
+    const performanceTrace = createPerformanceTrace("refresh", Platform.OS);
+    setPerformanceTraceRole(performanceTrace, context.roleCode);
+    activePerformanceTraceRef.current = performanceTrace;
     setLoading(true);
     setError("");
     try {
-      setData(await loadAppData(context));
+      const nextData = await measurePerformanceStage(
+        performanceTrace,
+        "data_total",
+        () => loadAppData(context, performanceTrace),
+      );
+      pendingRenderRef.current = { trace: performanceTrace, startedAt: performanceNow() };
+      setData(nextData);
     } catch (cause) {
+      finishPerformanceTrace(performanceTrace);
+      if (activePerformanceTraceRef.current?.id === performanceTrace.id) {
+        activePerformanceTraceRef.current = null;
+      }
       setError(errorMessage(cause));
     } finally {
       setLoading(false);
     }
   }, [context]);
+
+  const commitData = useCallback((update: (current: AppData) => AppData) => {
+    setData((current) => {
+      const next = update(current);
+      dataRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const refreshInitialOperationFeed = useCallback(async () => {
+    setOperationFeedLoading(true);
+    try {
+      const initial = await loadInitialOperations();
+      commitData((current) => ({
+        ...current,
+        operations: initial.items,
+        operationHistoryIds: initial.historyIds,
+        operationHistoryCursor: initial.nextCursor,
+        hasMoreOperations: initial.hasMore,
+        operationHistoryExpanded: false,
+      }));
+    } finally {
+      setOperationFeedLoading(false);
+    }
+  }, [commitData]);
+
+  const refreshOperationAlerts = useCallback(async () => {
+    setOperationFeedLoading(true);
+    try {
+      const alerts = await loadOperationAlerts();
+      commitData((current) => ({
+        ...current,
+        operations: mergeOperationCache(
+          current.operations.filter(
+            (operation) => operation.status !== "PENDIENTE" && operation.status !== "CAMBIOS_SOLICITADOS",
+          ),
+          alerts,
+        ),
+      }));
+    } finally {
+      setOperationFeedLoading(false);
+    }
+  }, [commitData]);
+
+  const loadOperationDate = useCallback(async (date: string) => {
+    setOperationFeedLoading(true);
+    try {
+      const operations = await loadOperationsByDate(date);
+      commitData((current) => ({
+        ...current,
+        operations: mergeOperationCache(current.operations, operations),
+      }));
+      return operations;
+    } finally {
+      setOperationFeedLoading(false);
+    }
+  }, [commitData]);
+
+  const loadMoreOperationHistory = useCallback(async () => {
+    const cursor = dataRef.current.operationHistoryCursor;
+    if (!cursor || operationFeedLoading) return;
+    setOperationFeedLoading(true);
+    try {
+      const page = await loadOlderOperations(cursor);
+      commitData((current) => ({
+        ...current,
+        operations: mergeOperationCache(current.operations, page.items),
+        operationHistoryIds: [
+          ...current.operationHistoryIds,
+          ...page.items
+            .map((operation) => operation.id)
+            .filter((id) => !current.operationHistoryIds.includes(id)),
+        ],
+        operationHistoryCursor: page.nextCursor,
+        hasMoreOperations: page.hasMore,
+        operationHistoryExpanded: true,
+      }));
+    } finally {
+      setOperationFeedLoading(false);
+    }
+  }, [commitData, operationFeedLoading]);
+
+  const refreshSingleOperation = useCallback(async (
+    operationId: number,
+    refreshContractors = true,
+  ) => {
+    const previous = dataRef.current.operations.find((operation) => operation.id === operationId);
+    const updated = await loadOperationById(operationId);
+    const affectedContractorIds = [...new Set([
+      ...(previous?.contractorIds ?? []),
+      ...updated.contractorIds,
+    ])];
+    const lastOperations = context?.roleCode !== "CLIENT" && refreshContractors
+      ? await loadContractorLastOperations(affectedContractorIds)
+      : [];
+    const lastByContractor = new Map(lastOperations.map((item) => [item.contractorId, item]));
+    const today = todayIso();
+    const recentStart = dateToIso(addDays(isoToDate(today), -2));
+
+    commitData((current) => {
+      const mergedOperations = mergeOperationCache(current.operations, [updated]);
+      const historyIdSet = new Set(current.operationHistoryIds);
+      if (
+        (updated.date >= recentStart && updated.date <= today)
+        || updated.status === "EN_CURSO"
+      ) historyIdSet.add(updated.id);
+      const historyIds = mergedOperations
+        .filter((operation) => historyIdSet.has(operation.id))
+        .map((operation) => operation.id);
+      return {
+        ...current,
+        operations: mergedOperations,
+        operationHistoryIds: historyIds,
+        contractors: refreshContractors
+          ? current.contractors.map((contractor) => {
+            if (!affectedContractorIds.includes(contractor.id)) return contractor;
+            const latest = lastByContractor.get(contractor.id);
+            return {
+              ...contractor,
+              lastClient: latest?.lastClient ?? "Sin operación",
+              lastArea: latest?.lastArea ?? "Sin área",
+              lastDate: latest?.lastDate ?? null,
+            };
+          })
+          : current.contractors,
+      };
+    });
+    return updated;
+  }, [commitData, context?.roleCode]);
 
   const navigate = (next: Screen) => {
     setScreen(next);
@@ -713,7 +970,17 @@ export default function SupportApp() {
   if (resetPasswordParams.active) return <ResetPassword params={resetPasswordParams} />;
   if (booting) return <CenteredState label="Cargando Support Colombia..." />;
   if (!session || !context) {
-    return <Login initialError={error} busy={loading} />;
+    return (
+      <Login
+        initialError={error}
+        busy={loading}
+        onAuthenticationStart={() => {
+          const trace = createPerformanceTrace("login", Platform.OS);
+          activePerformanceTraceRef.current = trace;
+          return trace;
+        }}
+      />
+    );
   }
 
   const showTabs = !detailScreens.includes(screen);
@@ -743,7 +1010,12 @@ export default function SupportApp() {
 
   return (
     <SafeAreaProvider>
-      <SafeAreaView style={styles.safe} edges={["top"]}>
+      <SafeAreaView
+        style={styles.safe}
+        edges={showTabs && Platform.OS === "android"
+          ? ["top", "left", "right"]
+          : ["top", "left", "right", "bottom"]}
+      >
         <StatusBar barStyle="dark-content" backgroundColor={C.bg} />
         <Header
           context={context}
@@ -783,8 +1055,14 @@ export default function SupportApp() {
               <Operations
                 context={context}
                 operations={data.operations}
-                loading={loading}
-                onRefresh={refresh}
+                historyIds={data.operationHistoryIds}
+                hasMore={data.hasMoreOperations}
+                historyExpanded={data.operationHistoryExpanded}
+                loading={loading || operationFeedLoading}
+                onRefreshInitial={refreshInitialOperationFeed}
+                onRefreshAlerts={refreshOperationAlerts}
+                onLoadDate={loadOperationDate}
+                onLoadMore={loadMoreOperationHistory}
                 onOpen={openOperation}
                 onInitial={() => navigate("initial")}
               />
@@ -796,7 +1074,7 @@ export default function SupportApp() {
                 onFinal={() => navigate("final")}
                 onEdit={() => navigate("operation-edit")}
                 onChanged={async () => {
-                  await refresh();
+                  await refreshSingleOperation(selectedOperation.id, false);
                   navigate("operations");
                 }}
               />
@@ -807,7 +1085,7 @@ export default function SupportApp() {
                 data={data}
                 operation={selectedOperation}
                 onSaved={async () => {
-                  await refresh();
+                  await refreshSingleOperation(selectedOperation.id);
                   navigate("operation-detail");
                 }}
               />
@@ -816,8 +1094,8 @@ export default function SupportApp() {
               <InitialOperation
                 context={context}
                 data={data}
-                onSaved={async () => {
-                  await refresh();
+                onSaved={async (operationId) => {
+                  await refreshSingleOperation(operationId);
                   navigate("operations");
                 }}
               />
@@ -827,7 +1105,7 @@ export default function SupportApp() {
                 operation={selectedOperation}
                 contractors={data.contractors}
                 onSaved={async () => {
-                  await refresh();
+                  await refreshSingleOperation(selectedOperation.id);
                   navigate("operations");
                 }}
               />
@@ -954,13 +1232,15 @@ function PublicContractorOnboarding({ token }: { token: string }) {
   const [submitted, setSubmitted] = useState(false);
   const [contractReady, setContractReady] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [dataSubmitted, setDataSubmitted] = useState(false);
+  const [submitError, setSubmitError] = useState("");
   const [signing, setSigning] = useState(false);
   const [signatureOpen, setSignatureOpen] = useState(false);
   const [onboardingProgress, setOnboardingProgress] = useState(0);
   const [onboardingStepLabel, setOnboardingStepLabel] = useState("");
   const [calendarOpen, setCalendarOpen] = useState(false);
   const [picker, setPicker] = useState<
-    null | "blood" | "civil" | "department" | "city" | "transport" | "education" | "stratum" | "shirt" | "pant" | "shoe"
+    null | "blood" | "civil" | "transport" | "education" | "shirt" | "pant" | "shoe"
   >(null);
   const [selfieOpen, setSelfieOpen] = useState(false);
   const [selfieUri, setSelfieUri] = useState("");
@@ -969,18 +1249,11 @@ function PublicContractorOnboarding({ token }: { token: string }) {
     birthDate: "",
     birthPlace: "",
     civilStateId: 0,
-    residenceDepartment: "",
-    residenceCity: "",
-    address: "",
-    stratum: "",
-    phone: "",
     transportTypeId: 0,
     educationLevelId: 0,
-    eps: "",
     shirtSize: "",
     pantSize: "",
     shoeSize: "",
-    pensionFund: "",
     emergencyContactName: "",
     emergencyContactRelationship: "",
     emergencyContactPhone: "",
@@ -1005,7 +1278,6 @@ function PublicContractorOnboarding({ token }: { token: string }) {
         civilStateId: current.civilStateId || nextForm.catalogs.civilStates[0]?.id || 0,
         transportTypeId: current.transportTypeId || nextForm.catalogs.transportTypes[0]?.id || 0,
         educationLevelId: current.educationLevelId || nextForm.catalogs.educationLevels[0]?.id || 0,
-        stratum: current.stratum || nextForm.catalogs.stratum[0] || "",
         shirtSize: current.shirtSize || nextForm.catalogs.shirtSizes[0] || "",
         pantSize: current.pantSize || nextForm.catalogs.pantSizes[0] || "",
         shoeSize: current.shoeSize || nextForm.catalogs.shoeSizes[0] || "",
@@ -1028,11 +1300,6 @@ function PublicContractorOnboarding({ token }: { token: string }) {
   const update = (key: keyof typeof fields, value: string | number | boolean) => {
     setFields((current) => ({ ...current, [key]: value }));
   };
-  const departmentOptions = Array.from(COLOMBIA_DEPARTMENTS);
-  const cityOptions = fields.residenceDepartment ? COLOMBIA_MUNICIPALITIES_BY_DEPARTMENT[fields.residenceDepartment] ?? [] : [];
-  const selectResidenceDepartment = (department: string) => {
-    setFields((current) => ({ ...current, residenceDepartment: department, residenceCity: "" }));
-  };
   const setProgress = (progress: number, label: string) => {
     setOnboardingProgress(progress);
     setOnboardingStepLabel(label);
@@ -1044,39 +1311,56 @@ function PublicContractorOnboarding({ token }: { token: string }) {
   }, [token]);
 
   async function submit() {
-    if (!form) return;
+    if (!form || saving) return;
+    if (dataSubmitted) {
+      setSaving(true);
+      setSubmitError("");
+      setProgress(88, "Abriendo contrato");
+      try {
+        await loadContract();
+        setProgress(100, "Contrato listo");
+      } catch (cause) {
+        const message = errorMessage(cause);
+        setSubmitError(message);
+        showMessage("No fue posible abrir el contrato", message);
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
     const requiredText = [
       fields.bloodType,
       fields.birthDate,
       fields.birthPlace,
-      fields.residenceDepartment,
-      fields.residenceCity,
-      fields.address,
-      fields.stratum,
-      fields.phone,
-      fields.eps,
       fields.shirtSize,
       fields.pantSize,
       fields.shoeSize,
-      fields.pensionFund,
       fields.emergencyContactName,
       fields.emergencyContactRelationship,
       fields.emergencyContactPhone,
     ];
     if (requiredText.some((value) => !String(value).trim()) || !fields.civilStateId || !fields.transportTypeId || !fields.educationLevelId) {
-      Alert.alert("Completa el formulario", "Todos los campos son obligatorios.");
+      showMessage("Completa el formulario", "Todos los campos son obligatorios.");
+      return;
+    }
+    if (!/^3[0-9]{9}$/.test(fields.emergencyContactPhone.trim())) {
+      const message = "Telefono de emergencia: ingresa 10 digitos comenzando por 3. Ejemplo: 3001234567.";
+      setSubmitError(message);
+      showMessage("Telefono de emergencia no valido", message);
       return;
     }
     if (!selfieUri) {
-      Alert.alert("Falta selfie", "Toma una foto frontal antes de enviar.");
+      showMessage("Falta selfie", "Toma una foto frontal antes de enviar.");
       return;
     }
     if (!fields.acceptsDataPolicy) {
-      Alert.alert("Acepta la política", "Debes aceptar la política de tratamiento de datos personales.");
+      showMessage("Acepta la política", "Debes aceptar la política de tratamiento de datos personales.");
       return;
     }
     setSaving(true);
+    setSubmitError("");
     setProgress(0, "Validando formulario");
+    let saved = false;
     try {
       setProgress(20, "Preparando selfie");
       const selfieBase64 = await imageUriToBase64(selfieUri);
@@ -1088,12 +1372,18 @@ function PublicContractorOnboarding({ token }: { token: string }) {
       };
       setProgress(70, "Procesando datos");
       await submitContractorOnboardingForm(token, payload);
+      saved = true;
+      setDataSubmitted(true);
       setProgress(88, "Generando contrato");
       await loadContract();
       setProgress(100, "Contrato listo");
     } catch (cause) {
       setProgress(0, "");
-      Alert.alert("No fue posible enviar", errorMessage(cause));
+      const message = saved
+        ? `Tus datos se guardaron, pero no pudimos abrir el contrato. Pulsa Abrir contrato para reintentar. ${errorMessage(cause)}`
+        : errorMessage(cause);
+      setSubmitError(message);
+      showMessage("No fue posible enviar", message);
     } finally {
       setSaving(false);
     }
@@ -1112,7 +1402,7 @@ function PublicContractorOnboarding({ token }: { token: string }) {
       setSubmitted(true);
     } catch (cause) {
       setProgress(0, "");
-      Alert.alert("No fue posible firmar", errorMessage(cause));
+      showMessage("No fue posible firmar", errorMessage(cause));
     } finally {
       setSigning(false);
     }
@@ -1181,18 +1471,6 @@ function PublicContractorOnboarding({ token }: { token: string }) {
       selectedId: fields.civilStateId,
       onSelect: (id: number) => update("civilStateId", id),
     },
-    department: {
-      title: "Departamento de residencia",
-      options: stringOptions(departmentOptions),
-      selectedId: currentStringId(departmentOptions, fields.residenceDepartment),
-      onSelect: (id: number) => selectResidenceDepartment(departmentOptions[id - 1] ?? ""),
-    },
-    city: {
-      title: "Ciudad de residencia",
-      options: stringOptions(cityOptions),
-      selectedId: currentStringId(cityOptions, fields.residenceCity),
-      onSelect: (id: number) => update("residenceCity", cityOptions[id - 1] ?? ""),
-    },
     transport: {
       title: "Medio de transporte",
       options: form.catalogs.transportTypes,
@@ -1204,12 +1482,6 @@ function PublicContractorOnboarding({ token }: { token: string }) {
       options: form.catalogs.educationLevels,
       selectedId: fields.educationLevelId,
       onSelect: (id: number) => update("educationLevelId", id),
-    },
-    stratum: {
-      title: "Estrato",
-      options: stringOptions(form.catalogs.stratum),
-      selectedId: currentStringId(form.catalogs.stratum, fields.stratum),
-      onSelect: (id: number) => update("stratum", form.catalogs.stratum[id - 1] ?? ""),
     },
     shirt: {
       title: "Talla de camisa",
@@ -1249,47 +1521,24 @@ function PublicContractorOnboarding({ token }: { token: string }) {
             <Choice label="Tipo de sangre *" value={fields.bloodType} icon="water-outline" onPress={() => setPicker("blood")} />
             <Choice label="Fecha de nacimiento *" value={fields.birthDate || "Selecciona fecha"} icon="calendar-outline" onPress={() => setCalendarOpen(true)} />
             <Label text="Lugar de nacimiento *" />
-            <Input icon="location-outline" value={fields.birthPlace} onChangeText={(value) => update("birthPlace", value)} autoCapitalize="words" />
+            <Input icon="location-outline" value={fields.birthPlace} onChangeText={(value) => update("birthPlace", value.toUpperCase())} autoCapitalize="characters" />
             <Choice label="Estado civil *" value={selectedName(form.catalogs.civilStates, fields.civilStateId)} icon="heart-outline" onPress={() => setPicker("civil")} />
-          </FormCard>
-          <FormCard title="Residencia y contacto">
-            <Choice
-              label="Departamento de residencia *"
-              value={fields.residenceDepartment || "Selecciona departamento"}
-              icon="map-outline"
-              onPress={() => setPicker("department")}
-            />
-            <Choice
-              label="Ciudad de residencia *"
-              value={fields.residenceCity || (fields.residenceDepartment ? "Selecciona ciudad" : "Selecciona departamento primero")}
-              icon="business-outline"
-              disabled={!fields.residenceDepartment || cityOptions.length === 0}
-              onPress={() => setPicker("city")}
-            />
-            <Label text="Dirección de residencia *" />
-            <Input icon="home-outline" value={fields.address} onChangeText={(value) => update("address", value)} />
-            <Choice label="Estrato *" value={fields.stratum} icon="layers-outline" onPress={() => setPicker("stratum")} />
-            <Label text="Teléfono *" />
-            <Input icon="call-outline" value={fields.phone} onChangeText={(value) => update("phone", value)} keyboardType="phone-pad" />
           </FormCard>
           <FormCard title="Información laboral y logística">
             <Choice label="Medio de transporte *" value={selectedName(form.catalogs.transportTypes, fields.transportTypeId)} icon="car-outline" onPress={() => setPicker("transport")} />
             <Choice label="Grado de escolaridad *" value={selectedName(form.catalogs.educationLevels, fields.educationLevelId)} icon="school-outline" onPress={() => setPicker("education")} />
-            <Label text="EPS *" />
-            <Input icon="medkit-outline" value={fields.eps} onChangeText={(value) => update("eps", value)} autoCapitalize="words" />
-            <Label text="Fondo de pensiones *" />
-            <Input icon="business-outline" value={fields.pensionFund} onChangeText={(value) => update("pensionFund", value)} autoCapitalize="words" />
             <Choice label="Talla de camisa *" value={fields.shirtSize} icon="shirt-outline" onPress={() => setPicker("shirt")} />
             <Choice label="Talla de pantalón *" value={fields.pantSize} icon="resize-outline" onPress={() => setPicker("pant")} />
             <Choice label="Talla de zapatos *" value={fields.shoeSize} icon="footsteps-outline" onPress={() => setPicker("shoe")} />
           </FormCard>
           <FormCard title="Contacto de emergencia">
             <Label text="Nombre *" />
-            <Input icon="person-outline" value={fields.emergencyContactName} onChangeText={(value) => update("emergencyContactName", value)} autoCapitalize="words" />
+            <Input icon="person-outline" value={fields.emergencyContactName} onChangeText={(value) => update("emergencyContactName", value.toUpperCase())} autoCapitalize="characters" />
             <Label text="Parentesco *" />
-            <Input icon="people-outline" value={fields.emergencyContactRelationship} onChangeText={(value) => update("emergencyContactRelationship", value)} autoCapitalize="words" />
+            <Input icon="people-outline" value={fields.emergencyContactRelationship} onChangeText={(value) => update("emergencyContactRelationship", value.toUpperCase())} autoCapitalize="characters" />
             <Label text="Teléfono *" />
             <Input icon="call-outline" value={fields.emergencyContactPhone} onChangeText={(value) => update("emergencyContactPhone", value)} keyboardType="phone-pad" />
+            {!!fields.emergencyContactPhone && !/^3[0-9]{9}$/.test(fields.emergencyContactPhone.trim()) && <Text style={{ color: C.red }}>Ingresa 10 digitos comenzando por 3. Ejemplo: 3001234567.</Text>}
           </FormCard>
           <FormCard title="Foto de perfil">
             <Notice icon="camera-outline" text="Tómate una foto frontal, con buena luz y el rostro centrado. Esta será tu foto de perfil." />
@@ -1316,11 +1565,12 @@ function PublicContractorOnboarding({ token }: { token: string }) {
             </Pressable>
           </FormCard>
           <PrimaryButton
-            label={saving ? `${onboardingStepLabel || "Enviando"}... ${onboardingProgress}%` : "Enviar información"}
+            label={saving ? `${onboardingStepLabel || "Enviando"}... ${onboardingProgress}%` : dataSubmitted ? "Abrir contrato" : "Enviar información"}
             icon="send-outline"
             disabled={saving}
             onPress={submit}
           />
+          {submitError ? <Notice icon="alert-circle-outline" text={submitError} tone="error" /> : null}
           {saving ? (
             <View style={styles.activationProgressWrap}>
               <View style={[styles.activationProgressFill, { width: `${onboardingProgress}%` }]} />
@@ -1577,7 +1827,15 @@ function SignatureModal({
   );
 }
 
-function Login({ initialError, busy }: { initialError: string; busy: boolean }) {
+function Login({
+  initialError,
+  busy,
+  onAuthenticationStart,
+}: {
+  initialError: string;
+  busy: boolean;
+  onAuthenticationStart: () => PerformanceTrace;
+}) {
   const [email, setEmail] = useState("coordinador.demo@supportcolombia.com");
   const [password, setPassword] = useState("");
   const [secure, setSecure] = useState(true);
@@ -1585,15 +1843,46 @@ function Login({ initialError, busy }: { initialError: string; busy: boolean }) 
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState(initialError);
 
+  useEffect(() => {
+    setMessage(initialError);
+  }, [initialError]);
+
   const signIn = async () => {
+    if (!email.trim() || !password) {
+      setMessage("Ingresa tu correo y contraseña.");
+      return;
+    }
     setSubmitting(true);
     setMessage("");
-    const result = await supabase.auth.signInWithPassword({
-      email: email.trim().toLowerCase(),
-      password,
-    });
-    if (result.error) setMessage("Correo o contraseña incorrectos.");
-    setSubmitting(false);
+    const performanceTrace = onAuthenticationStart();
+    const authenticationStartedAt = performanceNow();
+    try {
+      const result = await withTimeout(
+        supabase.auth.signInWithPassword({
+          email: email.trim().toLowerCase(),
+          password,
+        }),
+        15_000,
+        "El inicio de sesión tardó demasiado. Revisa tu conexión e inténtalo nuevamente.",
+      );
+      finishPerformanceStage(performanceTrace, "authentication", authenticationStartedAt, {
+        success: !result.error,
+      });
+      if (result.error) {
+        setPerformanceTraceRole(performanceTrace, "UNAUTHENTICATED");
+        finishPerformanceTrace(performanceTrace);
+        setMessage("Correo o contraseña incorrectos.");
+      }
+    } catch (cause) {
+      finishPerformanceStage(performanceTrace, "authentication", authenticationStartedAt, {
+        success: false,
+      });
+      setPerformanceTraceRole(performanceTrace, "UNAUTHENTICATED");
+      finishPerformanceTrace(performanceTrace);
+      setMessage(errorMessage(cause));
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const recover = async () => {
@@ -1879,19 +2168,32 @@ function Header({
 function Operations({
   context,
   operations,
+  historyIds,
+  hasMore,
+  historyExpanded,
   loading,
-  onRefresh,
+  onRefreshInitial,
+  onRefreshAlerts,
+  onLoadDate,
+  onLoadMore,
   onOpen,
   onInitial,
 }: {
   context: UserContext;
   operations: Operation[];
+  historyIds: number[];
+  hasMore: boolean;
+  historyExpanded: boolean;
   loading: boolean;
-  onRefresh: () => void;
+  onRefreshInitial: () => Promise<void>;
+  onRefreshAlerts: () => Promise<void>;
+  onLoadDate: (date: string) => Promise<Operation[]>;
+  onLoadMore: () => Promise<void>;
   onOpen: (id: number) => void;
   onInitial: () => void;
 }) {
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const [selectedDateIds, setSelectedDateIds] = useState<number[]>([]);
   const [calendarVisible, setCalendarVisible] = useState(false);
   const [changesRequestedOnly, setChangesRequestedOnly] = useState(false);
   const pending = operations.filter((item) => item.status === "PENDIENTE");
@@ -1902,16 +2204,35 @@ function Operations({
     todayOperations.flatMap((item) => item.contractorIds),
   ).size;
   const inProgressToday = todayOperations.filter((item) => item.status === "EN_CURSO").length;
-  const threeDayStart = dateToIso(addDays(isoToDate(today), -2));
-  const visibleOperations = operations.filter((operation) => {
-    if (changesRequestedOnly && operation.status !== "CAMBIOS_SOLICITADOS") return false;
-    if (selectedDate) return operation.date === selectedDate;
-    if (changesRequestedOnly) return true;
-    return operation.date >= threeDayStart && operation.date <= today;
-  });
+  const historyOperations = historyIds
+    .map((id) => operations.find((operation) => operation.id === id))
+    .filter(Boolean) as Operation[];
+  const dateOperations = selectedDateIds
+    .map((id) => operations.find((operation) => operation.id === id))
+    .filter(Boolean) as Operation[];
+  const visibleOperations = changesRequestedOnly
+    ? (selectedDate ? dateOperations : changesRequested)
+      .filter((operation) => operation.status === "CAMBIOS_SOLICITADOS")
+    : selectedDate
+      ? dateOperations
+      : historyOperations;
   const totalToday = todayOperations.reduce((total, item) => total + item.people, 0);
+  const refreshVisibleOperations = async () => {
+    try {
+      if (selectedDate) {
+        const rows = await onLoadDate(selectedDate);
+        setSelectedDateIds(rows.map((operation) => operation.id));
+      } else if (changesRequestedOnly) {
+        await onRefreshAlerts();
+      } else {
+        await onRefreshInitial();
+      }
+    } catch (cause) {
+      showMessage("No fue posible actualizar", errorMessage(cause));
+    }
+  };
   return (
-    <Page loading={loading} onRefresh={onRefresh}>
+    <Page loading={loading} onRefresh={refreshVisibleOperations}>
       <View>
         <Text style={styles.eyebrow}>OPERACIÓN EN TIEMPO REAL</Text>
         <Text style={styles.greeting}>
@@ -1989,7 +2310,7 @@ function Operations({
         <Pressable style={styles.dateFilterButton} onPress={() => setCalendarVisible(true)}>
           <Ionicons name="calendar-outline" size={17} color={C.navy} />
           <Text style={styles.dateFilterText}>
-            {selectedDate ? formatDate(selectedDate) : "Últimos 3 días"}
+            {selectedDate ? formatDate(selectedDate) : historyExpanded ? "Historial cargado" : "Recientes y activas"}
           </Text>
           <Ionicons name="chevron-down" size={15} color={C.navy} />
         </Pressable>
@@ -2013,29 +2334,47 @@ function Operations({
                 ? "No hay operaciones con cambios solicitados."
                 : selectedDate
               ? `No hay operaciones para el ${formatDate(selectedDate)}.`
-              : "No hay operaciones registradas en los últimos 3 días."
+              : "No hay operaciones recientes ni activas."
           }
         />
       ) : (
-        visibleOperations.map((operation) => (
-          <OperationCard
-            key={operation.id}
-            operation={operation}
-            hideStatus={context.role === "Cliente"}
-            onPress={() => onOpen(operation.id)}
-          />
-        ))
+        <>
+          {visibleOperations.map((operation) => (
+            <OperationCard
+              key={operation.id}
+              operation={operation}
+              hideStatus={context.role === "Cliente"}
+              onPress={() => onOpen(operation.id)}
+            />
+          ))}
+          {!selectedDate && !changesRequestedOnly && hasMore && (
+            <SecondaryButton
+              label={loading ? "Cargando..." : "Cargar operaciones anteriores"}
+              icon="chevron-down-outline"
+              disabled={loading}
+              onPress={() => void onLoadMore().catch((cause) => {
+                showMessage("No fue posible cargar el historial", errorMessage(cause));
+              })}
+            />
+          )}
+        </>
       )}
       <CalendarModal
         visible={calendarVisible}
         selectedDate={selectedDate}
         onClose={() => setCalendarVisible(false)}
         onSelect={(date) => {
-          setSelectedDate(date);
           setCalendarVisible(false);
+          void onLoadDate(date)
+            .then((rows) => {
+              setSelectedDate(date);
+              setSelectedDateIds(rows.map((operation) => operation.id));
+            })
+            .catch((cause) => showMessage("No fue posible cargar la fecha", errorMessage(cause)));
         }}
         onReset={() => {
           setSelectedDate(null);
+          setSelectedDateIds([]);
           setCalendarVisible(false);
         }}
       />
@@ -2050,6 +2389,8 @@ function CalendarModal({
   title = "Filtrar por fecha",
   subtitle = "Selecciona el día que quieres visualizar.",
   resetLabel = "Mostrar últimos 3 días",
+  minimumDate,
+  maximumDate,
   onClose,
   onSelect,
   onReset,
@@ -2060,6 +2401,8 @@ function CalendarModal({
   title?: string;
   subtitle?: string;
   resetLabel?: string;
+  minimumDate?: string;
+  maximumDate?: string;
   onClose: () => void;
   onSelect: (date: string) => void;
   onReset?: () => void;
@@ -2213,6 +2556,7 @@ function CalendarModal({
                   );
                   const selected = isoDate === selectedDate;
                   const isToday = isoDate === todayIso();
+                  const disabled = Boolean((minimumDate && isoDate < minimumDate) || (maximumDate && isoDate > maximumDate));
                   return (
                     <Pressable
                       key={isoDate}
@@ -2220,7 +2564,10 @@ function CalendarModal({
                         styles.calendarDay,
                         isToday && styles.calendarToday,
                         selected && styles.calendarDaySelected,
+                        disabled && styles.calendarDayDisabled,
                       ]}
+                      disabled={disabled}
+                      accessibilityState={{ disabled, selected }}
                       onPress={() => onSelect(isoDate)}
                     >
                       <Text
@@ -2685,7 +3032,7 @@ function InitialOperation({
 }: {
   context: UserContext;
   data: AppData;
-  onSaved: () => void;
+  onSaved: (operationId: number) => void;
 }) {
   const firstClient = context.clients[0];
   const activeContractors = data.contractors.filter((contractor) => contractor.active);
@@ -2759,20 +3106,21 @@ function InitialOperation({
     }
     setSaving(true);
     try {
+      let operationId: number;
       if (operationType === "DESCARGUE") {
-        await createDischargeOperation({
+        operationId = await createDischargeOperation({
           date: operationDate, clientId, areaId, serviceUnitTypeId,
           plannedUnits: unitCount, contractorIds: added.map((item) => item.id),
         });
       } else {
-        await createOperation({
+        operationId = await createOperation({
           date: operationDate, clientId, areaId, shiftId,
           contractorIds: added.map((item) => item.id),
           confirmedSecondShiftContractorIds,
         });
       }
       showMessage("Registro guardado", "La operación quedó EN CURSO.");
-      await onSaved();
+      await onSaved(operationId);
     } catch (cause) {
       showMessage("No fue posible guardar", errorMessage(cause));
     } finally {
@@ -3967,6 +4315,196 @@ function ClientStaff({
   );
 }
 
+type ContractorRegistrationDetails = {
+  residenceDepartment: string;
+  residenceCity: string;
+  neighborhood: string;
+  address: string;
+  pensionFund: string;
+  eps: string;
+};
+
+const emptyContractorRegistrationDetails = (): ContractorRegistrationDetails => ({
+  residenceDepartment: "",
+  residenceCity: "",
+  neighborhood: "",
+  address: "",
+  pensionFund: "",
+  eps: "",
+});
+
+const registrationDetailLabels: Record<keyof ContractorRegistrationDetails, string> = {
+  residenceDepartment: "Departamento",
+  residenceCity: "Ciudad",
+  neighborhood: "Barrio",
+  address: "Dirección",
+  pensionFund: "Fondo de pensiones",
+  eps: "EPS",
+};
+
+function missingRegistrationDetails(details: ContractorRegistrationDetails): string[] {
+  const missing = (Object.keys(registrationDetailLabels) as (keyof ContractorRegistrationDetails)[])
+    .filter((key) => !details[key].trim())
+    .map((key) => registrationDetailLabels[key]);
+  if (details.residenceDepartment && !COLOMBIA_DEPARTMENTS.includes(details.residenceDepartment as typeof COLOMBIA_DEPARTMENTS[number])) {
+    missing.push("Departamento válido");
+  } else if (details.residenceCity && !(COLOMBIA_MUNICIPALITIES_BY_DEPARTMENT[details.residenceDepartment] ?? []).includes(details.residenceCity)) {
+    missing.push("Ciudad del departamento seleccionado");
+  }
+  return missing;
+}
+
+function ContractorRegistrationFields({
+  details,
+  onChange,
+  onValidation,
+}: {
+  details: ContractorRegistrationDetails;
+  onChange: (details: ContractorRegistrationDetails) => void;
+  onValidation: (errors: string[]) => void;
+}) {
+  const [picker, setPicker] = useState<"department" | "city" | "pensionFund" | "eps" | null>(null);
+  const [catalogs, setCatalogs] = useState<{ pensionFund: string[]; eps: string[] } | null>(null);
+  const [catalogError, setCatalogError] = useState("");
+  const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    let active = true;
+    setCatalogs(null);
+    setCatalogError("");
+    Promise.all([
+      supabase.from("pension_funds").select("name").eq("is_active", true).order("id"),
+      supabase.from("health_insurers").select("name").eq("is_active", true).order("id"),
+    ]).then(([funds, insurers]) => {
+      if (!active) return;
+      if (funds.error || insurers.error || !funds.data?.length || !insurers.data?.length) {
+        setCatalogError("No se pudieron cargar pensiones y EPS. Reintenta antes de guardar.");
+        return;
+      }
+      setCatalogs({ pensionFund: funds.data.map((row) => row.name), eps: insurers.data.map((row) => row.name) });
+    }).catch(() => { if (active) setCatalogError("No se pudieron cargar pensiones y EPS. Reintenta antes de guardar."); });
+    return () => { active = false; };
+  }, [retry]);
+  const pensionError = catalogs && !catalogs.pensionFund.includes(details.pensionFund) ? "Fondo de pensiones: selecciona una opcion activa del catalogo." : "";
+  const epsError = catalogs && !catalogs.eps.includes(details.eps) ? "EPS: selecciona una opcion activa del catalogo." : "";
+  useEffect(() => {
+    onValidation(!catalogs ? [catalogError || "Espera la carga de pensiones y EPS."] : [pensionError, epsError].filter(Boolean));
+  }, [catalogs, catalogError, pensionError, epsError, onValidation]);
+  const departments = Array.from(COLOMBIA_DEPARTMENTS);
+  const cities = details.residenceDepartment
+    ? COLOMBIA_MUNICIPALITIES_BY_DEPARTMENT[details.residenceDepartment] ?? []
+    : [];
+  const options = picker === "department" ? departments : picker === "pensionFund" || picker === "eps" ? catalogs?.[picker] ?? [] : cities;
+  const selected = picker === "department" ? details.residenceDepartment : picker === "pensionFund" || picker === "eps" ? details[picker] : details.residenceCity;
+  const update = (key: keyof ContractorRegistrationDetails, value: string) => onChange({ ...details, [key]: value });
+
+  return (
+    <>
+      <Choice label="Departamento *" value={details.residenceDepartment || "Selecciona departamento"} icon="map-outline" onPress={() => setPicker("department")} />
+      <Choice label="Ciudad *" value={details.residenceCity || (details.residenceDepartment ? "Selecciona ciudad" : "Selecciona departamento primero")}
+        icon="business-outline" disabled={!details.residenceDepartment || !cities.length} onPress={() => setPicker("city")} />
+      <Label text="Barrio *" />
+      <Input icon="location-outline" value={details.neighborhood} onChangeText={(value) => update("neighborhood", value.toUpperCase())} autoCapitalize="characters" />
+      <Label text="Dirección *" />
+      <Input icon="home-outline" value={details.address} onChangeText={(value) => update("address", value)} />
+      <Choice label="Fondo de pensiones *" value={details.pensionFund || "Selecciona una opcion"} icon="business-outline" disabled={!catalogs} onPress={() => setPicker("pensionFund")} />
+      {!!pensionError && <Text style={{ color: "#b42318" }}>{pensionError}</Text>}
+      <Choice label="EPS *" value={details.eps || "Selecciona una opcion"} icon="medkit-outline" disabled={!catalogs} onPress={() => setPicker("eps")} />
+      {!!epsError && <Text style={{ color: "#b42318" }}>{epsError}</Text>}
+      {!catalogs && <Text style={{ color: "#b42318" }}>{catalogError || "Cargando pensiones y EPS..."}</Text>}
+      {!!catalogError && <Pressable onPress={() => setRetry((value) => value + 1)}><Text>Reintentar carga de catalogos</Text></Pressable>}
+      <DropdownModal
+        visible={picker !== null}
+        title={picker === "department" ? "Departamento de residencia" : picker === "pensionFund" ? "Fondo de pensiones" : picker === "eps" ? "EPS" : "Ciudad de residencia"}
+        options={options.map((name, index) => ({ id: index + 1, name }))}
+        selectedId={Math.max(0, options.indexOf(selected) + 1)}
+        searchable
+        onClose={() => setPicker(null)}
+        onSelect={(id) => {
+          const value = options[id - 1] ?? "";
+          if (picker === "department") onChange({ ...details, residenceDepartment: value, residenceCity: "" });
+          else update(picker === "pensionFund" || picker === "eps" ? picker : "residenceCity", value);
+          setPicker(null);
+        }}
+      />
+    </>
+  );
+}
+
+async function pickGalleryPhotoUri(): Promise<string | null> {
+  const result = await ImagePicker.launchImageLibraryAsync({
+    mediaTypes: ["images"],
+    allowsEditing: false,
+    allowsMultipleSelection: false,
+    quality: 1,
+  });
+  if (result.canceled) return null;
+  const uri = result.assets?.[0]?.uri;
+  if (!uri) throw new Error("No fue posible leer la foto seleccionada.");
+  return uri;
+}
+
+async function pickGalleryPdf(name: string): Promise<ContractorPdfFile | null> {
+  const uri = await pickGalleryPhotoUri();
+  return uri ? buildPdfFromPhotos([uri], name) : null;
+}
+
+function PdfGallerySourceModal({
+  visible,
+  title,
+  onClose,
+  onPickPdf,
+  onPickGallery,
+}: {
+  visible: boolean;
+  title: string;
+  onClose: () => void;
+  onPickPdf: () => void;
+  onPickGallery: () => void;
+}) {
+  const choose = (callback: () => void) => {
+    onClose();
+    if (Platform.OS === "web") {
+      callback();
+    } else {
+      InteractionManager.runAfterInteractions(() => setTimeout(callback, 350));
+    }
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.modalBackdrop}>
+        <View style={styles.modalCard}>
+          <View style={styles.between}>
+            <View style={styles.flex}>
+              <Text style={styles.formTitle}>{title}</Text>
+              <Text style={styles.caption}>El archivo guardado siempre será un PDF máximo 1 MB.</Text>
+            </View>
+            <Pressable style={styles.iconButton} onPress={onClose}>
+              <Ionicons name="close" size={20} color={C.ink} />
+            </Pressable>
+          </View>
+          <Pressable style={styles.sourceOption} onPress={() => choose(onPickPdf)}>
+            <View style={styles.pdfIcon}><Ionicons name="document-attach-outline" size={23} color={C.orange} /></View>
+            <View style={styles.flex}>
+              <Text style={styles.cardTitle}>Cargar PDF</Text>
+              <Text style={styles.cardMeta}>Selecciona un archivo PDF.</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={C.muted} />
+          </Pressable>
+          <Pressable style={styles.sourceOption} onPress={() => choose(onPickGallery)}>
+            <View style={styles.pdfIcon}><Ionicons name="images-outline" size={23} color={C.orange} /></View>
+            <View style={styles.flex}>
+              <Text style={styles.cardTitle}>Galería de fotos</Text>
+              <Text style={styles.cardMeta}>Elige una foto para convertirla en PDF.</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={C.muted} />
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 function CreateContractor({
   documentTypes,
   onSaved,
@@ -3981,11 +4519,20 @@ function CreateContractor({
   const [birthDate, setBirthDate] = useState("");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
+  const [registrationDetails, setRegistrationDetails] = useState(emptyContractorRegistrationDetails);
+  const [catalogErrors, setCatalogErrors] = useState<string[]>(["Espera la carga de pensiones y EPS."]);
+  const [attempted, setAttempted] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const nameError = !name.trim() ? "Nombres: campo obligatorio." : "";
+  const lastNameError = !lastName.trim() ? "Apellidos: campo obligatorio." : "";
+  const phoneError = !/^3[0-9]{9}$/.test(phone.trim()) ? "Telefono: ingresa 10 digitos comenzando por 3. Ejemplo: 3001234567." : "";
+  const emailError = !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()) ? "Correo: ingresa una direccion como elcorreo@dominio.com." : "";
   const [cedulaPdf, setCedulaPdf] = useState<ContractorPdfFile | null>(null);
   const [selectorOpen, setSelectorOpen] = useState(false);
   const [birthDateCalendarOpen, setBirthDateCalendarOpen] = useState(false);
   const [cedulaSourceOpen, setCedulaSourceOpen] = useState(false);
   const [cedulaCaptureOpen, setCedulaCaptureOpen] = useState(false);
+  const [cedulaCaptureMode, setCedulaCaptureMode] = useState<"camera" | "gallery">("camera");
   const [pendingCedulaPick, setPendingCedulaPick] = useState(false);
   const [saving, setSaving] = useState(false);
   const pickingCedulaRef = useRef(false);
@@ -4045,6 +4592,15 @@ function CreateContractor({
 
   const save = async () => {
     const normalizedEmail = email.trim().toLowerCase();
+    setAttempted(true);
+    setSaveError("");
+    const validation = [nameError, lastNameError, phoneError, emailError, ...catalogErrors,
+      ...missingRegistrationDetails(registrationDetails).map((field) => `${field}: completa o corrige este campo.`),
+      ...(!documentTypeId || !documentNumber.trim() ? ["Completa tipo y numero de documento."] : []),
+      ...(!birthDate ? ["Selecciona fecha de nacimiento."] : []),
+      ...(!cedulaPdf ? ["Adjunta la cedula en PDF."] : []),
+    ].filter(Boolean);
+    if (validation.length) { setSaveError(validation.join("\n")); return; }
     const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail);
     if (!documentTypeId || !documentNumber.trim() || !name.trim() || !lastName.trim() || !birthDate || !phone.trim() || !normalizedEmail) {
       Alert.alert("Completa el contratista", "Todos los campos son obligatorios en esta fase.");
@@ -4052,6 +4608,11 @@ function CreateContractor({
     }
     if (!emailValid) {
       Alert.alert("Correo no válido", "Verifica el formato del correo electrónico.");
+      return;
+    }
+    const missing = missingRegistrationDetails(registrationDetails);
+    if (missing.length) {
+      Alert.alert("Completa el contratista", `Faltan: ${missing.join(", ")}.`);
       return;
     }
     if (!cedulaPdf) {
@@ -4063,16 +4624,18 @@ function CreateContractor({
       const contractorId = await createContractorDraft({
         documentTypeId,
         documentNumber,
-        name,
-        lastName,
+        name: name.trim().toUpperCase(),
+        lastName: lastName.trim().toUpperCase(),
         birthDate,
         phone,
         email: normalizedEmail,
+        ...registrationDetails,
         cedulaPdf,
       });
       Alert.alert("Contratista creado", "El contrato quedó PENDIENTE hasta que el Director adjunte el Certificado ARL.");
       await onSaved(contractorId);
     } catch (cause) {
+      setSaveError(errorMessage(cause));
       Alert.alert("No fue posible crear", errorMessage(cause));
     } finally {
       setSaving(false);
@@ -4083,7 +4646,7 @@ function CreateContractor({
     <Page>
       <Notice
         icon="information-circle-outline"
-        text="En esta fase solo se registran datos básicos y la cédula. El contrato quedará PENDIENTE."
+        text="Registra los datos personales, de residencia y seguridad social, y adjunta la cédula. El contrato quedará PENDIENTE."
       />
       <FormCard title="Datos básicos">
         <Choice
@@ -4096,9 +4659,11 @@ function CreateContractor({
         <Label text="Documento *" />
         <Input icon="document-text-outline" value={documentNumber} onChangeText={setDocumentNumber} keyboardType="number-pad" />
         <Label text="Nombres *" />
-        <Input icon="person-outline" value={name} onChangeText={setName} autoCapitalize="words" />
+        <Input icon="person-outline" value={name} onChangeText={(value) => setName(value.toUpperCase())} autoCapitalize="characters" />
+        {attempted && !!nameError && <Text style={{ color: "#b42318" }}>{nameError}</Text>}
         <Label text="Apellidos *" />
-        <Input icon="person-outline" value={lastName} onChangeText={setLastName} autoCapitalize="words" />
+        <Input icon="person-outline" value={lastName} onChangeText={(value) => setLastName(value.toUpperCase())} autoCapitalize="characters" />
+        {attempted && !!lastNameError && <Text style={{ color: "#b42318" }}>{lastNameError}</Text>}
         <Choice
           label="Fecha de nacimiento *"
           value={birthDate || "Selecciona fecha"}
@@ -4107,8 +4672,14 @@ function CreateContractor({
         />
         <Label text="Teléfono *" />
         <Input icon="call-outline" value={phone} onChangeText={setPhone} keyboardType="phone-pad" />
+        {attempted && !!phoneError && <Text style={{ color: "#b42318" }}>{phoneError}</Text>}
         <Label text="Correo *" />
         <Input icon="mail-outline" value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" />
+        {attempted && !!emailError && <Text style={{ color: "#b42318" }}>{emailError}</Text>}
+      </FormCard>
+      <FormCard title="Residencia y seguridad social">
+        <ContractorRegistrationFields details={registrationDetails} onChange={setRegistrationDetails} onValidation={setCatalogErrors} />
+        {attempted && !registrationDetails.neighborhood.trim() && <Text style={{ color: "#b42318" }}>Barrio: campo obligatorio.</Text>}
       </FormCard>
       <FormCard title="Documento obligatorio">
         <Pressable style={styles.uploadCard} onPress={() => setCedulaSourceOpen(true)}>
@@ -4122,12 +4693,13 @@ function CreateContractor({
                 ? cedulaPdf.name === "cedula-fotos.pdf"
                   ? "PDF generado desde fotos"
                   : cedulaPdf.name
-                : "Cargar PDF o tomar foto"}
+                : "Cargar PDF, tomar foto o elegir de Galería"}
             </Text>
           </View>
           <Ionicons name="cloud-upload-outline" size={20} color={C.navy} />
         </Pressable>
       </FormCard>
+      {!!saveError && <Text accessibilityRole="alert" style={{ color: "#b42318" }}>{saveError}</Text>}
       <PrimaryButton label={saving ? "Creando..." : "Guardar contratista"} icon="save-outline" disabled={saving} onPress={save} />
       <DropdownModal
         visible={selectorOpen}
@@ -4156,16 +4728,24 @@ function CreateContractor({
         visible={cedulaSourceOpen}
         onClose={() => setCedulaSourceOpen(false)}
         onPickPdf={() => {
-          setPendingCedulaPick(true);
           setCedulaSourceOpen(false);
+          if (Platform.OS === "web") void pickCedula();
+          else setPendingCedulaPick(true);
         }}
         onTakePhotos={() => {
           setCedulaSourceOpen(false);
+          setCedulaCaptureMode("camera");
+          setCedulaCaptureOpen(true);
+        }}
+        onPickGallery={() => {
+          setCedulaSourceOpen(false);
+          setCedulaCaptureMode("gallery");
           setCedulaCaptureOpen(true);
         }}
       />
       <CedulaCaptureFlow
         visible={cedulaCaptureOpen}
+        mode={cedulaCaptureMode}
         onClose={() => setCedulaCaptureOpen(false)}
         onPdfReady={(file) => {
           setCedulaPdf(file);
@@ -4181,11 +4761,13 @@ function CedulaSourceModal({
   onClose,
   onPickPdf,
   onTakePhotos,
+  onPickGallery,
 }: {
   visible: boolean;
   onClose: () => void;
   onPickPdf: () => void;
   onTakePhotos: () => void;
+  onPickGallery: () => void;
 }) {
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
@@ -4220,6 +4802,16 @@ function CedulaSourceModal({
             </View>
             <Ionicons name="chevron-forward" size={20} color={C.muted} />
           </Pressable>
+          <Pressable style={styles.sourceOption} onPress={onPickGallery}>
+            <View style={styles.pdfIcon}>
+              <Ionicons name="images-outline" size={23} color={C.orange} />
+            </View>
+            <View style={styles.flex}>
+              <Text style={styles.cardTitle}>Galería de fotos</Text>
+              <Text style={styles.cardMeta}>Selecciona frente y, si quieres, reverso.</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={C.muted} />
+          </Pressable>
         </View>
       </View>
     </Modal>
@@ -4228,10 +4820,12 @@ function CedulaSourceModal({
 
 function CedulaCaptureFlow({
   visible,
+  mode,
   onClose,
   onPdfReady,
 }: {
   visible: boolean;
+  mode: "camera" | "gallery";
   onClose: () => void;
   onPdfReady: (file: ContractorPdfFile) => void;
 }) {
@@ -4248,10 +4842,21 @@ function CedulaCaptureFlow({
       setFrontUri("");
       setBackUri("");
       setActiveSide("front");
-      setCameraOpen(true);
+      setCameraOpen(mode === "camera");
       setGenerating(false);
     }
-  }, [visible]);
+  }, [visible, mode]);
+
+  const selectGalleryPhoto = async (side: CedulaSide) => {
+    try {
+      const uri = await pickGalleryPhotoUri();
+      if (!uri) return;
+      if (side === "front") setFrontUri(uri);
+      else setBackUri(uri);
+    } catch (cause) {
+      Alert.alert("No fue posible seleccionar la foto", errorMessage(cause));
+    }
+  };
 
   const ensurePermission = async () => {
     if (permission?.granted) return true;
@@ -4290,16 +4895,18 @@ function CedulaCaptureFlow({
   };
 
   const generatePdf = async () => {
-    if (!frontUri || !backUri) {
-      Alert.alert("Faltan fotos", "Toma la foto del frente y del reverso antes de generar el PDF.");
+    if (!frontUri || (mode === "camera" && !backUri)) {
+      Alert.alert("Faltan fotos", mode === "camera"
+        ? "Toma la foto del frente y del reverso antes de generar el PDF."
+        : "Selecciona al menos la foto del frente para generar el PDF.");
       return;
     }
     setGenerating(true);
     try {
-      const file = await buildCedulaPdfFromPhotos(frontUri, backUri);
+      const file = await buildCedulaPdfFromPhotos(frontUri, backUri || undefined);
       onPdfReady(file);
     } catch (cause) {
-      Alert.alert("No fue posible generar el PDF", errorMessage(cause));
+      showPdfError(cause);
     } finally {
       setGenerating(false);
     }
@@ -4313,7 +4920,7 @@ function CedulaCaptureFlow({
         <View style={styles.cameraHeader}>
           <View style={styles.flex}>
             <Text style={styles.formTitle}>Foto de cédula</Text>
-            <Text style={styles.caption}>Toma frente y reverso. Solo se guardará el PDF final.</Text>
+            <Text style={styles.caption}>{mode === "camera" ? "Toma frente y reverso." : "Selecciona frente y reverso opcional."} Solo se guardará el PDF final.</Text>
           </View>
           <Pressable style={styles.iconButton} onPress={onClose}>
             <Ionicons name="close" size={20} color={C.ink} />
@@ -4341,21 +4948,27 @@ function CedulaCaptureFlow({
           </View>
         ) : (
           <ScrollView contentContainerStyle={styles.capturePreviewContent}>
-            <Notice icon="document-text-outline" text="Previsualiza ambas imágenes antes de generar el PDF." />
+            <Notice icon="document-text-outline" text={mode === "camera"
+              ? "Previsualiza ambas imágenes antes de generar el PDF."
+              : "Selecciona y revisa el frente. Puedes añadir el reverso antes de generar el PDF."} />
             <CedulaPreviewSlot
               title="Frente del documento"
               uri={frontUri}
-              onTake={() => openCamera("front")}
+              actionLabel={mode === "gallery" ? (frontUri ? "Cambiar foto" : "Elegir foto") : undefined}
+              actionIcon={mode === "gallery" ? "images-outline" : undefined}
+              onTake={() => mode === "gallery" ? void selectGalleryPhoto("front") : void openCamera("front")}
             />
             <CedulaPreviewSlot
               title="Reverso del documento"
               uri={backUri}
-              onTake={() => openCamera("back")}
+              actionLabel={mode === "gallery" ? (backUri ? "Cambiar foto" : "Elegir foto") : undefined}
+              actionIcon={mode === "gallery" ? "images-outline" : undefined}
+              onTake={() => mode === "gallery" ? void selectGalleryPhoto("back") : void openCamera("back")}
             />
             <PrimaryButton
               label={generating ? "Generando PDF..." : "Generar PDF de cédula"}
               icon="document-outline"
-              disabled={generating || !frontUri || !backUri}
+              disabled={generating || !frontUri || (mode === "camera" && !backUri)}
               onPress={generatePdf}
             />
             <SecondaryButton label="Cancelar" icon="close-outline" onPress={onClose} />
@@ -4473,7 +5086,13 @@ function SelfieCaptureModal({
   );
 }
 
-function CedulaPreviewSlot({ title, uri, onTake }: { title: string; uri: string; onTake: () => void }) {
+function CedulaPreviewSlot({ title, uri, onTake, actionLabel, actionIcon }: {
+  title: string;
+  uri: string;
+  onTake: () => void;
+  actionLabel?: string;
+  actionIcon?: IconName;
+}) {
   return (
     <View style={styles.previewCard}>
       <View style={styles.between}>
@@ -4481,7 +5100,7 @@ function CedulaPreviewSlot({ title, uri, onTake }: { title: string; uri: string;
           <Text style={styles.cardTitle}>{title}</Text>
           <Text style={styles.caption}>{uri ? "Foto lista para generar PDF." : "Foto pendiente."}</Text>
         </View>
-        <SecondaryButton label={uri ? "Repetir" : "Tomar"} icon="camera-outline" onPress={onTake} />
+        <SecondaryButton label={actionLabel ?? (uri ? "Repetir" : "Tomar")} icon={actionIcon ?? "camera-outline"} onPress={onTake} />
       </View>
       {uri ? (
         <Image source={{ uri }} style={styles.cedulaPreviewImage} resizeMode="contain" />
@@ -4557,7 +5176,7 @@ function Staff({
         <View style={styles.flex}>
           <Text style={styles.eyebrow}>BASE DE TALENTO</Text>
           <Text style={styles.greeting}>Personal disponible</Text>
-          <Text style={styles.subtitle}>{contractors.length} contratistas registrados</Text>
+          <Text style={styles.subtitle}>{visible.length} {visible.length === 1 ? "Contratista" : "Contratistas"}</Text>
         </View>
         <Pressable style={styles.fab} onPress={onCreate}>
           <Ionicons name="add" color={C.white} size={26} />
@@ -4650,6 +5269,10 @@ type ContractorWorkwearSectionHandle = {
 
 type ContractorActivationDocumentsCardHandle = {
   replaceDocuments: (documents: ContractorDocument[]) => void;
+};
+
+type ContractorNoveltiesSectionHandle = {
+  replaceNovelties: (novelties: ContractorNovelty[]) => void;
 };
 
 function ClientContractorProfile({
@@ -4774,9 +5397,13 @@ function ContractorProfile({
   const [refreshing, setRefreshing] = useState(false);
   const refreshingRef = useRef(false);
   const [terminationVisible, setTerminationVisible] = useState(false);
+  const [changeContractVisible, setChangeContractVisible] = useState(false);
+  const [statusActionsExpanded, setStatusActionsExpanded] = useState(false);
+  const [registrationDetailsVisible, setRegistrationDetailsVisible] = useState(false);
   const documentsRef = useRef<ContractorDocumentsSectionHandle>(null);
   const workwearRef = useRef<ContractorWorkwearSectionHandle>(null);
   const activationRef = useRef<ContractorActivationDocumentsCardHandle>(null);
+  const noveltiesRef = useRef<ContractorNoveltiesSectionHandle>(null);
   useEffect(() => {
     loadContractorHistory(contractor.id)
       .then(setHistory)
@@ -4789,19 +5416,23 @@ function ContractorProfile({
     refreshingRef.current = true;
     setRefreshing(true);
     try {
-      const [updatedContractor, updatedHistory, updatedDocuments, updatedSummary, updatedMovements] =
+      const [updatedContractor, updatedHistory, updatedDocuments, updatedSummary, updatedMovements, updatedNovelties] =
         await Promise.all([
           loadContractorProfile(contractor.id),
           loadContractorHistory(contractor.id),
           loadContractorDocuments(contractor.id),
           loadContractorWorkwearSummary(contractor.id),
           loadContractorWorkwearMovements(contractor.id),
+          context.roleCode === "COORDINATOR" || context.roleCode === "DIRECTOR"
+            ? loadContractorNovelties(contractor.id)
+            : Promise.resolve([]),
         ]);
       onContractorRefreshed(updatedContractor);
       setHistory(updatedHistory);
       documentsRef.current?.replaceDocuments(updatedDocuments);
       workwearRef.current?.replaceWorkwear(updatedSummary, updatedMovements);
       activationRef.current?.replaceDocuments(updatedDocuments);
+      noveltiesRef.current?.replaceNovelties(updatedNovelties);
     } catch (cause) {
       Alert.alert("No fue posible actualizar", errorMessage(cause));
     } finally {
@@ -4840,15 +5471,86 @@ function ContractorProfile({
       <InfoCard title="Contacto y logística" rows={[
         ["Teléfono", contractor.phone ?? "Sin registrar"],
         ["Correo", contractor.email ?? "Sin registrar"],
+        ["Departamento", contractor.residenceDepartment || "Sin registrar"],
         ["Ciudad", contractor.city],
+        ["Barrio", contractor.neighborhood || "Sin registrar"],
+        ["Dirección", contractor.address || "Sin registrar"],
         ["Transporte", contractor.transport],
       ]} />
+      {(context.roleCode === "COORDINATOR" || context.roleCode === "DIRECTOR") && (
+        <>
+          {missingRegistrationDetails({
+            residenceDepartment: contractor.residenceDepartment,
+            residenceCity: contractor.city === "Sin registrar" ? "" : contractor.city,
+            neighborhood: contractor.neighborhood,
+            address: contractor.address,
+            pensionFund: contractor.pensionFund ?? "",
+            eps: contractor.eps ?? "",
+          }).length > 0 && (
+            <Notice icon="alert-circle-outline" text="Faltan datos de residencia o seguridad social. Complétalos antes de enviar el onboarding." />
+          )}
+          <SecondaryButton label="Completar residencia y seguridad social" icon="create-outline" onPress={() => setRegistrationDetailsVisible(true)} />
+          <ContractorRegistrationDetailsModal
+            contractor={contractor}
+            visible={registrationDetailsVisible}
+            onClose={() => setRegistrationDetailsVisible(false)}
+            onSaved={async () => {
+              onContractorRefreshed(await loadContractorProfile(contractor.id));
+              setRegistrationDetailsVisible(false);
+            }}
+          />
+        </>
+      )}
       <InfoCard title="Contacto de emergencia" rows={[
         ["Nombre", contractor.emergencyContactName],
         ["Parentesco", contractor.emergencyContactRelationship],
         ["Teléfono", contractor.emergencyContactPhone],
       ]} />
+      {(context.roleCode === "COORDINATOR" || context.roleCode === "DIRECTOR") && (
+        <ContractorNoveltiesSection key={contractor.id} ref={noveltiesRef} contractorId={contractor.id} />
+      )}
       <ContractorWorkwearSection ref={workwearRef} contractorId={contractor.id} workwearTypes={workwearTypes} />
+      {(context.roleCode === "COORDINATOR" || context.roleCode === "DIRECTOR") && contractor.contractStatus !== "PENDIENTE" && (
+        <View style={styles.formCard}>
+          <Text style={styles.formTitle}>Cambiar estado</Text>
+          {contractor.scheduledContractStartDate && (
+            <Notice icon="time-outline" text={`Cambio a ${contractor.scheduledContractTypeName} programado para el ${formatDate(contractor.scheduledContractStartDate)}.`} />
+          )}
+          {contractor.contractStatus === "ACTIVO" ? (
+            <>
+              <SecondaryButton
+                label={statusActionsExpanded ? "Ocultar opciones" : "Cambiar estado"}
+                icon={statusActionsExpanded ? "chevron-up-outline" : "chevron-down-outline"}
+                onPress={() => setStatusActionsExpanded((value) => !value)}
+              />
+              {statusActionsExpanded && (
+                <>
+                  <SecondaryButton label="Cambiar contrato" icon="swap-horizontal-outline" disabled={Boolean(contractor.scheduledContractStartDate)} onPress={() => setChangeContractVisible(true)} />
+                  <SecondaryButton label="Desvincular contratista" icon="person-remove-outline" destructive onPress={() => setTerminationVisible(true)} />
+                </>
+              )}
+            </>
+          ) : (
+            <RehireContractor contractor={contractor} onSaved={async () => { await onChanged(); onContractorRefreshed(await loadContractorProfile(contractor.id)); }} />
+          )}
+          {contractor.contractStatus === "INACTIVO" && contractor.terminationSummary && (
+            <Text selectable style={styles.caption}>
+              {`Desvinculación: ${contractor.terminationSummary.date ? formatDate(contractor.terminationSummary.date) : "Sin registrar"} · Causa: ${contractor.terminationSummary.reason} · Observación: ${contractor.terminationSummary.observations} · Duración: ${contractor.terminationSummary.durationDays === null ? "No disponible" : `${contractor.terminationSummary.durationDays} ${contractor.terminationSummary.durationDays === 1 ? "día" : "días"}`}`}
+            </Text>
+          )}
+        </View>
+      )}
+      <ChangeContractorContractModal
+        visible={changeContractVisible}
+        contractor={contractor}
+        contractTypes={contractTypes}
+        onClose={() => setChangeContractVisible(false)}
+        onSaved={async () => {
+          setChangeContractVisible(false);
+          await onChanged();
+          onContractorRefreshed(await loadContractorProfile(contractor.id));
+        }}
+      />
       {context.role === "Director" && contractor.contractStatus === "PENDIENTE" && (
         <ContractorActivationDocumentsCard
           ref={activationRef}
@@ -4857,13 +5559,8 @@ function ContractorProfile({
           onChanged={onChanged}
         />
       )}
-      {(context.role === "Director" || context.role === "Coordinador") && contractor.contractStatus !== "INACTIVO" && (
-        <SecondaryButton
-          label="Desvincular contratista"
-          icon="person-remove-outline"
-          destructive
-          onPress={() => setTerminationVisible(true)}
-        />
+      {(context.roleCode === "COORDINATOR" || context.roleCode === "DIRECTOR") && contractor.contractStatus === "PENDIENTE" && (
+        <SecondaryButton label="Desvincular contratista" icon="person-remove-outline" destructive onPress={() => setTerminationVisible(true)} />
       )}
       <TerminateContractorModal
         visible={terminationVisible}
@@ -4875,6 +5572,7 @@ function ContractorProfile({
           await onChanged();
         }}
       />
+      {context.roleCode === "DIRECTOR" && contractor.contractStatus === "ACTIVO" && <ContractorOnboardingStatus contractorId={contractor.id} />}
       <ContractorDocumentsSection
         ref={documentsRef}
         contractorId={contractor.id}
@@ -4902,6 +5600,420 @@ function ContractorProfile({
     </Page>
   );
 }
+
+function ContractorOnboardingStatus({ contractorId }: { contractorId: number }) {
+  const [status, setStatus] = useState("Cargando...");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const refresh = useCallback(async () => {
+    try {
+      const contract = await supabase.from("contractor_contract").select("id").eq("contractor_id", contractorId).order("start_date", { ascending: false }).order("id", { ascending: false }).limit(1).single();
+      if (contract.error) throw contract.error;
+      const result = await supabase.from("contractor_onboarding_invites").select("status,expires_at").eq("contractor_contract_id", contract.data.id).order("created_at", { ascending: false }).limit(1).maybeSingle();
+      if (result.error) throw result.error;
+      const invite = result.data;
+      setStatus(!invite ? "No enviado" : invite.status === "SUBMITTED" ? "Firmado" : invite.status === "EXPIRED" || new Date(invite.expires_at + "-05:00").getTime() < Date.now() ? "Vencido" : invite.status === "DATA_SUBMITTED" ? "Datos enviados" : "Invitado");
+      setError("");
+    } catch (cause) { setError(errorMessage(cause)); }
+  }, [contractorId]);
+  useEffect(() => { void refresh(); }, [refresh]);
+  return <FormCard title="Onboarding del contrato actual">
+    <Text>{status}</Text>{!!error && <Text accessibilityRole="alert">{error}</Text>}
+    <SecondaryButton label="Actualizar estado" icon="refresh-outline" onPress={refresh} disabled={busy} />
+    {status !== "Firmado" && <SecondaryButton label={busy ? "Enviando..." : "Enviar / reenviar onboarding"} icon="mail-outline" disabled={busy || status === "Cargando..."} onPress={async () => {
+      setBusy(true); try { await sendContractorOnboardingEmail(contractorId); await refresh(); } catch (cause) { setError(errorMessage(cause)); } finally { setBusy(false); }
+    }} />}
+  </FormCard>;
+}
+
+function RehireContractor({ contractor, onSaved }: { contractor: Contractor; onSaved: () => Promise<void> }) {
+  const [visible, setVisible] = useState(false);
+  const [phone, setPhone] = useState("");
+  const [email, setEmail] = useState("");
+  const [details, setDetails] = useState(emptyContractorRegistrationDetails);
+  const [errors, setErrors] = useState<string[]>([]);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const open = () => {
+    setPhone(contractor.phone ?? ""); setEmail(contractor.email ?? ""); setError("");
+    setDetails({ residenceDepartment: contractor.residenceDepartment, residenceCity: contractor.city === "Sin registrar" ? "" : contractor.city,
+      neighborhood: contractor.neighborhood, address: contractor.address, pensionFund: contractor.pensionFund ?? "", eps: contractor.eps ?? "" });
+    setVisible(true);
+  };
+  const save = async () => {
+    if (saving) return;
+    const validation = [...errors, ...missingRegistrationDetails(details)];
+    if (!/^3[0-9]{9}$/.test(phone.trim())) validation.push("Telefono: ingresa 10 digitos comenzando por 3.");
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) validation.push("Correo no valido.");
+    if (validation.length) { setError(validation.join("\n")); return; }
+    setSaving(true); setError("");
+    try {
+      const result = await supabase.rpc("rehire_contractor", { p_contractor_id: contractor.id, p_phone_number: phone.trim(), p_email: email.trim().toLowerCase(),
+        p_residence_department: details.residenceDepartment, p_residence_city: details.residenceCity, p_neighborhood: details.neighborhood,
+        p_address: details.address, p_pension_fund: details.pensionFund, p_eps: details.eps });
+      if (result.error) throw result.error;
+      setVisible(false); await onSaved();
+    } catch (cause) { setError(errorMessage(cause)); } finally { setSaving(false); }
+  };
+  return <>
+    <SecondaryButton label="Recontratar contratista" icon="person-add-outline" onPress={open} />
+    {visible && <AdminModalShell visible title="Recontratar contratista" saving={saving} onClose={() => setVisible(false)} onSave={save}>
+      <Notice icon="information-circle-outline" text="Confirma los datos actualizados. El nuevo contrato quedará PENDIENTE de documentos del Director." />
+      <Label text="Teléfono *" /><Input icon="call-outline" value={phone} onChangeText={setPhone} keyboardType="phone-pad" />
+      <Label text="Correo *" /><Input icon="mail-outline" value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" />
+      <ContractorRegistrationFields details={details} onChange={setDetails} onValidation={setErrors} />
+      {!!error && <Text accessibilityRole="alert" style={{ color: C.red }}>{error}</Text>}
+    </AdminModalShell>}
+  </>;
+}
+
+function ContractorRegistrationDetailsModal({
+  contractor,
+  visible,
+  onClose,
+  onSaved,
+}: {
+  contractor: Contractor;
+  visible: boolean;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [details, setDetails] = useState(emptyContractorRegistrationDetails);
+  const [catalogErrors, setCatalogErrors] = useState<string[]>(["Espera la carga de pensiones y EPS."]);
+  const [detailsError, setDetailsError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!visible) return;
+    setDetails({
+      residenceDepartment: contractor.residenceDepartment,
+      residenceCity: contractor.city === "Sin registrar" ? "" : contractor.city,
+      neighborhood: contractor.neighborhood,
+      address: contractor.address,
+      pensionFund: contractor.pensionFund ?? "",
+      eps: contractor.eps ?? "",
+    });
+  }, [visible, contractor.id]);
+
+  const save = async () => {
+    const missing = missingRegistrationDetails(details);
+    setDetailsError("");
+    if (catalogErrors.length || missing.length) {
+      setDetailsError([...catalogErrors, ...missing.map((field) => `${field}: completa o corrige este campo.`)].join("\n"));
+      return;
+    }
+    if (missing.length) {
+      Alert.alert("Completa los datos", `Faltan: ${missing.join(", ")}.`);
+      return;
+    }
+    setSaving(true);
+    try {
+      await completeContractorRegistrationDetails(contractor.id, details);
+      await onSaved();
+    } catch (cause) {
+      setDetailsError(errorMessage(cause));
+      Alert.alert("No fue posible guardar", errorMessage(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <AdminModalShell visible={visible} title="Residencia y seguridad social" saving={saving} onClose={onClose} onSave={save}>
+      <ContractorRegistrationFields details={details} onChange={setDetails} onValidation={setCatalogErrors} />
+      {!!detailsError && <Text accessibilityRole="alert" style={{ color: "#b42318" }}>{detailsError}</Text>}
+    </AdminModalShell>
+  );
+}
+
+const noveltyTypes: { id: number; code: ContractorNoveltyType; name: string }[] = [
+  { id: 1, code: "INCAPACIDAD", name: "Incapacidad o accidente" },
+  { id: 2, code: "PERMISO", name: "Permiso personal" },
+  { id: 3, code: "LICENCIA", name: "Licencia" },
+  { id: 4, code: "ASISTENCIA", name: "Asistencia" },
+  { id: 5, code: "VACACIONES", name: "Vacaciones" },
+];
+
+const noveltySubtypes: Record<ContractorNoveltyType, { id: number; code: ContractorNoveltySubtype; name: string }[]> = {
+  INCAPACIDAD: [
+    { id: 1, code: "MEDICA", name: "Incapacidad médica" },
+    { id: 2, code: "ACCIDENTE_TRABAJO", name: "Accidente de trabajo" },
+  ],
+  PERMISO: [
+    { id: 1, code: "REMUNERADO", name: "Remunerado" },
+    { id: 2, code: "NO_REMUNERADO", name: "No remunerado" },
+  ],
+  LICENCIA: [
+    { id: 1, code: "MATERNIDAD", name: "Maternidad" },
+    { id: 2, code: "PATERNIDAD", name: "Paternidad" },
+    { id: 3, code: "LUTO", name: "Luto" },
+    { id: 4, code: "OTRA", name: "Otra licencia" },
+  ],
+  ASISTENCIA: [
+    { id: 1, code: "TARDANZA", name: "Tardanza" },
+    { id: 2, code: "AUSENCIA", name: "Ausencia" },
+    { id: 3, code: "ABANDONO", name: "Abandono de puesto" },
+  ],
+  VACACIONES: [],
+};
+
+function noveltyLabel(item: ContractorNovelty) {
+  const type = noveltyTypes.find((option) => option.code === item.typeCode)?.name ?? item.typeCode;
+  const subtype = noveltySubtypes[item.typeCode]?.find((option) => option.code === item.subtypeCode)?.name;
+  return subtype ? `${type} · ${subtype}` : type;
+}
+
+const ContractorNoveltiesSection = forwardRef<ContractorNoveltiesSectionHandle, { contractorId: number }>(
+  function ContractorNoveltiesSection({ contractorId }, ref) {
+    const [items, setItems] = useState<ContractorNovelty[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState("");
+    const [formVisible, setFormVisible] = useState(false);
+    const [editingId, setEditingId] = useState<number | null>(null);
+    const [startDate, setStartDate] = useState(todayIso());
+    const [endDate, setEndDate] = useState<string | null>(null);
+    const [typeCode, setTypeCode] = useState<ContractorNoveltyType | null>(null);
+    const [subtypeCode, setSubtypeCode] = useState<ContractorNoveltySubtype | null>(null);
+    const [isJustified, setIsJustified] = useState<boolean | null>(null);
+    const [description, setDescription] = useState("");
+    const [selector, setSelector] = useState<"type" | "subtype" | null>(null);
+    const [calendarField, setCalendarField] = useState<"start" | "end" | null>(null);
+    const [saving, setSaving] = useState(false);
+    const [formError, setFormError] = useState("");
+
+    const reload = useCallback(async () => {
+      const nextItems = await loadContractorNovelties(contractorId);
+      setItems(nextItems);
+      setLoadError("");
+      setLoading(false);
+    }, [contractorId]);
+
+    useEffect(() => {
+      let active = true;
+      setLoading(true);
+      loadContractorNovelties(contractorId)
+        .then((value) => { if (active) { setItems(value); setLoadError(""); } })
+        .catch((cause) => { if (active) setLoadError(errorMessage(cause)); })
+        .finally(() => { if (active) setLoading(false); });
+      return () => { active = false; };
+    }, [contractorId]);
+
+    useImperativeHandle(ref, () => ({
+      replaceNovelties: (value) => { setItems(value); setLoadError(""); setLoading(false); },
+    }), []);
+
+    const openNew = () => {
+      setEditingId(null);
+      setStartDate(todayIso());
+      setEndDate(null);
+      setTypeCode(null);
+      setSubtypeCode(null);
+      setIsJustified(null);
+      setDescription("");
+      setFormError("");
+      setFormVisible(true);
+    };
+
+    const openEdit = (item: ContractorNovelty) => {
+      setEditingId(item.id);
+      setStartDate(item.startDate);
+      setEndDate(item.endDate);
+      setTypeCode(item.typeCode);
+      setSubtypeCode(item.subtypeCode);
+      setIsJustified(item.isJustified);
+      setDescription(item.description);
+      setFormError("");
+      setFormVisible(true);
+    };
+
+    const save = async () => {
+      if (!startDate || !typeCode || (typeCode !== "VACACIONES" && !subtypeCode)
+        || isJustified === null || !description.trim()) {
+        setFormError("Completa el tipo, subtipo, justificación y descripción de la novedad.");
+        return;
+      }
+      if (endDate && endDate < startDate) {
+        setFormError("La fecha final no puede ser anterior a la fecha de inicio.");
+        return;
+      }
+      const input: ContractorNoveltyInput = {
+        contractorId,
+        startDate,
+        endDate,
+        typeCode,
+        subtypeCode: typeCode === "VACACIONES" ? null : subtypeCode,
+        isJustified,
+        description: description.trim(),
+      };
+      setSaving(true);
+      setFormError("");
+      try {
+        if (editingId === null) await createContractorNovelty(input);
+        else await updateContractorNovelty(editingId, input);
+        setFormVisible(false);
+        try { await reload(); }
+        catch (cause) { setLoadError(errorMessage(cause)); }
+      } catch (cause) {
+        setFormError(errorMessage(cause));
+      } finally {
+        setSaving(false);
+      }
+    };
+
+    const selectedType = noveltyTypes.find((option) => option.code === typeCode);
+    const subtypes = typeCode ? noveltySubtypes[typeCode] : [];
+    const selectedSubtype = subtypes.find((option) => option.code === subtypeCode);
+
+    return (
+      <>
+        <SectionTitle title="Novedades" action={`${items.length} registros`} />
+        <SecondaryButton
+          label="Reportar Novedad"
+          icon="add-circle-outline"
+          disabled={formVisible}
+          onPress={openNew}
+        />
+        {formVisible && (
+          <FormCard title={editingId === null ? "Nueva novedad" : "Corregir novedad"}>
+            <Choice label="Fecha de inicio *" value={formatDate(startDate)} icon="calendar-outline" onPress={() => setCalendarField("start")} />
+            <Choice
+              label="Fecha de finalización (opcional)"
+              value={endDate ? formatDate(endDate) : "Sin fecha final · novedad abierta"}
+              icon="calendar-outline"
+              onPress={() => setCalendarField("end")}
+            />
+            {endDate && (
+              <Pressable onPress={() => setEndDate(null)} style={styles.retryLink}>
+                <Ionicons name="close-circle-outline" size={17} color={C.navy} />
+                <Text style={styles.caption}>Dejar sin fecha de finalización</Text>
+              </Pressable>
+            )}
+            <Choice label="Tipo de novedad *" value={selectedType?.name ?? "Seleccionar tipo"} icon="list-outline" onPress={() => setSelector("type")} />
+            {typeCode && typeCode !== "VACACIONES" && (
+              <Choice label="Subtipo *" value={selectedSubtype?.name ?? "Seleccionar subtipo"} icon="list-outline" onPress={() => setSelector("subtype")} />
+            )}
+            <Label text="¿Justificado? *" />
+            <View style={styles.noveltyChoiceRow}>
+              {([true, false] as const).map((value) => (
+                <Pressable
+                  key={String(value)}
+                  style={[styles.noveltyChoice, isJustified === value && styles.noveltyChoiceSelected]}
+                  accessibilityRole="radio"
+                  accessibilityState={{ selected: isJustified === value }}
+                  onPress={() => setIsJustified(value)}
+                >
+                  <Text style={[styles.secondaryButtonText, isJustified === value && styles.noveltyChoiceTextSelected]}>
+                    {value ? "Sí" : "No"}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+            <Label text="Descripción *" />
+            <TextInput
+              value={description}
+              onChangeText={setDescription}
+              placeholder={typeCode === "LICENCIA" && subtypeCode === "OTRA" ? "Indica cuál es la licencia y describe la novedad" : "Describe la novedad"}
+              placeholderTextColor="#929BAD"
+              multiline
+              style={styles.textArea}
+            />
+            {formError ? <Notice icon="alert-circle-outline" text={formError} tone="error" /> : null}
+            <View style={styles.actionRow}>
+              <SecondaryButton label="Cancelar" disabled={saving} onPress={() => setFormVisible(false)} />
+              <PrimaryButton label={saving ? "Guardando..." : "Guardar novedad"} icon="save-outline" disabled={saving} onPress={save} />
+            </View>
+          </FormCard>
+        )}
+        {loading ? <ActivityIndicator color={C.navy} /> : null}
+        {loadError ? (
+          <View style={styles.card}>
+            <Notice icon="alert-circle-outline" text={`No fue posible cargar las novedades: ${loadError}`} tone="error" />
+            <SecondaryButton label="Reintentar" icon="refresh-outline" onPress={() => {
+              setLoading(true);
+              reload().catch((cause) => { setLoadError(errorMessage(cause)); setLoading(false); });
+            }} />
+          </View>
+        ) : null}
+        {!loading && !loadError && items.length === 0 ? (
+          <EmptyState icon="document-text-outline" text="Aún no hay novedades registradas para este contratista." />
+        ) : null}
+        {items.map((item) => (
+          <View key={item.id} style={styles.card}>
+            <View style={styles.between}>
+              <View style={styles.flex}>
+                <Text style={styles.cardTitle} selectable>{noveltyLabel(item)}</Text>
+                <Text style={styles.cardMeta} selectable>
+                  {item.endDate ? formatDateRange(item.startDate, item.endDate) : `${formatDate(item.startDate)} · Sin fecha final`}
+                </Text>
+              </View>
+              <Pressable
+                style={[styles.smallActionButton, formVisible && styles.buttonDisabled]}
+                disabled={formVisible}
+                accessibilityLabel={`Editar novedad: ${noveltyLabel(item)}`}
+                onPress={() => openEdit(item)}
+              >
+                <Ionicons name="create-outline" size={16} color={C.navy} />
+                <Text style={styles.secondaryButtonText}>Editar</Text>
+              </Pressable>
+            </View>
+            <Text style={styles.description} selectable>{item.description}</Text>
+            <Text style={styles.caption} selectable>
+              {item.isJustified ? "Justificada" : "No justificada"} · Registrada {formatBogotaTimestamp(item.createdAt)}
+              {item.updatedBy ? ` · Modificada ${formatBogotaTimestamp(item.updatedAt)}` : ""}
+            </Text>
+          </View>
+        ))}
+        <DropdownModal
+          visible={selector === "type"}
+          title="Tipo de novedad"
+          options={noveltyTypes}
+          selectedId={selectedType?.id ?? 0}
+          onClose={() => setSelector(null)}
+          onSelect={(id) => {
+            const option = noveltyTypes.find((item) => item.id === id);
+            setTypeCode(option?.code ?? null);
+            setSubtypeCode(null);
+            setSelector(null);
+          }}
+        />
+        <DropdownModal
+          visible={selector === "subtype"}
+          title="Subtipo de novedad"
+          options={subtypes}
+          selectedId={selectedSubtype?.id ?? 0}
+          onClose={() => setSelector(null)}
+          onSelect={(id) => {
+            setSubtypeCode(subtypes.find((item) => item.id === id)?.code ?? null);
+            setSelector(null);
+          }}
+        />
+        <CalendarModal
+          visible={calendarField !== null}
+          selectedDate={calendarField === "end" ? endDate : startDate}
+          defaultDate={startDate}
+          minimumDate={calendarField === "end" ? startDate : undefined}
+          title={calendarField === "end" ? "Fecha de finalización" : "Fecha de inicio"}
+          subtitle="Se permiten fechas pasadas y futuras."
+          onClose={() => setCalendarField(null)}
+          onSelect={(date) => {
+            if (calendarField === "start") {
+              setStartDate(date);
+              if (endDate && endDate < date) setEndDate(null);
+            } else if (calendarField === "end") {
+              if (date < startDate) {
+                setFormError("La fecha final no puede ser anterior a la fecha de inicio.");
+                return;
+              }
+              setEndDate(date);
+            }
+            setFormError("");
+            setCalendarField(null);
+          }}
+        />
+      </>
+    );
+  },
+);
 
 function ContractorProfileAvatar({ fileId, initials }: { fileId: string | null; initials: string }) {
   const [photoUrl, setPhotoUrl] = useState("");
@@ -5419,6 +6531,8 @@ function ContractorActivationCard({
   onChanged: () => void;
 }) {
   const [arlPdf, setArlPdf] = useState<ContractorPdfFile | null>(null);
+  const [sourceOpen, setSourceOpen] = useState(false);
+  const [preparing, setPreparing] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const pickArl = async () => {
@@ -5451,6 +6565,18 @@ function ContractorActivationCard({
     }
   };
 
+  const pickArlFromGallery = async () => {
+    setPreparing(true);
+    try {
+      const file = await pickGalleryPdf("certificado-arl-foto.pdf");
+      if (file) setArlPdf(file);
+    } catch (cause) {
+      showPdfError(cause);
+    } finally {
+      setPreparing(false);
+    }
+  };
+
   const save = async () => {
     if (!arlPdf) {
       Alert.alert("Adjunta el ARL", "El Certificado ARL en PDF es obligatorio para activar el contrato.");
@@ -5477,19 +6603,26 @@ function ContractorActivationCard({
           <Text style={styles.caption}>Adjunta el Certificado ARL en PDF para pasar el contrato a ACTIVO.</Text>
         </View>
       </View>
-      <Pressable style={styles.uploadCard} onPress={pickArl}>
+      <Pressable style={styles.uploadCard} onPress={() => setSourceOpen(true)}>
         <View style={styles.pdfIcon}>
           <Ionicons name="document-attach-outline" size={23} color={C.orange} />
         </View>
         <View style={styles.flex}>
           <Text style={styles.cardTitle}>Certificado ARL</Text>
           <Text style={styles.cardMeta}>
-            {arlPdf ? arlPdf.name : "Adjuntar archivo PDF máximo 1 MB"}
+            {preparing ? "Generando PDF..." : arlPdf ? arlPdf.name : "Cargar PDF o elegir foto de Galería"}
           </Text>
         </View>
         <Ionicons name="cloud-upload-outline" size={20} color={C.navy} />
       </Pressable>
-      <PrimaryButton label={saving ? "Activando..." : "Guardar ARL y activar"} icon="checkmark-circle-outline" disabled={saving} onPress={save} />
+      <PrimaryButton label={saving ? "Activando..." : "Guardar ARL y activar"} icon="checkmark-circle-outline" disabled={saving || preparing} onPress={save} />
+      <PdfGallerySourceModal
+        visible={sourceOpen}
+        title="Adjuntar certificado ARL"
+        onClose={() => setSourceOpen(false)}
+        onPickPdf={() => void pickArl()}
+        onPickGallery={() => void pickArlFromGallery()}
+      />
     </View>
   );
 }
@@ -5510,12 +6643,16 @@ function ContractorDocumentUploadModal({
   const [documentTypeCode, setDocumentTypeCode] = useState("");
   const [selectorOpen, setSelectorOpen] = useState(false);
   const [selectedFile, setSelectedFile] = useState<ContractorPdfFile | null>(null);
+  const [sourceOpen, setSourceOpen] = useState(false);
+  const [preparing, setPreparing] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (visible) {
       setDocumentTypeCode(documentTypes[0]?.code ?? "");
       setSelectedFile(null);
+      setSourceOpen(false);
+      setPreparing(false);
       setSaving(false);
     }
   }, [documentTypes, visible]);
@@ -5552,6 +6689,20 @@ function ContractorDocumentUploadModal({
     }
   };
 
+  const pickDocumentFromGallery = async () => {
+    if (!selectedType) return;
+    setPreparing(true);
+    try {
+      const name = `${selectedType.code.toLowerCase().replace(/_/g, "-")}-foto.pdf`;
+      const file = await pickGalleryPdf(name);
+      if (file) setSelectedFile(file);
+    } catch (cause) {
+      showPdfError(cause);
+    } finally {
+      setPreparing(false);
+    }
+  };
+
   const save = async () => {
     if (!selectedType) {
       Alert.alert("Selecciona el tipo", "Debes seleccionar el tipo de documento.");
@@ -5575,7 +6726,7 @@ function ContractorDocumentUploadModal({
 
   return (
     <>
-      <Modal visible={visible && !selectorOpen} transparent animationType="fade" onRequestClose={onClose}>
+      <Modal visible={visible && !selectorOpen && !sourceOpen} transparent animationType="fade" onRequestClose={onClose}>
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
             <View style={styles.between}>
@@ -5594,13 +6745,13 @@ function ContractorDocumentUploadModal({
               disabled={documentTypes.length === 0}
               onPress={() => setSelectorOpen(true)}
             />
-            <Pressable style={styles.uploadCard} onPress={pickDocument}>
+            <Pressable style={styles.uploadCard} onPress={() => setSourceOpen(true)}>
               <View style={styles.pdfIcon}>
                 <Ionicons name="document-attach-outline" size={23} color={C.orange} />
               </View>
               <View style={styles.flex}>
                 <Text style={styles.cardTitle}>Documento en PDF</Text>
-                <Text style={styles.cardMeta}>{selectedFile ? selectedFile.name : "Adjuntar archivo PDF máximo 1 MB"}</Text>
+                <Text style={styles.cardMeta}>{preparing ? "Generando PDF..." : selectedFile ? selectedFile.name : "Cargar PDF o elegir foto de Galería"}</Text>
               </View>
               <Ionicons name="cloud-upload-outline" size={20} color={C.navy} />
             </Pressable>
@@ -5609,13 +6760,20 @@ function ContractorDocumentUploadModal({
               <PrimaryButton
                 label={saving ? "Guardando..." : "Guardar"}
                 icon="save-outline"
-                disabled={saving}
+                disabled={saving || preparing}
                 onPress={save}
               />
             </View>
           </View>
         </View>
       </Modal>
+      <PdfGallerySourceModal
+        visible={visible && sourceOpen}
+        title="Adjuntar documento"
+        onClose={() => setSourceOpen(false)}
+        onPickPdf={() => void pickDocument()}
+        onPickGallery={() => void pickDocumentFromGallery()}
+      />
       <DropdownModal
         visible={selectorOpen}
         title="Tipo de documento"
@@ -5626,6 +6784,126 @@ function ContractorDocumentUploadModal({
           setDocumentTypeCode(documentTypes.find((type) => type.id === id)?.code ?? "");
           setSelectorOpen(false);
         }}
+      />
+    </>
+  );
+}
+
+function ChangeContractorContractModal({
+  visible,
+  contractor,
+  contractTypes,
+  onClose,
+  onSaved,
+}: {
+  visible: boolean;
+  contractor: Contractor;
+  contractTypes: AppData["contractTypes"];
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [currentEndDate, setCurrentEndDate] = useState(todayIso());
+  const [newStartDate, setNewStartDate] = useState("");
+  const [newTypeId, setNewTypeId] = useState(0);
+  const [calendar, setCalendar] = useState<"end" | "start" | null>(null);
+  const [typeOpen, setTypeOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const options = contractTypes.filter((type) => type.id !== contractor.contractTypeId);
+  const selectedType = options.find((type) => type.id === newTypeId);
+
+  useEffect(() => {
+    if (!visible) return;
+    const today = todayIso();
+    setCurrentEndDate(today);
+    setNewStartDate(dateToIso(addDays(isoToDate(today), 1)));
+    setNewTypeId(0);
+  }, [visible, contractor.id]);
+
+  const save = () => {
+    const today = todayIso();
+    if (!contractor.contractStartDate || currentEndDate < contractor.contractStartDate ||
+      currentEndDate > today || newStartDate < today || newStartDate <= currentEndDate ||
+      !selectedType) {
+      showMessage("Revisa las fechas", "El fin debe estar entre el inicio actual y hoy. El nuevo contrato debe iniciar desde hoy, después del fin anterior, con otro tipo.");
+      return;
+    }
+    confirmAction(
+      "Confirmar cambio de contrato",
+      `${contractor.fullName}: ${contractor.contractTypeName} hasta el ${formatDate(currentEndDate)}. Nuevo contrato ${selectedType.name} desde el ${formatDate(newStartDate)}. ¿Guardar este cambio?`,
+      "Guardar cambio",
+      () => {
+        void (async () => {
+          setSaving(true);
+          try {
+            await changeContractorContract({
+              contractorId: contractor.id,
+              currentEndDate,
+              newStartDate,
+              newContractTypeId: newTypeId,
+            });
+            await onSaved();
+            showMessage("Contrato actualizado", "Se guardó el nuevo tipo de contrato.");
+          } catch (cause) {
+            showMessage("No fue posible cambiar el contrato", errorMessage(cause));
+          } finally {
+            setSaving(false);
+          }
+        })();
+      },
+    );
+  };
+
+  return (
+    <>
+      <Modal visible={visible && !calendar && !typeOpen} transparent animationType="fade" onRequestClose={onClose}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.terminationCard}>
+            <ScrollView contentContainerStyle={styles.terminationContent} keyboardShouldPersistTaps="handled">
+              <View style={styles.between}>
+                <Text style={styles.formTitle}>Cambiar contrato</Text>
+                <Pressable style={styles.iconButton} onPress={onClose}>
+                  <Ionicons name="close" size={20} color={C.ink} />
+                </Pressable>
+              </View>
+              <InfoCard title="Contrato actual" rows={[
+                ["Tipo", contractor.contractTypeName],
+                ["Inicio", contractor.contractStartDate ? formatDate(contractor.contractStartDate) : "Sin registrar"],
+              ]} />
+              <Choice label="Fin del contrato actual *" value={formatDate(currentEndDate)} icon="calendar-outline" onPress={() => setCalendar("end")} />
+              <Choice label="Inicio del nuevo contrato *" value={newStartDate ? formatDate(newStartDate) : "Selecciona una fecha"} icon="calendar-outline" onPress={() => setCalendar("start")} />
+              <Choice label="Nuevo tipo de contrato *" value={selectedType?.name ?? "Selecciona un tipo distinto"} icon="document-text-outline" onPress={() => setTypeOpen(true)} />
+              <View style={styles.terminationActions}>
+                <View style={styles.flex}><SecondaryButton label="Cancelar" icon="close-outline" onPress={onClose} /></View>
+                <View style={styles.flex}><PrimaryButton label={saving ? "Guardando..." : "Confirmar cambio"} icon="checkmark-outline" disabled={saving} onPress={save} /></View>
+              </View>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+      <CalendarModal
+        visible={calendar === "end"}
+        selectedDate={currentEndDate}
+        title="Fin del contrato actual"
+        minimumDate={contractor.contractStartDate ?? undefined}
+        maximumDate={todayIso()}
+        onClose={() => setCalendar(null)}
+        onSelect={(date) => { setCurrentEndDate(date); setCalendar(null); }}
+      />
+      <CalendarModal
+        visible={calendar === "start"}
+        selectedDate={newStartDate || null}
+        title="Inicio del nuevo contrato"
+        minimumDate={todayIso()}
+        onClose={() => setCalendar(null)}
+        onSelect={(date) => { setNewStartDate(date); setCalendar(null); }}
+      />
+      <DropdownModal
+        visible={typeOpen}
+        title="Nuevo tipo de contrato"
+        options={options}
+        selectedId={newTypeId}
+        onClose={() => setTypeOpen(false)}
+        onSelect={(id) => { setNewTypeId(id); setTypeOpen(false); }}
       />
     </>
   );
@@ -5665,13 +6943,18 @@ function TerminateContractorModal({
   const executeTermination = async () => {
     setSaving(true);
     try {
-      await terminateContractor({
+      const result = await terminateContractor({
         contractorId: contractor.id,
         terminationDate,
         reasonId,
         observations,
       });
-      showMessage("Contratista desvinculado", "El contrato quedó en estado INACTIVO.");
+      showMessage(
+        "Contratista desvinculado",
+        result.emailSent
+          ? `El contrato quedó INACTIVO y se notificó a ${result.recipients} ${result.recipients === 1 ? "Director" : "Directores"}.`
+          : `El contrato quedó INACTIVO, pero no fue posible enviar la notificación: ${result.notificationError || "error desconocido"}`,
+      );
       await onTerminated();
     } catch (cause) {
       showMessage("No fue posible desvincular", errorMessage(cause));
@@ -5797,6 +7080,8 @@ const ContractorActivationDocumentsCard = forwardRef<
   onChanged,
 }, ref) {
   const [selectedFiles, setSelectedFiles] = useState<Partial<Record<ContractorActivationDocumentType, ContractorPdfFile>>>({});
+  const [sourceItem, setSourceItem] = useState<(typeof activationDocumentOptions)[number] | null>(null);
+  const [preparingType, setPreparingType] = useState<ContractorActivationDocumentType | null>(null);
   const [existingCodes, setExistingCodes] = useState<ContractorActivationDocumentType[]>([]);
   const [contractTypeId, setContractTypeId] = useState(contractor.contractTypeId ?? contractTypes[0]?.id ?? 0);
   const [contractTypePickerVisible, setContractTypePickerVisible] = useState(false);
@@ -5810,7 +7095,7 @@ const ContractorActivationDocumentsCard = forwardRef<
   const refreshDocuments = useCallback(async () => {
     setLoadingDocuments(true);
     try {
-      const documents = await loadContractorDocuments(contractor.id);
+      const documents = await loadContractorActivationDocuments(contractor.id);
       setExistingCodes(
         activationDocumentOptions
           .map((item) => item.typeCode)
@@ -5832,15 +7117,10 @@ const ContractorActivationDocumentsCard = forwardRef<
   }, [contractTypes, contractor.contractTypeId, contractor.id]);
 
   useImperativeHandle(ref, () => ({
-    replaceDocuments(documents) {
-      setExistingCodes(
-        activationDocumentOptions
-          .map((item) => item.typeCode)
-          .filter((code) => documents.some((document) => document.typeCode === code)),
-      );
-      setLoadingDocuments(false);
+    replaceDocuments(_documents) {
+      void refreshDocuments();
     },
-  }), []);
+  }), [refreshDocuments]);
 
   const pickDocument = async (typeCode: ContractorActivationDocumentType, title: string) => {
     try {
@@ -5872,6 +7152,19 @@ const ContractorActivationDocumentsCard = forwardRef<
       }));
     } catch (cause) {
       Alert.alert("No fue posible adjuntar", errorMessage(cause));
+    }
+  };
+
+  const pickDocumentFromGallery = async (typeCode: ContractorActivationDocumentType) => {
+    setPreparingType(typeCode);
+    try {
+      const name = `${typeCode.toLowerCase().replace(/_/g, "-")}-foto.pdf`;
+      const file = await pickGalleryPdf(name);
+      if (file) setSelectedFiles((current) => ({ ...current, [typeCode]: file }));
+    } catch (cause) {
+      showPdfError(cause);
+    } finally {
+      setPreparingType(null);
     }
   };
 
@@ -5908,7 +7201,7 @@ const ContractorActivationDocumentsCard = forwardRef<
       }
       setSelectedFiles({});
       updateProgress(60, "Verificando documentos requeridos");
-      const documents = await loadContractorDocuments(contractor.id);
+      const documents = await loadContractorActivationDocuments(contractor.id);
       const completed = activationDocumentOptions.every((item) =>
         documents.some((document) => document.typeCode === item.typeCode),
       );
@@ -5979,7 +7272,7 @@ const ContractorActivationDocumentsCard = forwardRef<
             <Pressable
               key={item.typeCode}
               style={styles.uploadCard}
-              onPress={() => pickDocument(item.typeCode, item.title)}
+              onPress={() => setSourceItem(item)}
             >
               <View style={styles.pdfIcon}>
                 <Ionicons
@@ -5991,7 +7284,9 @@ const ContractorActivationDocumentsCard = forwardRef<
               <View style={styles.flex}>
                 <Text style={styles.cardTitle}>{item.title}</Text>
                 <Text style={styles.cardMeta}>
-                  {selectedFile ? selectedFile.name : saved ? "Guardado. Puedes adjuntar otro PDF." : "Adjuntar archivo PDF máximo 1 MB"}
+                  {preparingType === item.typeCode
+                    ? "Generando PDF..."
+                    : selectedFile ? selectedFile.name : saved ? "Guardado. Puedes adjuntar otro PDF o foto." : "Cargar PDF o elegir foto de Galería"}
                 </Text>
               </View>
               <Ionicons name="cloud-upload-outline" size={20} color={C.navy} />
@@ -6002,7 +7297,7 @@ const ContractorActivationDocumentsCard = forwardRef<
       <PrimaryButton
         label={saving ? `${activationStepLabel || "Guardando"}... ${activationProgress}%` : "Guardar activación"}
         icon="checkmark-circle-outline"
-        disabled={saving || loadingDocuments || contractTypes.length === 0}
+        disabled={saving || preparingType !== null || loadingDocuments || contractTypes.length === 0}
         onPress={save}
       />
       {saving && (
@@ -6011,6 +7306,13 @@ const ContractorActivationDocumentsCard = forwardRef<
         </View>
       )}
     </View>
+    <PdfGallerySourceModal
+      visible={sourceItem !== null}
+      title={sourceItem ? `Adjuntar ${sourceItem.title}` : "Adjuntar documento"}
+      onClose={() => setSourceItem(null)}
+      onPickPdf={() => sourceItem && void pickDocument(sourceItem.typeCode, sourceItem.title)}
+      onPickGallery={() => sourceItem && void pickDocumentFromGallery(sourceItem.typeCode)}
+    />
     <DropdownModal
       visible={contractTypePickerVisible}
       title="Tipo de contrato"
@@ -7308,7 +8610,7 @@ function AdminDashboard({ data, adminData }: { data: AppData; adminData: AdminDa
         <Stat value={String(data.users.length)} label="Usuarios" icon="people-outline" />
         <Stat value={String(data.contractors.length)} label="Contratistas" icon="id-card-outline" />
         <Stat value={String(adminData.clients.length)} label="Clientes" icon="business-outline" />
-        <Stat value={String(adminData.serviceRates.length + adminData.extraHourRates.length)} label="Tarifas" icon="cash-outline" />
+        <Stat value={String(adminData.serviceRates.length + adminData.extraHourRates.length + adminData.directExtraHourRates.length)} label="Tarifas" icon="cash-outline" />
         <Stat value={String(adminData.costConcepts.length)} label="Conceptos" icon="receipt-outline" />
         <Stat value={String(adminData.costRules.length)} label="Reglas costo" icon="calculator-outline" />
       </View>
@@ -7530,7 +8832,7 @@ function AdminCatalogList<T extends { id: number; name: string }>({
 }
 
 function AdminRatesModule({ adminData, onChanged }: { adminData: AdminData; onChanged: () => void }) {
-  const [rateTab, setRateTab] = useState<"SHIFT" | "EXTRA" | "UNIT" | "UNIT_TYPES">("SHIFT");
+  const [rateTab, setRateTab] = useState<"SHIFT" | "EXTRA" | "DIRECT_EXTRA" | "UNIT" | "UNIT_TYPES">("SHIFT");
   const [clientId, setClientId] = useState(0);
   const [areaId, setAreaId] = useState(0);
   const [shiftId, setShiftId] = useState(0);
@@ -7538,6 +8840,7 @@ function AdminRatesModule({ adminData, onChanged }: { adminData: AdminData; onCh
   const [rateStatus, setRateStatus] = useState<"ALL" | "ACTIVE" | "HISTORICAL">("ACTIVE");
   const [shiftRate, setShiftRate] = useState<AdminData["serviceRates"][number] | null | "new">(null);
   const [extraRate, setExtraRate] = useState<AdminData["extraHourRates"][number] | null | "new">(null);
+  const [directExtraRate, setDirectExtraRate] = useState<AdminData["directExtraHourRates"][number] | null | "new">(null);
   const [unitRate, setUnitRate] = useState<AdminData["serviceUnitRates"][number] | null | "new">(null);
   const [unitType, setUnitType] = useState<AdminData["serviceUnitTypes"][number] | null | "new">(null);
 
@@ -7576,11 +8879,12 @@ function AdminRatesModule({ adminData, onChanged }: { adminData: AdminData; onCh
       <View style={styles.adminRateTabs}>
         <AdminRateTab label="Tarifas por turno" icon="time-outline" selected={rateTab === "SHIFT"} onPress={() => setRateTab("SHIFT")} />
         <AdminRateTab label="Horas extra por área" icon="timer-outline" selected={rateTab === "EXTRA"} onPress={() => { setRateTab("EXTRA"); setShiftId(0); }} />
+        <AdminRateTab label="Horas extra DIRECTO" icon="time-outline" selected={rateTab === "DIRECT_EXTRA"} onPress={() => { setRateTab("DIRECT_EXTRA"); resetFilters(); }} />
         <AdminRateTab label="Tarifas de descargue" icon="cube-outline" selected={rateTab === "UNIT"} onPress={() => { setRateTab("UNIT"); setShiftId(0); }} />
         <AdminRateTab label="Tipos de unidad" icon="list-outline" selected={rateTab === "UNIT_TYPES"} onPress={() => setRateTab("UNIT_TYPES")} />
       </View>
 
-      {rateTab !== "UNIT_TYPES" && (
+      {rateTab !== "UNIT_TYPES" && rateTab !== "DIRECT_EXTRA" && (
       <FormCard title="Filtros">
         <View style={styles.adminRateFilterGrid}>
           <AdminSelectField
@@ -7636,7 +8940,31 @@ function AdminRatesModule({ adminData, onChanged }: { adminData: AdminData; onCh
       </FormCard>
       )}
 
-      {rateTab === "UNIT_TYPES" ? (
+      {rateTab === "DIRECT_EXTRA" ? (
+        <FormCard title="Horas extra DIRECTO">
+          <View style={styles.between}>
+            <Text style={styles.caption}>Tarifas globales por tipo de turno. La venta al cliente se configura por área.</Text>
+            <Pressable style={styles.smallActionButton} onPress={() => setDirectExtraRate("new")}>
+              <Ionicons name="add-circle-outline" size={16} color={C.navy} />
+              <Text style={styles.smallActionText}>Crear tarifa</Text>
+            </Pressable>
+          </View>
+          {adminData.directExtraHourRates.length === 0 ? (
+            <EmptyState icon="timer-outline" text="No hay tarifas de hora extra DIRECTO configuradas." />
+          ) : adminData.directExtraHourRates.map((rate) => (
+            <Pressable key={rate.id} style={styles.adminRateCard} onPress={() => setDirectExtraRate(rate)}>
+              <View style={styles.adminRateIcon}><Ionicons name="timer-outline" size={20} color={C.navy} /></View>
+              <View style={styles.flex}>
+                <Text style={styles.adminCellMain}>{rate.rateType === "DIURNA" ? "Diurna" : rate.rateType === "NOCTURNA" ? "Nocturna" : "Festiva"}</Text>
+                <Text style={styles.adminRateValidity}>Desde {rate.validFrom}{rate.validTo ? ` hasta ${rate.validTo}` : " ⋅ Sin fecha final"}</Text>
+              </View>
+              <Text style={styles.adminRateSale}>{formatCurrency(rate.hourlyAmount)} / h</Text>
+              <StatusPill good={rate.validFrom <= todayIso() && (!rate.validTo || rate.validTo >= todayIso())} text={rate.validFrom > todayIso() ? "FUTURA" : rate.validTo && rate.validTo < todayIso() ? "HISTÓRICA" : "VIGENTE"} />
+              <Ionicons name="chevron-forward" size={18} color={C.muted} />
+            </Pressable>
+          ))}
+        </FormCard>
+      ) : rateTab === "UNIT_TYPES" ? (
         <AdminCatalogList
           title="Tipos de unidad de descargue"
           rows={adminData.serviceUnitTypes}
@@ -7675,6 +9003,7 @@ function AdminRatesModule({ adminData, onChanged }: { adminData: AdminData; onCh
 
       <AdminServiceRateModal item={shiftRate === "new" ? null : shiftRate} clients={adminData.clients} areas={adminData.areas} shifts={adminData.shifts} initialClientId={clientId} initialAreaId={areaId} visible={shiftRate !== null} onClose={() => setShiftRate(null)} onSaved={async () => { setShiftRate(null); await onChanged(); }} />
       <AdminExtraRateModal item={extraRate === "new" ? null : extraRate} clients={adminData.clients} areas={adminData.areas} initialClientId={clientId} initialAreaId={areaId} visible={extraRate !== null} onClose={() => setExtraRate(null)} onSaved={async () => { setExtraRate(null); await onChanged(); }} />
+      <AdminDirectExtraRateModal item={directExtraRate === "new" ? null : directExtraRate} visible={directExtraRate !== null} onClose={() => setDirectExtraRate(null)} onSaved={async () => { setDirectExtraRate(null); await onChanged(); }} />
       <AdminServiceUnitRateModal item={unitRate === "new" ? null : unitRate} clients={adminData.clients} areas={adminData.areas} unitTypes={adminData.serviceUnitTypes} initialClientId={clientId} initialAreaId={areaId} visible={unitRate !== null} onClose={() => setUnitRate(null)} onSaved={async () => { setUnitRate(null); await onChanged(); }} />
       <AdminServiceUnitTypeModal item={unitType === "new" ? null : unitType} visible={unitType !== null} onClose={() => setUnitType(null)} onSaved={async () => { setUnitType(null); await onChanged(); }} />
     </>
@@ -7767,7 +9096,7 @@ function AdminPayrollModule({ contractTypes }: { contractTypes: AppData["contrac
 
   const close = () => confirmAction(
     "Cerrar periodo de nómina",
-    "Los periodos cerrados son inmutables. Confirma que revisaste los días pagables y los totales.",
+    "Se actualizarán las horas extra aprobadas antes del cierre. Luego el periodo será inmutable. Confirma que revisaste los días pagables y los totales.",
     "Cerrar periodo",
     () => {
       void (async () => {
@@ -7787,7 +9116,7 @@ function AdminPayrollModule({ contractTypes }: { contractTypes: AppData["contrac
 
   const draftCount = data?.periods.filter((period) => period.status === "DRAFT").length ?? 0;
   const closedCount = data?.periods.filter((period) => period.status === "CLOSED").length ?? 0;
-  const total = data?.periods.reduce((sum, period) => sum + period.baseSalaryAmount, 0) ?? 0;
+  const total = data?.periods.reduce((sum, period) => sum + period.totalPayAmount, 0) ?? 0;
 
   return (
     <>
@@ -7814,36 +9143,43 @@ function AdminPayrollModule({ contractTypes }: { contractTypes: AppData["contrac
             <Stat value={formatCurrency(total)} label="Total del periodo" icon="wallet-outline" />
           </View>
           <FormCard title={`Nómina ${formatMonth(periodStart)}`}>
+            <Text style={styles.caption}>Las horas extra provienen de operaciones cerradas y se actualizan al recalcular o cerrar el periodo.</Text>
             {!data?.periods.length ? (
               <EmptyState icon="wallet-outline" text="No hay nómina calculada para este mes." />
             ) : (
-              <View style={styles.adminCompactTable}>
-                <View style={[styles.adminCompactRow, styles.adminCompactHeader]}>
-                  <Text style={styles.adminCompactWideHead}>Contratista</Text>
-                  <Text style={styles.adminCompactHead}>Salario</Text>
-                  <Text style={styles.adminCompactHead}>Elegibles</Text>
-                  <Text style={styles.adminCompactHead}>Pagables</Text>
-                  <Text style={styles.adminCompactHead}>Total</Text>
-                  <Text style={styles.adminCompactHead}>Estado</Text>
-                  <Text style={styles.adminCompactActionHead}>Editar</Text>
-                </View>
-                {data.periods.map((period) => (
-                  <View key={period.id} style={styles.adminCompactRow}>
-                    <View style={styles.adminCompactWideCell}>
-                      <Text style={styles.cardTitle}>{period.contractorName}</Text>
-                      <Text style={styles.caption}>{period.document}</Text>
-                    </View>
-                    <Text style={styles.adminCompactCell}>{formatCurrency(period.monthlySalary)}</Text>
-                    <Text style={styles.adminCompactCell}>{period.eligibleDays}</Text>
-                    <Text style={styles.adminCompactCell}>{period.paidDays}</Text>
-                    <Text style={styles.adminCompactCell}>{formatCurrency(period.baseSalaryAmount)}</Text>
-                    <View style={styles.adminCompactCell}><StatusPill good={period.status === "CLOSED"} text={period.status} /></View>
-                    <Pressable style={styles.adminCompactAction} disabled={period.status !== "DRAFT"} onPress={() => setEditingPeriod(period)}>
-                      <Ionicons name="create-outline" size={18} color={period.status === "DRAFT" ? C.navy : C.muted} />
-                    </Pressable>
+              <ScrollView horizontal showsHorizontalScrollIndicator contentContainerStyle={styles.adminPayrollScrollContent}>
+                <View style={[styles.adminCompactTable, styles.adminPayrollTable]}>
+                  <View style={[styles.adminCompactRow, styles.adminCompactHeader]}>
+                    <Text style={styles.adminCompactWideHead}>Contratista</Text>
+                    <Text style={styles.adminCompactHead}>Salario mensual</Text>
+                    <Text style={styles.adminCompactHead}>Elegibles</Text>
+                    <Text style={styles.adminCompactHead}>Pagables</Text>
+                    <Text style={styles.adminCompactHead}>Salario base</Text>
+                    <Text style={styles.adminCompactHead}>Horas extra</Text>
+                    <Text style={styles.adminCompactHead}>Total a pagar</Text>
+                    <Text style={styles.adminCompactHead}>Estado</Text>
+                    <Text style={styles.adminCompactActionHead}>Editar</Text>
                   </View>
-                ))}
-              </View>
+                  {data.periods.map((period) => (
+                    <View key={period.id} style={styles.adminCompactRow}>
+                      <View style={styles.adminCompactWideCell}>
+                        <Text style={styles.cardTitle}>{period.contractorName}</Text>
+                        <Text style={styles.caption}>{period.document}</Text>
+                      </View>
+                      <Text style={styles.adminCompactCell}>{formatCurrency(period.monthlySalary)}</Text>
+                      <Text style={styles.adminCompactCell}>{period.eligibleDays}</Text>
+                      <Text style={styles.adminCompactCell}>{period.paidDays}</Text>
+                      <Text style={styles.adminCompactCell}>{formatCurrency(period.baseSalaryAmount)}</Text>
+                      <Text style={styles.adminCompactCell}>{formatCurrency(period.extraHourAmount)}</Text>
+                      <Text style={styles.adminCompactCell}>{formatCurrency(period.totalPayAmount)}</Text>
+                      <View style={styles.adminCompactCell}><StatusPill good={period.status === "CLOSED"} text={period.status} /></View>
+                      <Pressable style={styles.adminCompactAction} disabled={period.status !== "DRAFT"} onPress={() => setEditingPeriod(period)}>
+                        <Ionicons name="create-outline" size={18} color={period.status === "DRAFT" ? C.navy : C.muted} />
+                      </Pressable>
+                    </View>
+                  ))}
+                </View>
+              </ScrollView>
             )}
           </FormCard>
           <FormCard title="Reglas salariales">
@@ -8816,6 +10152,57 @@ function AdminExtraRateModal({ visible, item, clients, areas, initialClientId, i
   );
 }
 
+function AdminDirectExtraRateModal({ visible, item, onClose, onSaved }: {
+  visible: boolean;
+  item: AdminData["directExtraHourRates"][number] | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [rateType, setRateType] = useState<AdminData["directExtraHourRates"][number]["rateType"]>("DIURNA");
+  const [hourlyAmount, setHourlyAmount] = useState("");
+  const [validFrom, setValidFrom] = useState(todayIso());
+  const [validTo, setValidTo] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!visible) return;
+    setRateType(item?.rateType ?? "DIURNA");
+    setHourlyAmount(item ? String(item.hourlyAmount) : "");
+    setValidFrom(item?.validFrom ?? todayIso());
+    setValidTo(item?.validTo ?? "");
+  }, [item, visible]);
+
+  return (
+    <AdminModalShell visible={visible} title={item ? "Editar hora extra DIRECTO" : "Crear hora extra DIRECTO"} saving={saving} onClose={onClose} onSave={async () => {
+      setSaving(true);
+      try {
+        const amount = Number(hourlyAmount);
+        if (!hourlyAmount.trim() || !Number.isFinite(amount) || amount <= 0) throw new Error("Ingresa un valor por hora mayor que cero.");
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(validFrom) || (validTo && !/^\d{4}-\d{2}-\d{2}$/.test(validTo))) {
+          throw new Error("Usa fechas con formato AAAA-MM-DD.");
+        }
+        if (validTo && validTo < validFrom) throw new Error("La fecha final no puede ser anterior a la inicial.");
+        await saveAdminDirectExtraHourRate({ id: item?.id, rateType, hourlyAmount: amount, validFrom, validTo: validTo || null });
+        await onSaved();
+      } catch (cause) {
+        Alert.alert("No fue posible guardar", errorMessage(cause));
+      } finally {
+        setSaving(false);
+      }
+    }}>
+      <AdminOptionChips label="Tipo de hora extra" value={rateType} options={[
+        { id: "DIURNA", name: "Diurna" },
+        { id: "NOCTURNA", name: "Nocturna" },
+        { id: "FESTIVA", name: "Festiva" },
+      ]} onChange={(next) => setRateType(next as AdminData["directExtraHourRates"][number]["rateType"])} />
+      <AdminField label="Valor por hora" value={hourlyAmount} onChangeText={setHourlyAmount} icon="cash-outline" keyboardType="numeric" />
+      <AdminField label="Válido desde" value={validFrom} onChangeText={setValidFrom} icon="calendar-outline" />
+      <AdminField label="Válido hasta" value={validTo} onChangeText={setValidTo} icon="calendar-outline" />
+      <Notice icon="information-circle-outline" text="Una tarifa ya utilizada no puede cambiar de tipo, valor ni fecha inicial. Para actualizarla, cierra su vigencia y crea otra." />
+    </AdminModalShell>
+  );
+}
+
 function AdminServiceUnitRateModal({ visible, item, clients, areas, unitTypes, initialClientId, initialAreaId, onClose, onSaved }: { visible: boolean; item: AdminData["serviceUnitRates"][number] | null; clients: AdminData["clients"]; areas: AdminData["areas"]; unitTypes: AdminData["serviceUnitTypes"]; initialClientId: number; initialAreaId: number; onClose: () => void; onSaved: () => void }) {
   const [clientId, setClientId] = useState(0);
   const [areaId, setAreaId] = useState(0);
@@ -9342,6 +10729,7 @@ function RequestBadge({ status }: { status: PersonnelRequest["status"] }) {
 
 function ContractStatusPill({ status }: { status: Contractor["contractStatus"] }) {
   if (status === "ACTIVO") return <StatusPill good text="ACTIVO" />;
+  if (status === "PROGRAMADO") return <StatusPill good={false} neutral text="PROGRAMADO" />;
   if (status === "PENDIENTE") return <StatusPill good={false} neutral text="PENDIENTE" />;
   return <StatusPill good={false} text="INACTIVO" />;
 }
@@ -9433,8 +10821,11 @@ function BottomNav({
   active: Screen;
   onPress: (screen: Screen) => void;
 }) {
+  const insets = useSafeAreaInsets();
+  const androidBottomInset = Platform.OS === "android" ? Math.max(insets.bottom, 12) : 0;
+
   return (
-    <View style={styles.bottomNav}>
+    <View style={[styles.bottomNav, androidBottomInset > 0 && { paddingBottom: androidBottomInset }]}>
       {tabs.map((tab) => {
         const selected = active === tab.screen;
         return (
@@ -9499,6 +10890,10 @@ const styles = StyleSheet.create({
   destructiveButton: { borderColor: C.red },
   buttonDisabled: { opacity: 0.45 },
   actionRow: { flexDirection: "row", gap: 10 },
+  noveltyChoiceRow: { flexDirection: "row", gap: 10 },
+  noveltyChoice: { flex: 1, minHeight: 44, borderRadius: 12, borderWidth: 1, borderColor: C.line, alignItems: "center", justifyContent: "center", backgroundColor: C.white },
+  noveltyChoiceSelected: { borderColor: C.navy, backgroundColor: C.blueBg },
+  noveltyChoiceTextSelected: { color: C.navy },
   auditEntry: { flexDirection: "row", alignItems: "flex-start", gap: 9, marginTop: 12 },
   auditDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: C.orange, marginTop: 7 },
   rowActions: { flexDirection: "row", gap: 10 },
@@ -9646,6 +11041,8 @@ const styles = StyleSheet.create({
   adminCellMain: { flex: 1.3, color: C.ink, fontSize: 13, fontWeight: "900" },
   adminCell: { flex: 1, color: C.muted, fontSize: 11, fontWeight: "700" },
   adminCompactTable: { borderWidth: 1, borderColor: C.line, borderRadius: 14, overflow: "hidden", backgroundColor: C.white },
+  adminPayrollScrollContent: { minWidth: 1000, flexGrow: 1 },
+  adminPayrollTable: { minWidth: 1000, flexGrow: 1 },
   adminCompactRow: { minHeight: 48, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 10, paddingVertical: 9, borderBottomWidth: 1, borderBottomColor: C.line },
   adminCompactHeader: { minHeight: 42, backgroundColor: C.bg },
   adminCompactHead: { flex: 1, color: C.ink, fontSize: 9, fontWeight: "900", textTransform: "uppercase" },

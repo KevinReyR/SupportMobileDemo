@@ -13,8 +13,40 @@ export interface NamedRecord {
   name: string;
 }
 
-export type ContractStatus = "ACTIVO" | "PENDIENTE" | "INACTIVO";
+export type ContractStatus = "ACTIVO" | "PENDIENTE" | "INACTIVO" | "PROGRAMADO";
 export type WorkwearMovementType = "ENTREGA" | "DEVOLUCION" | "BAJA";
+
+export type ContractorNoveltyType = "INCAPACIDAD" | "PERMISO" | "LICENCIA" | "ASISTENCIA" | "VACACIONES";
+export type ContractorNoveltySubtype =
+  | "MEDICA" | "ACCIDENTE_TRABAJO"
+  | "REMUNERADO" | "NO_REMUNERADO"
+  | "MATERNIDAD" | "PATERNIDAD" | "LUTO" | "OTRA"
+  | "TARDANZA" | "AUSENCIA" | "ABANDONO";
+
+export interface ContractorNovelty {
+  id: number;
+  contractorId: number;
+  startDate: string;
+  endDate: string | null;
+  typeCode: ContractorNoveltyType;
+  subtypeCode: ContractorNoveltySubtype | null;
+  isJustified: boolean;
+  description: string;
+  createdBy: string;
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ContractorNoveltyInput {
+  contractorId: number;
+  startDate: string;
+  endDate: string | null;
+  typeCode: ContractorNoveltyType;
+  subtypeCode: ContractorNoveltySubtype | null;
+  isJustified: boolean;
+  description: string;
+}
 
 export interface UserContext {
   id: string;
@@ -49,6 +81,17 @@ export interface Operation {
   status: OperationStatus;
   observations: string | null;
   reviewObservations: string | null;
+}
+
+export interface OperationCursor {
+  date: string;
+  id: number;
+}
+
+export interface OperationPage {
+  items: Operation[];
+  nextCursor: OperationCursor | null;
+  hasMore: boolean;
 }
 
 export interface OperationEditInput {
@@ -141,6 +184,9 @@ export interface Contractor {
   eps: string | null;
   arl: string | null;
   pensionFund: string | null;
+  residenceDepartment: string;
+  neighborhood: string;
+  address: string;
   transport: string;
   civilState: string;
   city: string;
@@ -150,11 +196,19 @@ export interface Contractor {
   shoeSize: string | null;
   hireDate: string | null;
   terminationDate: string | null;
+  terminationSummary?: {
+    date: string | null;
+    reason: string;
+    observations: string;
+    durationDays: number | null;
+  } | null;
   active: boolean;
   contractStatus: ContractStatus;
   contractStartDate: string | null;
   contractTypeId: number | null;
   contractTypeName: string;
+  scheduledContractStartDate: string | null;
+  scheduledContractTypeName: string | null;
   lastClient: string;
   lastArea: string;
   lastDate: string | null;
@@ -284,6 +338,16 @@ export interface AdminExtraHourRate {
   validTo: string | null;
 }
 
+export type DirectExtraHourRateType = "DIURNA" | "NOCTURNA" | "FESTIVA";
+
+export interface AdminDirectExtraHourRate {
+  id: number;
+  rateType: DirectExtraHourRateType;
+  hourlyAmount: number;
+  validFrom: string;
+  validTo: string | null;
+}
+
 export interface AdminServiceUnitType extends NamedRecord {
   code: string;
   description: string | null;
@@ -381,6 +445,8 @@ export interface AdminPayrollPeriod {
   eligibleDays: number;
   paidDays: number;
   baseSalaryAmount: number;
+  extraHourAmount: number;
+  totalPayAmount: number;
   status: PayrollPeriodStatus;
   calculatedAt: string;
   closedAt: string | null;
@@ -398,6 +464,7 @@ export interface AdminData {
   shifts: AdminShift[];
   serviceRates: AdminServiceRate[];
   extraHourRates: AdminExtraHourRate[];
+  directExtraHourRates: AdminDirectExtraHourRate[];
   serviceUnitTypes: AdminServiceUnitType[];
   serviceUnitRates: AdminServiceUnitRate[];
   costConcepts: AdminCostConcept[];
@@ -645,18 +712,11 @@ export interface ContractorOnboardingSubmission {
   birthDate: string;
   birthPlace: string;
   civilStateId: number;
-  residenceDepartment: string;
-  residenceCity: string;
-  address: string;
-  stratum: string;
-  phone: string;
   transportTypeId: number;
   educationLevelId: number;
-  eps: string;
   shirtSize: string;
   pantSize: string;
   shoeSize: string;
-  pensionFund: string;
   emergencyContactName: string;
   emergencyContactRelationship: string;
   emergencyContactPhone: string;
@@ -680,6 +740,10 @@ export interface AppData {
   clients: NamedRecord[];
   documentTypes: NamedRecord[];
   operations: Operation[];
+  operationHistoryIds: number[];
+  operationHistoryCursor: OperationCursor | null;
+  hasMoreOperations: boolean;
+  operationHistoryExpanded: boolean;
   requests: PersonnelRequest[];
   contractors: Contractor[];
   clientContractors: ClientContractor[];

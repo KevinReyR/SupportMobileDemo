@@ -1,4 +1,11 @@
 import { supabase } from "../lib/supabase";
+import { inclusiveContractDays } from "../lib/contract-duration";
+import {
+  finishPerformanceStage,
+  measurePerformanceStage,
+  performanceNow,
+  type PerformanceTrace,
+} from "./performance";
 import type {
   AdminUser,
   AdminData,
@@ -14,13 +21,17 @@ import type {
   ContractorOnboardingSubmission,
   ContractorDocument,
   ContractorHistory,
+  ContractorNovelty,
+  ContractorNoveltyInput,
   DirectorReportRankingItem,
   DirectorReportsSummary,
   DirectorDashboard,
   DirectorPayrollReport,
   Operation,
+  OperationCursor,
   OperationChangeHistoryItem,
   OperationEditInput,
+  OperationPage,
   PersonnelRequest,
   Role,
   RoleCode,
@@ -40,6 +51,25 @@ const roleNames: Record<RoleCode, Role> = {
   COORDINATOR: "Coordinador",
   CLIENT: "Cliente",
 };
+
+const OPERATION_SELECT =
+  "id,operation_date,client_id,area_id,operation_type_id,shift_id,service_unit_type_id,planned_units,actual_units,status,observations,review_observations,clients(name),area(name),operation_type(code,name),shift(name),service_unit_type(name),operation_assignment(id,contractor_id,planned_quantity,worked_quantity,extra_hours,deleted_at)";
+const OPERATION_HISTORY_PAGE_SIZE = 30;
+
+function colombiaTodayIso() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Bogota",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
+function addIsoDays(value: string, days: number) {
+  const date = new Date(`${value}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
 
 function fail(error: { message: string } | null) {
   if (error) throw new Error(error.message);
@@ -80,8 +110,42 @@ export type ContractorDocumentTypeOption = { id: number; name: string; code: str
 
 function normalizeContractStatus(value: string | null | undefined): ContractStatus {
   const normalized = cleanText(value).toUpperCase();
-  if (normalized === "PENDIENTE" || normalized === "INACTIVO") return normalized;
-  return "ACTIVO";
+  if (normalized === "PENDIENTE" || normalized === "INACTIVO" || normalized === "PROGRAMADO") return normalized;
+  return normalized === "ACTIVO" ? "ACTIVO" : "INACTIVO";
+}
+
+function effectiveContract(rows: any[]) {
+  const today = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Bogota", year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(new Date());
+  const ordered = [...rows].sort((a, b) =>
+    String(b.start_date).localeCompare(String(a.start_date)) || Number(b.id) - Number(a.id));
+  const scheduled = ordered.find((row) =>
+    row.start_date > today && cleanText(firstRelation<any>(row.contract_status)?.name).toUpperCase() === "PROGRAMADO");
+  const current = ordered.find((row) => {
+    const status = cleanText(firstRelation<any>(row.contract_status)?.name).toUpperCase();
+    return row.start_date <= today && (!row.end_date || row.end_date >= today) &&
+      (status === "ACTIVO" || status === "PROGRAMADO");
+  });
+  const pending = ordered.find((row) =>
+    row.start_date <= today && cleanText(firstRelation<any>(row.contract_status)?.name).toUpperCase() === "PENDIENTE");
+  const displayed = current ?? pending ?? ordered.find((row) => row.start_date <= today);
+  const terminated = rows.filter(row => row.terminated_at).sort((a, b) =>
+    Date.parse(b.terminated_at) - Date.parse(a.terminated_at) || Number(b.id) - Number(a.id))[0];
+  return {
+    terminationSummary: terminated ? {
+      date: terminated.end_date ?? null,
+      reason: cleanText(firstRelation<any>(terminated.termination_reason)?.name) || "Sin registrar",
+      observations: cleanText(terminated.termination_observations) || "Sin registrar",
+      durationDays: inclusiveContractDays(terminated.start_date, terminated.end_date),
+    } : null,
+    status: current ? "ACTIVO" as ContractStatus : pending ? "PENDIENTE" as ContractStatus : "INACTIVO" as ContractStatus,
+    startDate: displayed?.start_date ?? null,
+    typeId: displayed?.contract_type ?? null,
+    typeName: cleanText(firstRelation<any>(displayed?.contract_type_ref)?.name) || "Sin tipo",
+    scheduledStartDate: scheduled?.start_date ?? null,
+    scheduledTypeName: cleanText(firstRelation<any>(scheduled?.contract_type_ref)?.name) || null,
+  };
 }
 
 function uniqueToken() {
@@ -114,6 +178,12 @@ export interface CreateContractorInput {
   birthDate: string;
   phone: string;
   email: string;
+  residenceDepartment: string;
+  residenceCity: string;
+  neighborhood: string;
+  address: string;
+  pensionFund: string;
+  eps: string;
   cedulaPdf: ContractorPdfFile;
 }
 
@@ -156,17 +226,186 @@ export async function loadUserContext(userId: string): Promise<UserContext> {
   };
 }
 
-export async function loadAppData(context: UserContext): Promise<AppData> {
+function mapOperationRow(row: any): Operation {
+  const assignments = (row.operation_assignment ?? []).filter(
+    (assignment: any) => assignment.deleted_at === null,
+  );
+  return {
+    id: Number(row.id),
+    date: row.operation_date,
+    clientId: Number(row.client_id),
+    client: cleanText(firstRelation<any>(row.clients)?.name),
+    areaId: Number(row.area_id),
+    area: cleanText(firstRelation<any>(row.area)?.name),
+    operationType: (firstRelation<any>(row.operation_type)?.code ?? "TURNO") as "TURNO" | "DESCARGUE",
+    operationTypeName: cleanText(firstRelation<any>(row.operation_type)?.name) || "Turno",
+    shiftId: row.shift_id === null ? null : Number(row.shift_id),
+    shift: cleanText(firstRelation<any>(row.shift)?.name) || "Sin turno",
+    serviceUnitTypeId: row.service_unit_type_id === null ? null : Number(row.service_unit_type_id),
+    serviceUnitType: cleanText(firstRelation<any>(row.service_unit_type)?.name) || null,
+    plannedUnits: row.planned_units === null ? null : Number(row.planned_units),
+    actualUnits: row.actual_units === null ? null : Number(row.actual_units),
+    people: assignments.length,
+    contractorIds: assignments
+      .filter((assignment: any) => assignment.contractor_id !== null && assignment.contractor_id !== undefined)
+      .map((assignment: any) => Number(assignment.contractor_id)),
+    worked: assignments.reduce(
+      (total: number, assignment: any) => total + Number(assignment.worked_quantity ?? 0),
+      0,
+    ),
+    extraHours: assignments.reduce(
+      (total: number, assignment: any) => total + Number(assignment.extra_hours ?? 0),
+      0,
+    ),
+    status: row.status,
+    observations: row.observations,
+    reviewObservations: row.review_observations,
+  };
+}
+
+function mapOperationRows(rows: any[] | null): Operation[] {
+  return (rows ?? []).map(mapOperationRow);
+}
+
+function mergeOperations(...groups: Operation[][]): Operation[] {
+  const byId = new Map<number, Operation>();
+  for (const group of groups) {
+    for (const operation of group) byId.set(operation.id, operation);
+  }
+  return [...byId.values()].sort(
+    (left, right) => right.date.localeCompare(left.date) || right.id - left.id,
+  );
+}
+
+export interface InitialOperationsLoad {
+  items: Operation[];
+  historyIds: number[];
+  nextCursor: OperationCursor | null;
+  hasMore: boolean;
+}
+
+export interface ContractorLastOperation {
+  contractorId: number;
+  lastClient: string;
+  lastArea: string;
+  lastDate: string | null;
+}
+
+export async function loadOperationAlerts(): Promise<Operation[]> {
+  const result = await supabase
+    .from("operation")
+    .select(OPERATION_SELECT)
+    .in("status", ["PENDIENTE", "CAMBIOS_SOLICITADOS"])
+    .order("operation_date", { ascending: false })
+    .order("id", { ascending: false });
+  fail(result.error);
+  return mapOperationRows(result.data);
+}
+
+export async function loadInitialOperations(): Promise<InitialOperationsLoad> {
+  const today = colombiaTodayIso();
+  const recentStart = addIsoDays(today, -2);
+  const [recentResult, activeResult, alerts, olderProbe] = await Promise.all([
+    supabase
+      .from("operation")
+      .select(OPERATION_SELECT)
+      .gte("operation_date", recentStart)
+      .lte("operation_date", today)
+      .order("operation_date", { ascending: false })
+      .order("id", { ascending: false }),
+    supabase
+      .from("operation")
+      .select(OPERATION_SELECT)
+      .eq("status", "EN_CURSO")
+      .order("operation_date", { ascending: false })
+      .order("id", { ascending: false }),
+    loadOperationAlerts(),
+    supabase.from("operation").select("id").lt("operation_date", recentStart).limit(1),
+  ]);
+  fail(recentResult.error);
+  fail(activeResult.error);
+  fail(olderProbe.error);
+  const recent = mapOperationRows(recentResult.data);
+  const active = mapOperationRows(activeResult.data);
+  const initialHistory = mergeOperations(recent, active);
+  return {
+    items: mergeOperations(recent, active, alerts),
+    historyIds: initialHistory.map((operation) => operation.id),
+    nextCursor: (olderProbe.data?.length ?? 0) > 0 ? { date: recentStart, id: 0 } : null,
+    hasMore: (olderProbe.data?.length ?? 0) > 0,
+  };
+}
+
+export async function loadOperationsByDate(date: string): Promise<Operation[]> {
+  const result = await supabase
+    .from("operation")
+    .select(OPERATION_SELECT)
+    .eq("operation_date", date)
+    .order("id", { ascending: false });
+  fail(result.error);
+  return mapOperationRows(result.data);
+}
+
+export async function loadOlderOperations(
+  cursor: OperationCursor,
+  limit = OPERATION_HISTORY_PAGE_SIZE,
+): Promise<OperationPage> {
+  let query = supabase
+    .from("operation")
+    .select(OPERATION_SELECT)
+    .order("operation_date", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(limit + 1);
+  query = cursor.id > 0
+    ? query.or(`operation_date.lt.${cursor.date},and(operation_date.eq.${cursor.date},id.lt.${cursor.id})`)
+    : query.lt("operation_date", cursor.date);
+  const result = await query;
+  fail(result.error);
+  const rows = result.data ?? [];
+  const hasMore = rows.length > limit;
+  const items = mapOperationRows(rows.slice(0, limit));
+  const last = items.at(-1);
+  return {
+    items,
+    nextCursor: hasMore && last ? { date: last.date, id: last.id } : null,
+    hasMore,
+  };
+}
+
+export async function loadOperationById(operationId: number): Promise<Operation> {
+  const result = await supabase
+    .from("operation")
+    .select(OPERATION_SELECT)
+    .eq("id", operationId)
+    .single();
+  fail(result.error);
+  return mapOperationRow(result.data);
+}
+
+export async function loadContractorLastOperations(
+  contractorIds?: number[],
+): Promise<ContractorLastOperation[]> {
+  if (contractorIds && contractorIds.length === 0) return [];
+  const result = await supabase.rpc("get_contractor_last_operations", {
+    p_contractor_ids: contractorIds ?? null,
+  });
+  fail(result.error);
+  return (result.data ?? []).map((row: any) => ({
+    contractorId: Number(row.contractor_id),
+    lastClient: cleanText(row.last_client) || "Sin operación",
+    lastArea: cleanText(row.last_area) || "Sin área",
+    lastDate: row.last_operation_date ?? null,
+  }));
+}
+
+export async function loadAppData(context: UserContext, performanceTrace?: PerformanceTrace): Promise<AppData> {
+  const operationsQuery = () => loadInitialOperations();
   const common = await Promise.all([
     supabase.from("clients").select("id,name").eq("is_active", true).order("id"),
     supabase.from("document_type").select("id,name").order("id"),
-    supabase
-      .from("operation")
-      .select(
-        "id,operation_date,client_id,area_id,operation_type_id,shift_id,service_unit_type_id,planned_units,actual_units,status,observations,review_observations,clients(name),area(name),operation_type(code,name),shift(name),service_unit_type(name),operation_assignment(id,contractor_id,planned_quantity,worked_quantity,extra_hours,deleted_at)",
-      )
-      .order("operation_date", { ascending: false })
-      .order("id", { ascending: false }),
+    performanceTrace
+      ? measurePerformanceStage(performanceTrace, "operations", async () => await operationsQuery())
+      : operationsQuery(),
     supabase
       .from("personnel_request")
       .select("id,client_id,area_id,shift_id,required_quantity,description,required_date,required_end_date,status,clients(name),area(name),shift(name)")
@@ -181,44 +420,12 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
     supabase.from("service_unit_type").select("id,name").eq("is_active", true).order("name"),
   ]);
 
-  common.forEach((result) => fail(result.error));
-
-  const operations: Operation[] = (common[2].data ?? []).map((row: any) => {
-    const assignments = (row.operation_assignment ?? []).filter(
-      (assignment: any) => assignment.deleted_at === null,
-    );
-    return {
-      id: row.id,
-      date: row.operation_date,
-      clientId: row.client_id,
-      client: cleanText(firstRelation<any>(row.clients)?.name),
-      areaId: row.area_id,
-      area: cleanText(firstRelation<any>(row.area)?.name),
-      operationType: (firstRelation<any>(row.operation_type)?.code ?? "TURNO") as "TURNO" | "DESCARGUE",
-      operationTypeName: cleanText(firstRelation<any>(row.operation_type)?.name) || "Turno",
-      shiftId: row.shift_id,
-      shift: cleanText(firstRelation<any>(row.shift)?.name) || "Sin turno",
-      serviceUnitTypeId: row.service_unit_type_id ?? null,
-      serviceUnitType: cleanText(firstRelation<any>(row.service_unit_type)?.name) || null,
-      plannedUnits: row.planned_units === null ? null : Number(row.planned_units),
-      actualUnits: row.actual_units === null ? null : Number(row.actual_units),
-      people: assignments.length,
-      contractorIds: assignments
-        .filter((assignment: any) => assignment.contractor_id !== null && assignment.contractor_id !== undefined)
-        .map((assignment: any) => Number(assignment.contractor_id)),
-      worked: assignments.reduce(
-        (total: number, assignment: any) => total + Number(assignment.worked_quantity ?? 0),
-        0,
-      ),
-      extraHours: assignments.reduce(
-        (total: number, assignment: any) => total + Number(assignment.extra_hours ?? 0),
-        0,
-      ),
-      status: row.status,
-      observations: row.observations,
-      reviewObservations: row.review_observations,
-    };
+  common.forEach((result, index) => {
+    if (index !== 2) fail((result as any).error);
   });
+
+  const initialOperations = common[2] as InitialOperationsLoad;
+  const operations = initialOperations.items;
 
   const requests: PersonnelRequest[] = (common[3].data ?? []).map((row: any) => ({
     id: row.id,
@@ -237,60 +444,43 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
 
   let contractors: Contractor[] = [];
   let clientContractors: ClientContractor[] = [];
+  const contractorsStartedAt = performanceNow();
   if (context.roleCode !== "CLIENT") {
-    const [contractorResult, assignmentResult, contractResult] = await Promise.all([
+    const [contractorResult, contractResult, lastOperations] = await Promise.all([
       supabase
         .from("contractor")
         .select(
-          "id,name,last_name,document_number,profile_photo_file_id,birth_date,birth_place,residence_city,phone_number,email,emergency_contact_name,emergency_contact_relationship,emergency_contact_phone,rh,eps,arl,pension_fund,disponibility,shirt_size,pant_size,shoe_size,hire_date,termination_date,transport_type(name),civil_state_type(name)",
+          "id,name,last_name,document_number,profile_photo_file_id,birth_date,birth_place,residence_department,residence_city,neighborhood,address,phone_number,email,emergency_contact_name,emergency_contact_relationship,emergency_contact_phone,rh,eps,arl,pension_fund,disponibility,shirt_size,pant_size,shoe_size,hire_date,termination_date,transport_type(name),civil_state_type(name)",
         )
         .order("name"),
       supabase
-        .from("operation_assignment")
-        .select("contractor_id,operation(operation_date,clients(name),area(name))")
-        .is("deleted_at", null),
-      supabase
         .from("contractor_contract")
-        .select("id,contractor_id,start_date,end_date,status_id,contract_type,contract_status(name),contract_type_ref:contract_type(name)")
+        .select("id,contractor_id,start_date,end_date,status_id,contract_type,contract_status(name),contract_type_ref:contract_type(name),terminated_at,termination_observations,termination_reason:contractor_termination_reasons(name)")
         .order("start_date", { ascending: false })
         .order("id", { ascending: false }),
+      loadContractorLastOperations(),
     ]);
     fail(contractorResult.error);
-    fail(assignmentResult.error);
     fail(contractResult.error);
 
-    const lastAssignments = new Map<number, any>();
-    for (const row of assignmentResult.data ?? []) {
-      const operation = firstRelation<any>((row as any).operation);
-      if (!operation) continue;
-      const current = lastAssignments.get((row as any).contractor_id);
-      if (!current || operation.operation_date > current.operation_date) {
-        lastAssignments.set((row as any).contractor_id, operation);
-      }
-    }
+    const lastOperationsByContractor = new Map(
+      lastOperations.map((item) => [item.contractorId, item]),
+    );
 
-    const latestContracts = new Map<
-      number,
-      { status: ContractStatus; startDate: string | null; typeId: number | null; typeName: string }
-    >();
+    const contractsByContractor = new Map<number, any[]>();
     for (const row of contractResult.data ?? []) {
       const contractorId = Number((row as any).contractor_id);
-      if (!latestContracts.has(contractorId)) {
-        latestContracts.set(contractorId, {
-          status: normalizeContractStatus(firstRelation<any>((row as any).contract_status)?.name),
-          startDate: (row as any).start_date ?? null,
-          typeId: (row as any).contract_type ?? null,
-          typeName: cleanText(firstRelation<any>((row as any).contract_type_ref)?.name) || "Sin tipo",
-        });
-      }
+      const existing = contractsByContractor.get(contractorId) ?? [];
+      existing.push(row);
+      contractsByContractor.set(contractorId, existing);
     }
 
     contractors = (contractorResult.data ?? []).map((row: any) => {
-      const latest = lastAssignments.get(row.id);
+      const latest = lastOperationsByContractor.get(Number(row.id));
       const firstName = cleanText(row.name);
       const lastName = cleanText(row.last_name);
       const fullName = `${firstName} ${lastName}`.trim();
-      const latestContract = latestContracts.get(row.id);
+      const latestContract = effectiveContract(contractsByContractor.get(row.id) ?? []);
       return {
         id: row.id,
         name: firstName,
@@ -310,23 +500,29 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
         eps: cleanText(row.eps) || null,
         arl: cleanText(row.arl) || null,
         pensionFund: cleanText(row.pension_fund) || null,
+        residenceDepartment: cleanText(row.residence_department),
+        neighborhood: cleanText(row.neighborhood),
+        address: cleanText(row.address),
         transport: cleanText(firstRelation<any>(row.transport_type)?.name) || "Sin registrar",
         civilState: cleanText(firstRelation<any>(row.civil_state_type)?.name) || "Sin registrar",
         city: cleanText(row.residence_city) || "Sin registrar",
-        available: Boolean(row.disponibility),
+        available: Boolean(row.disponibility) && latestContract.status === "ACTIVO",
         shirtSize: row.shirt_size,
         pantSize: row.pant_size,
         shoeSize: row.shoe_size,
         hireDate: row.hire_date,
         terminationDate: row.termination_date,
-        active: (latestContract?.status ?? "INACTIVO") === "ACTIVO",
-        contractStatus: latestContract?.status ?? "INACTIVO",
-        contractStartDate: latestContract?.startDate ?? null,
-        contractTypeId: latestContract?.typeId ?? null,
-        contractTypeName: latestContract?.typeName ?? "Sin tipo",
-        lastClient: cleanText(firstRelation<any>(latest?.clients)?.name) || "Sin operación",
-        lastArea: cleanText(firstRelation<any>(latest?.area)?.name) || "Sin área",
-        lastDate: latest?.operation_date ?? null,
+        terminationSummary: latestContract.terminationSummary,
+        active: latestContract.status === "ACTIVO",
+        contractStatus: latestContract.status,
+        contractStartDate: latestContract.startDate,
+        contractTypeId: latestContract.typeId,
+        contractTypeName: latestContract.typeName,
+        scheduledContractStartDate: latestContract.scheduledStartDate,
+        scheduledContractTypeName: latestContract.scheduledTypeName,
+        lastClient: latest?.lastClient ?? "Sin operación",
+        lastArea: latest?.lastArea ?? "Sin área",
+        lastDate: latest?.lastDate ?? null,
       };
     });
   } else {
@@ -351,6 +547,11 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
         lastArea: cleanText(row.last_area) || "Sin área",
         lastDate: row.last_operation_date,
       };
+    });
+  }
+  if (performanceTrace) {
+    finishPerformanceStage(performanceTrace, "contractors", contractorsStartedAt, {
+      count: context.roleCode === "CLIENT" ? clientContractors.length : contractors.length,
     });
   }
 
@@ -399,6 +600,10 @@ export async function loadAppData(context: UserContext): Promise<AppData> {
       name: cleanText(documentType.name),
     })),
     operations,
+    operationHistoryIds: initialOperations.historyIds,
+    operationHistoryCursor: initialOperations.nextCursor,
+    hasMoreOperations: initialOperations.hasMore,
+    operationHistoryExpanded: false,
     requests,
     contractors,
     clientContractors,
@@ -469,7 +674,7 @@ export async function loadContractorProfile(contractorId: number): Promise<Contr
     supabase
       .from("contractor")
       .select(
-        "id,name,last_name,document_number,profile_photo_file_id,birth_date,birth_place,residence_city,phone_number,email,emergency_contact_name,emergency_contact_relationship,emergency_contact_phone,rh,eps,arl,pension_fund,disponibility,shirt_size,pant_size,shoe_size,hire_date,termination_date,transport_type(name),civil_state_type(name)",
+        "id,name,last_name,document_number,profile_photo_file_id,birth_date,birth_place,residence_department,residence_city,neighborhood,address,phone_number,email,emergency_contact_name,emergency_contact_relationship,emergency_contact_phone,rh,eps,arl,pension_fund,disponibility,shirt_size,pant_size,shoe_size,hire_date,termination_date,transport_type(name),civil_state_type(name)",
       )
       .eq("id", contractorId)
       .single(),
@@ -480,11 +685,10 @@ export async function loadContractorProfile(contractorId: number): Promise<Contr
       .is("deleted_at", null),
     supabase
       .from("contractor_contract")
-      .select("id,contractor_id,start_date,end_date,status_id,contract_type,contract_status(name),contract_type_ref:contract_type(name)")
+      .select("id,contractor_id,start_date,end_date,status_id,contract_type,contract_status(name),contract_type_ref:contract_type(name),terminated_at,termination_observations,termination_reason:contractor_termination_reasons(name)")
       .eq("contractor_id", contractorId)
       .order("start_date", { ascending: false })
-      .order("id", { ascending: false })
-      .limit(1),
+      .order("id", { ascending: false }),
   ]);
   fail(contractorResult.error);
   fail(assignmentResult.error);
@@ -495,10 +699,8 @@ export async function loadContractorProfile(contractorId: number): Promise<Contr
     .map((assignment: any) => firstRelation<any>(assignment.operation))
     .filter(Boolean)
     .sort((left: any, right: any) => String(right.operation_date).localeCompare(String(left.operation_date)))[0];
-  const contract = (contractResult.data ?? [])[0] as any;
-  const contractStatus = contract
-    ? normalizeContractStatus(firstRelation<any>(contract.contract_status)?.name)
-    : "INACTIVO";
+  const contract = effectiveContract(contractResult.data ?? []);
+  const contractStatus = contract.status;
   const firstName = cleanText(row.name);
   const lastName = cleanText(row.last_name);
 
@@ -521,20 +723,26 @@ export async function loadContractorProfile(contractorId: number): Promise<Contr
     eps: cleanText(row.eps) || null,
     arl: cleanText(row.arl) || null,
     pensionFund: cleanText(row.pension_fund) || null,
+    residenceDepartment: cleanText(row.residence_department),
+    neighborhood: cleanText(row.neighborhood),
+    address: cleanText(row.address),
     transport: cleanText(firstRelation<any>(row.transport_type)?.name) || "Sin registrar",
     civilState: cleanText(firstRelation<any>(row.civil_state_type)?.name) || "Sin registrar",
     city: cleanText(row.residence_city) || "Sin registrar",
-    available: Boolean(row.disponibility),
+    available: Boolean(row.disponibility) && contractStatus === "ACTIVO",
     shirtSize: row.shirt_size,
     pantSize: row.pant_size,
     shoeSize: row.shoe_size,
     hireDate: row.hire_date,
     terminationDate: row.termination_date,
+    terminationSummary: contract.terminationSummary,
     active: contractStatus === "ACTIVO",
     contractStatus,
-    contractStartDate: contract?.start_date ?? null,
-    contractTypeId: contract?.contract_type ?? null,
-    contractTypeName: cleanText(firstRelation<any>(contract?.contract_type_ref)?.name) || "Sin tipo",
+    contractStartDate: contract.startDate,
+    contractTypeId: contract.typeId,
+    contractTypeName: contract.typeName,
+    scheduledContractStartDate: contract.scheduledStartDate,
+    scheduledContractTypeName: contract.scheduledTypeName,
     lastClient: cleanText(firstRelation<any>(latestAssignment?.clients)?.name) || "Sin operación",
     lastArea: cleanText(firstRelation<any>(latestAssignment?.area)?.name) || "Sin área",
     lastDate: latestAssignment?.operation_date ?? null,
@@ -586,6 +794,76 @@ export async function loadContractorHistory(contractorId: number): Promise<Contr
   }));
 }
 
+const contractorNoveltyColumns =
+  "id,contractor_id,start_date,end_date,type_code,subtype_code,is_justified,description,created_by,updated_by,created_at,updated_at";
+
+export async function loadContractorNovelties(contractorId: number): Promise<ContractorNovelty[]> {
+  const result = await supabase
+    .from("contractor_novelties")
+    .select(contractorNoveltyColumns)
+    .eq("contractor_id", contractorId)
+    .order("start_date", { ascending: false })
+    .order("created_at", { ascending: false });
+  fail(result.error);
+  return (result.data ?? []).map((row: any) => ({
+    id: Number(row.id),
+    contractorId: Number(row.contractor_id),
+    startDate: row.start_date,
+    endDate: row.end_date,
+    typeCode: row.type_code,
+    subtypeCode: row.subtype_code,
+    isJustified: row.is_justified,
+    description: row.description,
+    createdBy: row.created_by,
+    updatedBy: row.updated_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+}
+
+function validatedContractorNovelty(input: ContractorNoveltyInput) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.startDate)) {
+    throw new Error("Selecciona una fecha de inicio válida.");
+  }
+  if (input.endDate && (!/^\d{4}-\d{2}-\d{2}$/.test(input.endDate) || input.endDate < input.startDate)) {
+    throw new Error("La fecha de finalización no puede ser anterior a la fecha de inicio.");
+  }
+  if (!input.typeCode || (input.typeCode !== "VACACIONES" && !input.subtypeCode)) {
+    throw new Error("Selecciona el tipo y subtipo de novedad.");
+  }
+  if (typeof input.isJustified !== "boolean") {
+    throw new Error("Indica si la novedad está justificada.");
+  }
+  const description = input.description.trim();
+  if (!description) throw new Error("Escribe una descripción de la novedad.");
+  return {
+    contractor_id: input.contractorId,
+    start_date: input.startDate,
+    end_date: input.endDate,
+    type_code: input.typeCode,
+    subtype_code: input.typeCode === "VACACIONES" ? null : input.subtypeCode,
+    is_justified: input.isJustified,
+    description,
+  };
+}
+
+export async function createContractorNovelty(input: ContractorNoveltyInput): Promise<void> {
+  const result = await supabase.from("contractor_novelties")
+    .insert(validatedContractorNovelty(input));
+  fail(result.error);
+}
+
+export async function updateContractorNovelty(id: number, input: ContractorNoveltyInput): Promise<void> {
+  const { contractor_id: _contractorId, ...changes } = validatedContractorNovelty(input);
+  const result = await supabase.from("contractor_novelties")
+    .update(changes)
+    .eq("id", id)
+    .eq("contractor_id", input.contractorId)
+    .select("id")
+    .single();
+  fail(result.error);
+}
+
 export async function loadClientContractorHistory(contractorId: number): Promise<ContractorHistory[]> {
   const result = await supabase.rpc("get_client_contractor_history", {
     p_contractor_id: contractorId,
@@ -601,6 +879,16 @@ export async function loadClientContractorHistory(contractorId: number): Promise
     extraHours: Number(row.extra_hours ?? 0),
     observations: null,
   }));
+}
+
+export async function loadContractorActivationDocuments(contractorId: number): Promise<ContractorDocument[]> {
+  const contract = await supabase.from("contractor_contract").select("id").eq("contractor_id", contractorId)
+    .order("start_date", { ascending: false }).order("id", { ascending: false }).limit(1).single();
+  fail(contract.error);
+  const documents = await supabase.from("contractor_documents").select("id").eq("contractor_id", contractorId).eq("contractor_contract_id", contract.data!.id);
+  fail(documents.error);
+  const ids = new Set((documents.data ?? []).map(row => row.id));
+  return (await loadContractorDocuments(contractorId)).filter(row => ids.has(row.id));
 }
 
 export async function loadContractorDocuments(
@@ -675,6 +963,10 @@ async function uploadAndRegisterContractorPdf(
   if (content.byteLength > MAX_CONTRACTOR_DOCUMENT_BYTES) {
     throw new Error("El PDF no puede superar 1 MB.");
   }
+  const header = new Uint8Array(content, 0, Math.min(content.byteLength, 5));
+  if (header.length !== 5 || header.some((byte, index) => byte !== [37, 80, 68, 70, 45][index])) {
+    throw new Error("El archivo seleccionado no contiene un PDF válido.");
+  }
 
   const safeName = (file.name || `${typeCode.toLowerCase()}.pdf`)
     .replace(/[^\w.\-]+/g, "_")
@@ -702,7 +994,7 @@ async function uploadAndRegisterContractorPdf(
 
 export async function createContractorDraft(input: CreateContractorInput): Promise<number> {
   validatePdfFile(input.cedulaPdf);
-  const result = await supabase.rpc("create_contractor_draft", {
+  const result = await supabase.rpc("create_contractor_draft_with_details", {
     p_document_type_id: input.documentTypeId,
     p_document_number: input.documentNumber.trim(),
     p_name: input.name.trim(),
@@ -710,11 +1002,33 @@ export async function createContractorDraft(input: CreateContractorInput): Promi
     p_phone_number: input.phone.trim(),
     p_email: input.email.trim().toLowerCase(),
     p_birth_date: input.birthDate,
+    p_residence_department: input.residenceDepartment.trim(),
+    p_residence_city: input.residenceCity.trim(),
+    p_neighborhood: input.neighborhood.trim(),
+    p_address: input.address.trim(),
+    p_pension_fund: input.pensionFund.trim(),
+    p_eps: input.eps.trim(),
   });
   fail(result.error);
   const contractorId = Number(result.data);
   await uploadAndRegisterContractorPdf(contractorId, "CEDULA", input.cedulaPdf);
   return contractorId;
+}
+
+export async function completeContractorRegistrationDetails(
+  contractorId: number,
+  details: Pick<CreateContractorInput, "residenceDepartment" | "residenceCity" | "neighborhood" | "address" | "pensionFund" | "eps">,
+): Promise<void> {
+  const result = await supabase.rpc("complete_contractor_registration_details", {
+    p_contractor_id: contractorId,
+    p_residence_department: details.residenceDepartment.trim(),
+    p_residence_city: details.residenceCity.trim(),
+    p_neighborhood: details.neighborhood.trim(),
+    p_address: details.address.trim(),
+    p_pension_fund: details.pensionFund.trim(),
+    p_eps: details.eps.trim(),
+  });
+  fail(result.error);
 }
 
 export async function uploadContractorActivationDocument(
@@ -745,11 +1059,20 @@ export async function uploadContractorDocument(
   await uploadAndRegisterContractorPdf(contractorId, typeCode, file);
 }
 
+async function failOnboardingFunction(error: { message: string; context?: unknown } | null): Promise<void> {
+  if (!error) return;
+  if (error.context instanceof Response) {
+    const body = await error.context.clone().json().catch(() => null);
+    if (typeof body?.error === "string" && body.error.trim()) throw new Error(body.error);
+  }
+  throw new Error(error.message);
+}
+
 export async function sendContractorOnboardingEmail(contractorId: number): Promise<string> {
   const result = await supabase.functions.invoke("send-contractor-onboarding-email", {
     body: { contractorId },
   });
-  fail(result.error);
+  await failOnboardingFunction(result.error);
   if ((result.data as any)?.error) throw new Error((result.data as any).error);
   const email = (result.data as any)?.email;
   return typeof email === "string" ? email : "";
@@ -761,7 +1084,7 @@ export async function loadContractorOnboardingForm(
   const result = await supabase.functions.invoke("contractor-onboarding", {
     body: { action: "get", token },
   });
-  fail(result.error);
+  await failOnboardingFunction(result.error);
   if ((result.data as any)?.error) throw new Error((result.data as any).error);
   return result.data as ContractorOnboardingForm;
 }
@@ -773,7 +1096,7 @@ export async function submitContractorOnboardingForm(
   const result = await supabase.functions.invoke("contractor-onboarding", {
     body: { action: "submit", token, payload },
   });
-  fail(result.error);
+  await failOnboardingFunction(result.error);
   if ((result.data as any)?.error) throw new Error((result.data as any).error);
 }
 
@@ -783,7 +1106,7 @@ export async function loadContractorOnboardingContract(
   const result = await supabase.functions.invoke("contractor-onboarding", {
     body: { action: "get-contract", token },
   });
-  fail(result.error);
+  await failOnboardingFunction(result.error);
   if ((result.data as any)?.error) throw new Error((result.data as any).error);
   return result.data as ContractorOnboardingContract;
 }
@@ -796,7 +1119,7 @@ export async function signContractorOnboardingContract(
   const result = await supabase.functions.invoke("contractor-onboarding", {
     body: { action: "sign-contract", token, signatureBase64, evidence },
   });
-  fail(result.error);
+  await failOnboardingFunction(result.error);
   if ((result.data as any)?.error) throw new Error((result.data as any).error);
 }
 
@@ -1421,6 +1744,8 @@ export async function loadAdminPayroll(periodStart: string): Promise<AdminPayrol
       eligibleDays: Number(item.eligibleDays ?? 0),
       paidDays: Number(item.paidDays ?? 0),
       baseSalaryAmount: Number(item.baseSalaryAmount ?? 0),
+      extraHourAmount: Number(item.extraHourAmount ?? 0),
+      totalPayAmount: Number(item.totalPayAmount ?? Number(item.baseSalaryAmount ?? 0) + Number(item.extraHourAmount ?? 0)),
       status: item.status,
       calculatedAt: item.calculatedAt,
       closedAt: item.closedAt ?? null,
@@ -1521,6 +1846,37 @@ export async function terminateContractor(input: {
     p_termination_date: input.terminationDate,
     p_reason_id: input.reasonId,
     p_observations: input.observations.trim(),
+  });
+  fail(result.error);
+  const notification = await supabase.functions.invoke("send-contractor-termination-email", {
+    body: { contractorId: input.contractorId },
+  });
+  let notificationError = "";
+  if (notification.error?.context instanceof Response) {
+    const body = await notification.error.context.clone().json().catch(() => null);
+    notificationError = typeof body?.error === "string" ? body.error : "";
+  }
+  if (!notificationError && notification.error) notificationError = notification.error.message;
+  const response = notification.data as { ok?: boolean; sent?: number; failed?: number; error?: string } | null;
+  if (!notificationError && response?.error) notificationError = response.error;
+  return {
+    emailSent: !notificationError && response?.ok === true,
+    recipients: Number(response?.sent ?? 0),
+    notificationError,
+  };
+}
+
+export async function changeContractorContract(input: {
+  contractorId: number;
+  currentEndDate: string;
+  newStartDate: string;
+  newContractTypeId: number;
+}) {
+  const result = await supabase.rpc("change_contractor_contract", {
+    p_contractor_id: input.contractorId,
+    p_current_end_date: input.currentEndDate,
+    p_new_start_date: input.newStartDate,
+    p_new_contract_type_id: input.newContractTypeId,
   });
   fail(result.error);
 }
@@ -1632,6 +1988,7 @@ export async function loadAdminData(): Promise<AdminData> {
     shiftsResult,
     serviceRatesResult,
     extraRatesResult,
+    directExtraRatesResult,
     serviceUnitTypesResult,
     serviceUnitRatesResult,
     costConceptsResult,
@@ -1650,6 +2007,10 @@ export async function loadAdminData(): Promise<AdminData> {
     supabase
       .from("area_extra_hour_rates")
       .select("id,area_id,sale_price,cost_price,valid_from,valid_to,area(name,client_id,clients(name))")
+      .order("valid_from", { ascending: false }),
+    supabase
+      .from("direct_extra_hour_rates")
+      .select("id,rate_type,hourly_amount,valid_from,valid_to")
       .order("valid_from", { ascending: false }),
     supabase.from("service_unit_type").select("id,code,name,description,is_active").order("name"),
     supabase
@@ -1679,6 +2040,7 @@ export async function loadAdminData(): Promise<AdminData> {
     shiftsResult,
     serviceRatesResult,
     extraRatesResult,
+    directExtraRatesResult,
     serviceUnitTypesResult,
     serviceUnitRatesResult,
     costConceptsResult,
@@ -1745,6 +2107,13 @@ export async function loadAdminData(): Promise<AdminData> {
         validTo: row.valid_to,
       };
     }),
+    directExtraHourRates: (directExtraRatesResult.data ?? []).map((row: any) => ({
+      id: row.id,
+      rateType: row.rate_type,
+      hourlyAmount: Number(row.hourly_amount),
+      validFrom: row.valid_from,
+      validTo: row.valid_to,
+    })),
     serviceUnitTypes: (serviceUnitTypesResult.data ?? []).map((row: any) => ({
       id: row.id,
       code: row.code,
@@ -1916,6 +2285,25 @@ export async function saveAdminExtraHourRate(input: {
   const result = input.id
     ? await supabase.from("area_extra_hour_rates").update(payload).eq("id", input.id)
     : await supabase.from("area_extra_hour_rates").insert(payload);
+  fail(result.error);
+}
+
+export async function saveAdminDirectExtraHourRate(input: {
+  id?: number;
+  rateType: AdminData["directExtraHourRates"][number]["rateType"];
+  hourlyAmount: number;
+  validFrom: string;
+  validTo: string | null;
+}) {
+  const payload = {
+    rate_type: input.rateType,
+    hourly_amount: input.hourlyAmount,
+    valid_from: input.validFrom,
+    valid_to: input.validTo,
+  };
+  const result = input.id
+    ? await supabase.from("direct_extra_hour_rates").update(payload).eq("id", input.id)
+    : await supabase.from("direct_extra_hour_rates").insert(payload);
   fail(result.error);
 }
 
