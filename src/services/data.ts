@@ -1035,12 +1035,14 @@ export async function createContractorDraft(input: CreateContractorInput): Promi
   return contractorId;
 }
 
-export async function completeContractorRegistrationDetails(
+export async function updateContractorInformation(
   contractorId: number,
-  details: Pick<CreateContractorInput, "residenceDepartment" | "residenceCity" | "neighborhood" | "address" | "pensionFund" | "eps">,
+  details: Pick<CreateContractorInput, "phone" | "email" | "residenceDepartment" | "residenceCity" | "neighborhood" | "address" | "pensionFund" | "eps">,
 ): Promise<void> {
-  const result = await supabase.rpc("complete_contractor_registration_details", {
+  const result = await supabase.rpc("update_contractor_information", {
     p_contractor_id: contractorId,
+    p_phone_number: details.phone.trim(),
+    p_email: details.email.trim().toLowerCase(),
     p_residence_department: details.residenceDepartment.trim(),
     p_residence_city: details.residenceCity.trim(),
     p_neighborhood: details.neighborhood.trim(),

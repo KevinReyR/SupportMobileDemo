@@ -45,7 +45,7 @@ import {
   closeAdminDirectPayroll,
   createAdminUser,
   createContractorDraft,
-  completeContractorRegistrationDetails,
+  updateContractorInformation,
   createContractorNovelty,
   createContractorDocumentSignedUrl,
   createContractorProfilePhotoSignedUrl,
@@ -4356,6 +4356,14 @@ function missingRegistrationDetails(details: ContractorRegistrationDetails): str
   return missing;
 }
 
+function validContractorPhone(value: string | null | undefined) {
+  return /^3[0-9]{9}$/.test((value ?? "").trim());
+}
+
+function validContractorEmail(value: string | null | undefined) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test((value ?? "").trim());
+}
+
 function ContractorRegistrationFields({
   details,
   onChange,
@@ -5481,17 +5489,17 @@ function ContractorProfile({
       ]} />
       {(context.roleCode === "COORDINATOR" || context.roleCode === "DIRECTOR") && (
         <>
-          {missingRegistrationDetails({
+          {(missingRegistrationDetails({
             residenceDepartment: contractor.residenceDepartment,
             residenceCity: contractor.city === "Sin registrar" ? "" : contractor.city,
             neighborhood: contractor.neighborhood,
             address: contractor.address,
             pensionFund: contractor.pensionFund ?? "",
             eps: contractor.eps ?? "",
-          }).length > 0 && (
-            <Notice icon="alert-circle-outline" text="Faltan datos de residencia o seguridad social. Complétalos antes de enviar el onboarding." />
+          }).length > 0 || !validContractorPhone(contractor.phone) || !validContractorEmail(contractor.email)) && (
+            <Notice icon="alert-circle-outline" text="Faltan datos de contacto, residencia o seguridad social. Complétalos antes de enviar el onboarding." />
           )}
-          <SecondaryButton label="Completar residencia y seguridad social" icon="create-outline" onPress={() => setRegistrationDetailsVisible(true)} />
+          <SecondaryButton label="Completar información" icon="create-outline" onPress={() => setRegistrationDetailsVisible(true)} />
           <ContractorRegistrationDetailsModal
             contractor={contractor}
             visible={registrationDetailsVisible}
@@ -5681,12 +5689,17 @@ function ContractorRegistrationDetailsModal({
   onSaved: () => Promise<void>;
 }) {
   const [details, setDetails] = useState(emptyContractorRegistrationDetails);
+  const [phone, setPhone] = useState("");
+  const [email, setEmail] = useState("");
   const [catalogErrors, setCatalogErrors] = useState<string[]>(["Espera la carga de pensiones y EPS."]);
   const [detailsError, setDetailsError] = useState("");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!visible) return;
+    setPhone(contractor.phone ?? "");
+    setEmail(contractor.email ?? "");
+    setDetailsError("");
     setDetails({
       residenceDepartment: contractor.residenceDepartment,
       residenceCity: contractor.city === "Sin registrar" ? "" : contractor.city,
@@ -5699,18 +5712,17 @@ function ContractorRegistrationDetailsModal({
 
   const save = async () => {
     const missing = missingRegistrationDetails(details);
+    const contactErrors: string[] = [];
+    if (!validContractorPhone(phone)) contactErrors.push("Teléfono: ingresa 10 dígitos comenzando por 3.");
+    if (!validContractorEmail(email)) contactErrors.push("Correo: ingresa una dirección válida.");
     setDetailsError("");
-    if (catalogErrors.length || missing.length) {
-      setDetailsError([...catalogErrors, ...missing.map((field) => `${field}: completa o corrige este campo.`)].join("\n"));
-      return;
-    }
-    if (missing.length) {
-      Alert.alert("Completa los datos", `Faltan: ${missing.join(", ")}.`);
+    if (catalogErrors.length || missing.length || contactErrors.length) {
+      setDetailsError([...contactErrors, ...catalogErrors, ...missing.map((field) => `${field}: completa o corrige este campo.`)].join("\n"));
       return;
     }
     setSaving(true);
     try {
-      await completeContractorRegistrationDetails(contractor.id, details);
+      await updateContractorInformation(contractor.id, { phone, email, ...details });
       await onSaved();
     } catch (cause) {
       setDetailsError(errorMessage(cause));
@@ -5721,7 +5733,11 @@ function ContractorRegistrationDetailsModal({
   };
 
   return (
-    <AdminModalShell visible={visible} title="Residencia y seguridad social" saving={saving} onClose={onClose} onSave={save}>
+    <AdminModalShell visible={visible} title="Completar información" saving={saving} onClose={onClose} onSave={save}>
+      <Label text="Teléfono *" />
+      <Input icon="call-outline" value={phone} onChangeText={setPhone} keyboardType="phone-pad" />
+      <Label text="Correo *" />
+      <Input icon="mail-outline" value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" />
       <ContractorRegistrationFields details={details} onChange={setDetails} onValidation={setCatalogErrors} />
       {!!detailsError && <Text accessibilityRole="alert" style={{ color: "#b42318" }}>{detailsError}</Text>}
     </AdminModalShell>
