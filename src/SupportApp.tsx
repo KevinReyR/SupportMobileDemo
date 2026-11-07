@@ -54,6 +54,7 @@ import {
   createPersonnelRequest,
   finalizeOperation,
   finalizeDischargeOperation,
+  activatePendingContractorIfReady,
   loadAdminData,
   loadAdminPayroll,
   loadAppData,
@@ -62,6 +63,7 @@ import {
   loadClientContractorHistory,
   loadContractorDocuments,
   loadContractorActivationDocuments,
+  loadContractorCurrentStatus,
   loadContractorHistory,
   loadContractorNovelties,
   loadContractorProfile,
@@ -7102,7 +7104,7 @@ const ContractorActivationDocumentsCard = forwardRef<
           .filter((code) => documents.some((document) => document.typeCode === code)),
       );
     } catch (cause) {
-      Alert.alert("No fue posible cargar documentos", errorMessage(cause));
+      showMessage("No fue posible cargar documentos", errorMessage(cause));
     } finally {
       setLoadingDocuments(false);
     }
@@ -7175,20 +7177,19 @@ const ContractorActivationDocumentsCard = forwardRef<
       setActivationStepLabel(label);
     };
     if (!contractTypeId) {
-      Alert.alert("Selecciona el tipo", "Debes seleccionar el tipo de contrato del contratista.");
+      showMessage("Selecciona el tipo", "Debes seleccionar el tipo de contrato del contratista.");
       return;
     }
     if (pendingUploads.length === 0 && !contractTypeChanged) {
-      Alert.alert("Sin cambios", "Selecciona un tipo de contrato diferente o adjunta al menos un documento en PDF.");
+      showMessage("Sin cambios", "Selecciona un tipo de contrato diferente o adjunta al menos un documento en PDF.");
       return;
     }
     setSaving(true);
     updateProgress(0, "Validando información");
     try {
-      let activatedByContractType = false;
       if (contractTypeChanged) {
         updateProgress(15, "Guardando tipo de contrato");
-        activatedByContractType = await selectContractorContractType(contractor.id, contractTypeId);
+        await selectContractorContractType(contractor.id, contractTypeId);
       }
       if (pendingUploads.length > 0) updateProgress(35, "Subiendo documentos");
       for (const [index, item] of pendingUploads.entries()) {
@@ -7201,12 +7202,20 @@ const ContractorActivationDocumentsCard = forwardRef<
       }
       setSelectedFiles({});
       updateProgress(60, "Verificando documentos requeridos");
-      const documents = await loadContractorActivationDocuments(contractor.id);
+      await activatePendingContractorIfReady(contractor.id);
+      const [documents, currentStatus] = await Promise.all([
+        loadContractorActivationDocuments(contractor.id),
+        loadContractorCurrentStatus(contractor.id),
+      ]);
       const completed = activationDocumentOptions.every((item) =>
         documents.some((document) => document.typeCode === item.typeCode),
       );
+      const activated = currentStatus === "ACTIVO";
+      if (completed && !activated) {
+        throw new Error("Los documentos quedaron guardados, pero el contrato no cambió a ACTIVO. Intenta nuevamente.");
+      }
       let onboardingMessage = "";
-      if (completed || activatedByContractType) {
+      if (activated) {
         try {
           updateProgress(80, "Enviando correo de onboarding");
           const email = await sendContractorOnboardingEmail(contractor.id);
@@ -7223,9 +7232,9 @@ const ContractorActivationDocumentsCard = forwardRef<
           .filter((code) => documents.some((document) => document.typeCode === code)),
       );
       updateProgress(100, "Proceso completado");
-      Alert.alert(
-        completed || activatedByContractType ? "Contrato activado" : "Documentos guardados",
-        completed || activatedByContractType
+      showMessage(
+        activated ? "Contrato activado" : "Documentos guardados",
+        activated
           ? `El contratista ya quedó disponible para operaciones.${onboardingMessage}`
           : pendingUploads.length === 0
             ? "Tipo de contrato guardado. Aún faltan documentos para activar."
@@ -7239,7 +7248,7 @@ const ContractorActivationDocumentsCard = forwardRef<
     } catch (cause) {
       setActivationProgress(0);
       setActivationStepLabel("");
-      Alert.alert("No fue posible guardar", errorMessage(cause));
+      showMessage("No fue posible guardar", errorMessage(cause));
     } finally {
       setSaving(false);
     }

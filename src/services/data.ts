@@ -882,13 +882,33 @@ export async function loadClientContractorHistory(contractorId: number): Promise
 }
 
 export async function loadContractorActivationDocuments(contractorId: number): Promise<ContractorDocument[]> {
-  const contract = await supabase.from("contractor_contract").select("id").eq("contractor_id", contractorId)
-    .order("start_date", { ascending: false }).order("id", { ascending: false }).limit(1).single();
+  const contract = await supabase.rpc("get_current_contractor_contract_id", {
+    p_contractor_id: contractorId,
+  });
   fail(contract.error);
-  const documents = await supabase.from("contractor_documents").select("id").eq("contractor_id", contractorId).eq("contractor_contract_id", contract.data!.id);
+  const contractId = Number(contract.data);
+  if (!Number.isFinite(contractId) || contractId <= 0) return [];
+  const documents = await supabase.from("contractor_documents").select("id")
+    .eq("contractor_id", contractorId).eq("contractor_contract_id", contractId);
   fail(documents.error);
   const ids = new Set((documents.data ?? []).map(row => row.id));
   return (await loadContractorDocuments(contractorId)).filter(row => ids.has(row.id));
+}
+
+export async function loadContractorCurrentStatus(contractorId: number): Promise<ContractStatus> {
+  const result = await supabase.rpc("contractor_current_status", {
+    p_contractor_id: contractorId,
+  });
+  fail(result.error);
+  return normalizeContractStatus(result.data);
+}
+
+export async function activatePendingContractorIfReady(contractorId: number): Promise<boolean> {
+  const result = await supabase.rpc("activate_pending_contractor_if_ready", {
+    p_contractor_id: contractorId,
+  });
+  fail(result.error);
+  return Boolean(result.data);
 }
 
 export async function loadContractorDocuments(
