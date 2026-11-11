@@ -7,9 +7,11 @@ export function statementRows(s: Statement): (string | number)[][] {
   return s.lines.map(l => [l.date, s.header.city, s.header.client_name, l.auxiliaries, l.quantity, l.unit, l.unit_price, l.extra_hours, l.extra_price, l.total, l.observations]);
 }
 export async function statementPdf(s: Statement): Promise<Uint8Array> {
-  // Keep pdf-lib out of the startup bundle evaluation. In some Metro web
-  // builds its tslib interop fails before React can render the first screen.
-  const { PDFDocument, StandardFonts, rgb } = await import('pdf-lib');
+  // The web UMD bundle includes its helpers; Metro's ESM/tslib interop breaks
+  // when the regular package is loaded for PDF downloads.
+  const { PDFDocument, StandardFonts, rgb } = Platform.OS === 'web'
+    ? require('pdf-lib/dist/pdf-lib.min.js') as typeof import('pdf-lib')
+    : await import('pdf-lib');
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
@@ -76,7 +78,7 @@ export async function exportStatement(s: Statement, format: 'pdf' | 'xlsx') {
   const mimeType = format==='pdf' ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
   if (Platform.OS === 'web') {
     const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: mimeType }));
-    const link = document.createElement('a'); link.href=url; link.download=fileName; link.click(); setTimeout(() => URL.revokeObjectURL(url),30000);
+    const link = document.createElement('a'); link.href=url; link.download=fileName; document.body.appendChild(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url),30000);
   } else {
     const { File, Paths } = await import('expo-file-system'); const Sharing = await import('expo-sharing');
     if (!(await Sharing.isAvailableAsync())) throw new Error('No hay una aplicacion disponible para compartir este archivo');
