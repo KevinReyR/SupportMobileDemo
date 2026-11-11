@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as DocumentPicker from 'expo-document-picker';
 import { ActivityIndicator, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { exportStatement, statementColumns, statementRows } from '../lib/statement-export';
+import { exportStatement, statementColumns, statementRows, statementServiceLabel } from '../lib/statement-export';
 import { getStatement, listStatements, loadStatementSettings, previewStatement, saveStatement, saveStatementSettings, statementSignatureUrl, transitionStatement, uploadStatementSignature, Statement, StatementPreview, StatementRange, StatementSettings } from '../services/statements';
 
 type Calendar = React.ComponentType<{ visible: boolean; selectedDate: string | null; title: string; onClose: () => void; onSelect: (date: string) => void }>;
@@ -42,7 +42,7 @@ function Table({data}: {data: StatementPreview | Statement}) {
   const [expanded,setExpanded]=useState(false);
   const rows=statementRows(data as Statement);
   return <View style={s.card}><Text style={s.title}>PLANILLA DE SERVICIOS</Text>
-    <Text>{data.header.issuer_name} · NIT {data.header.issuer_nit}</Text><Text>{data.header.client_name} · {data.header.city} · {data.header.service_name}</Text>
+    <Text>{data.header.issuer_name} · NIT {data.header.issuer_nit}</Text><Text>{data.header.client_name} · {data.header.city} · {statementServiceLabel(data.header.service_name)}</Text>
     <Text>Desliza la tabla horizontalmente para ver todos los valores.</Text>
     <ScrollView horizontal><View><View style={s.row}>{statementColumns.map((c,i)=><Text key={c} style={[s.cell,s.label,{width:i===10?240:120}]}>{c}</Text>)}</View>
       {(expanded?rows:rows.slice(0,30)).map((r,index)=><View key={index} style={s.row}>{r.map((v,i)=><Text key={i} style={[s.cell,{width:i===10?240:120}]}>{[6,8,9].includes(i)?money(Number(v)):String(v)}</Text>)}</View>)}</View></ScrollView>
@@ -135,7 +135,7 @@ export default function ServiceStatements({Calendar}: {Calendar:Calendar}) {
   function filters(value:StatementRange,set:(r:StatementRange)=>void,editing=false,compact=false,datesBelow=false){
     const selectors=<>
     <Select compact={compact} disabled={busy||(editing&&!!selected)} label="Cliente" value={String(value.clientId||'')} options={[{id:'',name:editing?'Selecciona cliente':'Todos los clientes'},...(settings?.clients||[]).map(c=>({id:String(c.id),name:c.name}))]} onChange={v=>set({...value,clientId:Number(v),areaId:0})}/>
-    <Select compact={compact} disabled={busy||!value.clientId||(editing&&!!selected)} label="Servicio" value={String(value.areaId||'')} options={[{id:'',name:editing?'Selecciona servicio':'Todos los servicios'},...(settings?.areas||[]).filter(a=>a.client_id===value.clientId).map(a=>({id:String(a.id),name:a.name}))]} onChange={v=>set({...value,areaId:Number(v)})}/>
+    <Select compact={compact} disabled={busy||!value.clientId||(editing&&!!selected)} label="Servicio" value={String(value.areaId||'')} options={[{id:'',name:editing?'Selecciona servicio':'Todos los servicios'},...(settings?.areas||[]).filter(a=>a.client_id===value.clientId).map(a=>({id:String(a.id),name:statementServiceLabel(a.name)}))]} onChange={v=>set({...value,areaId:Number(v)})}/>
     </>;
     const dates=<>
     <DateField compact={compact} disabled={busy} label="Desde" value={value.startDate} Calendar={Calendar} onChange={v=>set({...value,startDate:v})}/>
@@ -153,7 +153,7 @@ export default function ServiceStatements({Calendar}: {Calendar:Calendar}) {
       <View style={s.toolbar}><TextInput accessibilityLabel="Buscar por cliente o número de acta" placeholder="Buscar cliente o número de acta" value={search} onChangeText={setSearch} style={[s.input,s.searchInput]}/><Pressable accessibilityRole="button" accessibilityState={{expanded:filtersOpen}} onPress={()=>setFiltersOpen(!filtersOpen)} style={[s.toolbarAction,filtersOpen&&s.toolbarActionActive]}><Text style={s.toolbarActionText}>Filtros{activeFilters?` · ${activeFilters}`:''}  {filtersOpen?'▴':'▾'}</Text></Pressable><Pressable accessibilityRole="button" accessibilityLabel="Recargar actas" disabled={busy} onPress={()=>void run(()=>loadList())} style={s.toolbarAction}><Text style={s.toolbarActionText}>↻</Text></Pressable></View>
       {filtersOpen&&<View style={s.filterPanel}><View style={s.filterPanelHeader}><Text style={s.filterPanelTitle}>Filtrar actas</Text>{activeFilters>0&&<Pressable accessibilityRole="button" onPress={()=>{setFilter({clientId:0,areaId:0,startDate:'',endDate:''});setStatus('');}}><Text style={s.clearText}>Limpiar filtros</Text></Pressable>}</View>{filters(filter,setFilter,false,true)}<View style={s.statusField}><Select compact label="Estado" value={status} options={['','GENERADA','ENVIADA','PAGADA','ANULADA'].map(id=>({id,name:id||'Todos los estados'}))} onChange={setStatus}/></View></View>}
       {!visibleItems.length && <Text>{search.trim()?'No hay actas coincidentes entre las cargadas.':'No hay actas para los filtros seleccionados.'}</Text>}
-      {visibleItems.map(a=><Pressable key={a.id} accessibilityRole="button" style={s.statementItem} disabled={busy} onPress={()=>void open(a.id)}><View style={s.statementTop}><Text numberOfLines={1} style={s.statementName}>#{a.number} · {a.header.client_name}</Text><StatusBadge status={a.status}/></View><Text numberOfLines={1} style={s.statementMeta}>{a.header.service_name} · {dateLabel(a.start_date)}–{dateLabel(a.end_date)}</Text><View style={s.statementTop}><Text style={s.statementTotal}>{money(a.total)}</Text><Text numberOfLines={1} style={s.statementMeta}>Factura: {a.invoice_number||'Sin registrar'}</Text></View></Pressable>)}
+      {visibleItems.map(a=><Pressable key={a.id} accessibilityRole="button" style={s.statementItem} disabled={busy} onPress={()=>void open(a.id)}><View style={s.statementTop}><Text numberOfLines={1} style={s.statementName}>#{a.number} · {a.header.client_name}</Text><StatusBadge status={a.status}/></View><Text numberOfLines={1} style={s.statementMeta}>{statementServiceLabel(a.header.service_name)} · {dateLabel(a.start_date)}–{dateLabel(a.end_date)}</Text><View style={s.statementTop}><Text style={s.statementTotal}>{money(a.total)}</Text><Text numberOfLines={1} style={s.statementMeta}>Factura: {a.invoice_number||'Sin registrar'}</Text></View></Pressable>)}
       {more&&<Button label="Cargar mas actas" disabled={busy} onPress={()=>void run(()=>loadList(true))}/>}
     </>}
     <Modal visible={createOpen} transparent onRequestClose={()=>setCreateOpen(false)}><View style={s.overlay}><View style={s.dialog}><Text style={s.title}>Generar acta</Text>{!!error&&<Text accessibilityRole="alert" style={s.error}>{error}</Text>}

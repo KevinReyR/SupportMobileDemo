@@ -2,13 +2,14 @@ import { Platform } from 'react-native';
 import type { Statement } from '../services/statements';
 
 const money = (v: number) => Number(v).toLocaleString('es-CO', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+export const statementServiceLabel = (name: string) => /^AUXILIAR(?:\s|$)/i.test(name.trim()) ? name.trim() : `AUXILIAR ${name.trim()}`;
 export const statementColumns = ['Fecha', 'Ciudad', 'Cliente', 'Aux.', 'Cantidad', 'Unidad / Turno', 'Valor unitario', 'H. extra', 'V. hora extra', 'Total', 'Observaciones'];
 export function statementRows(s: Statement): (string | number)[][] {
   return s.lines.map(l => [l.date, s.header.city, s.header.client_name, l.auxiliaries, l.quantity, l.unit, l.unit_price, l.extra_hours, l.extra_price, l.total, l.observations]);
 }
 export function statementFileName(s: Statement, format: 'pdf' | 'xlsx') {
   const safe = (value: string) => value.replace(/[<>:"/\\|?*\x00-\x1f]/g, ' ').trim().replace(/\s+/g, '_').replace(/[._]+$/g, '') || 'Sin_nombre';
-  return `Acta_${s.number}_${safe(s.header.client_name)}_${safe(s.header.service_name)}${s.start_date}${s.end_date}.${format}`;
+  return `Acta_${s.number}_${safe(s.header.client_name)}_${safe(statementServiceLabel(s.header.service_name))}${s.start_date}${s.end_date}.${format}`;
 }
 export async function statementPdf(s: Statement, signer?: { name: string; imageBytes?: Uint8Array; imageType?: 'png' | 'jpg' }): Promise<Uint8Array> {
   // The web UMD bundle includes its helpers; Metro's ESM/tslib interop breaks
@@ -56,7 +57,7 @@ export async function statementPdf(s: Statement, signer?: { name: string; imageB
     centered('NIT: ' + s.header.issuer_nit, y, 9, font, muted); y -= 25;
     centered('ACTA DE SERVICIOS NRO ' + s.number, y, 13, bold); y -= 26;
     const client = wrap('Cliente: ' + s.header.client_name, tableWidth / 2 - 10, 9, bold);
-    const service = wrap('Servicios: ' + s.header.service_name, tableWidth / 2 - 10, 9, bold);
+    const service = wrap('Servicios: ' + statementServiceLabel(s.header.service_name), tableWidth / 2 - 10, 9, bold);
     const rows = Math.max(client.length, service.length);
     client.forEach((line, index) => page.drawText(line, { x: margin, y: y - index * 12, size: 9, font: bold, color: ink }));
     service.forEach((line, index) => page.drawText(line, { x: pageWidth - margin - bold.widthOfTextAtSize(line, 9), y: y - index * 12, size: 9, font: bold, color: ink }));
@@ -142,8 +143,7 @@ export async function statementPdf(s: Statement, signer?: { name: string; imageB
     y -= 52;
     page.drawLine({ start: { x: (pageWidth - 190) / 2, y }, end: { x: (pageWidth + 190) / 2, y }, thickness: .7, color: grid });
     y -= 16;
-    centered('Firma Gerente Emisor', y, 9, bold); y -= 14;
-    centered(signer.name, y, 9, font); y -= 13;
+    centered(signer.name, y, 9, bold); y -= 13;
     centered(s.header.issuer_name, y, 9, font, muted);
   }
   pdf.getPages().forEach((p, index, all) => {
@@ -169,7 +169,7 @@ export async function exportStatement(s: Statement, format: 'pdf' | 'xlsx') {
   }
   else {
     const ExcelJS = await import('exceljs'); const book = new ExcelJS.Workbook(); const sheet = book.addWorksheet('Planilla');
-    for (const v of [s.header.issuer_name,'NIT: '+s.header.issuer_nit,'PLANILLA DE SERVICIOS - ACTA NRO '+s.number,s.header.client_name+' | '+s.header.service_name,s.start_date+' al '+s.end_date,s.status+' | Factura: '+(s.invoice_number || '')]) sheet.addRow([v]);
+    for (const v of [s.header.issuer_name,'NIT: '+s.header.issuer_nit,'PLANILLA DE SERVICIOS - ACTA NRO '+s.number,s.header.client_name+' | '+statementServiceLabel(s.header.service_name),s.start_date+' al '+s.end_date,s.status+' | Factura: '+(s.invoice_number || '')]) sheet.addRow([v]);
     const head = sheet.addRow(statementColumns); head.font = { bold: true }; sheet.views = [{ state: 'frozen', ySplit: 7 }];
     statementRows(s).forEach(r => { const row = sheet.addRow(r); [7,9,10].forEach(n => row.getCell(n).numFmt = '#,##0.00'); });
     for (const [label,value] of [['Subtotal',s.subtotal],['IVA 19%',s.vat],['TOTAL',s.total]] as const) { const r=sheet.addRow([label,value]); r.getCell(2).numFmt='#,##0.00'; r.font={bold:true}; }
