@@ -15,9 +15,9 @@ export async function statementPdf(s: Statement): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
-  const pageWidth = 841.89, pageHeight = 595.28; // A4 landscape, in points.
-  const margin = 34, tableWidth = pageWidth - margin * 2;
-  const widths = [55, 48, 78, 32, 40, 64, 74, 36, 70, 75, 201.89];
+  const pageWidth = 595.28, pageHeight = 841.89; // A4 portrait, in points.
+  const margin = 28, tableWidth = pageWidth - margin * 2;
+  const widths = [48, 48, 58, 23, 34, 58, 57, 29, 54, 58, 72.28];
   const ink = rgb(.09, .16, .34), muted = rgb(.34, .4, .51);
   const grid = rgb(.76, .81, .88), headerFill = rgb(.09, .17, .36);
   const alternateFill = rgb(.96, .97, .99);
@@ -57,15 +57,16 @@ export async function statementPdf(s: Statement): Promise<Uint8Array> {
     service.forEach((line, index) => page.drawText(line, { x: pageWidth - margin - bold.widthOfTextAtSize(line, 9), y: y - index * 12, size: 9, font: bold, color: ink }));
     y -= rows * 12 + 14;
     centered('PLANILLA DE SERVICIOS', y, 11, bold); y -= 17;
-    centered(s.start_date + ' - ' + s.end_date, y, 9, font, muted); y -= 16;
+    const dateLabel = (date: string) => date.split('-').reverse().join('/');
+    centered('DEL ' + dateLabel(s.start_date) + ' AL ' + dateLabel(s.end_date), y, 9, font, muted); y -= 16;
   };
   const tableHeader = () => {
-    const height = 34;
+    const height = 32;
     page.drawRectangle({ x: margin, y: y - height, width: tableWidth, height, color: headerFill, borderColor: grid, borderWidth: .7 });
     let x = margin;
     statementColumns.forEach((label, index) => {
-      const lines = wrap(label, widths[index] - 8, 7, bold);
-      lines.forEach((line, lineIndex) => page.drawText(line, { x: x + 4, y: y - 12 - lineIndex * 9, size: 7, font: bold, color: rgb(1, 1, 1) }));
+      const lines = wrap(label, widths[index] - 6, 6.1, bold);
+      lines.forEach((line, lineIndex) => page.drawText(line, { x: x + 3, y: y - 11 - lineIndex * 8, size: 6.1, font: bold, color: rgb(1, 1, 1) }));
       x += widths[index];
       if (index < widths.length - 1) page.drawLine({ start: { x, y }, end: { x, y: y - height }, thickness: .5, color: rgb(.48, .56, .7) });
     });
@@ -73,28 +74,33 @@ export async function statementPdf(s: Statement): Promise<Uint8Array> {
   };
   const nextPage = (withTableHeader: boolean) => {
     page = pdf.addPage([pageWidth, pageHeight]);
-    heading();
+    y = pageHeight - margin - 8;
     if (withTableHeader) tableHeader();
   };
   heading(); tableHeader();
   const rows = statementRows(s);
   rows.forEach((row, rowIndex) => {
-    const cells = row.map((value, index) => wrap([6, 8, 9].includes(index) ? money(Number(value)) : String(value), widths[index] - 8, 7.5));
+    const cells = row.map((value, index) => wrap([6, 8, 9].includes(index) ? money(Number(value)) : String(value), widths[index] - 6, 6.4));
     const lineCount = Math.max(...cells.map(cell => cell.length));
-    if (rowIndex === rows.length - 1 && y - Math.max(20, lineCount * 10 + 8) < margin + 91) nextPage(true);
+    const fullHeight = Math.max(18, lineCount * 8.5 + 6);
+    const freshPageCapacity = pageHeight - margin * 2 - 8 - 32 - 16;
+    if (fullHeight <= freshPageCapacity) {
+      const reserve = rowIndex === rows.length - 1 ? 91 : 16;
+      if (y - fullHeight < margin + reserve) nextPage(true);
+    }
     let offset = 0;
     do {
       if (y < margin + 34) nextPage(true);
-      const capacity = Math.max(1, Math.floor((y - margin - 13) / 10));
+      const capacity = Math.max(1, Math.floor((y - margin - 22) / 8.5));
       const count = Math.min(capacity, lineCount - offset);
-      const height = Math.max(20, count * 10 + 8);
+      const height = Math.max(18, count * 8.5 + 6);
       if (y - height < margin + 15) { nextPage(true); continue; }
       let x = margin;
       cells.forEach((cell, index) => {
         page.drawRectangle({ x, y: y - height, width: widths[index], height,
           color: rowIndex % 2 ? alternateFill : rgb(1, 1, 1), borderColor: grid, borderWidth: .55 });
         cell.slice(offset, offset + count).forEach((line, lineIndex) =>
-          page.drawText(line, { x: x + 4, y: y - 11 - lineIndex * 10, size: 7.5, font, color: ink }));
+          page.drawText(line, { x: x + 3, y: y - 9 - lineIndex * 8.5, size: 6.4, font, color: ink }));
         x += widths[index];
       });
       y -= height;
