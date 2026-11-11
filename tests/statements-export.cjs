@@ -19,11 +19,12 @@ const statement = {
 (async()=>{
   const bytes=await mod.exports.statementPdf(statement);
   const pdf=await PDFDocument.load(bytes);assert(pdf.getPageCount()>1);
+  const size=pdf.getPage(0).getSize();assert(Math.abs(size.width-841.89)<.01);assert(Math.abs(size.height-595.28)<.01);
   assert.equal(mod.exports.statementRows(statement).length,75);
   fs.mkdirSync('tmp/statement-qa',{recursive:true});fs.writeFileSync('tmp/statement-qa/acta-demo.pdf',bytes);
   let blob;
   const old=URL.createObjectURL;URL.createObjectURL=b=>{blob=b;return 'blob:test'};
-  global.document={createElement:()=>({click(){}})};
+  global.document={createElement:()=>({click(){},remove(){}}),body:{appendChild(){}}};
   const oldTimeout=global.setTimeout;global.setTimeout=()=>0;
   try{await mod.exports.exportStatement(statement,'xlsx');}finally{URL.createObjectURL=old;global.setTimeout=oldTimeout;}
   const ExcelJS=require('exceljs');const book=new ExcelJS.Workbook();await book.xlsx.load(await blob.arrayBuffer());

@@ -15,51 +15,115 @@ export async function statementPdf(s: Statement): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
-  const widths = [56, 60, 72, 28, 43, 63, 70, 35, 67, 75, 190];
-  let page = pdf.addPage([842, 595]), y = 565;
-  // Word wrapping preserves complete data, including long invoice/client strings.
-  const wrap = (text: string, width: number, size = 8) => {
-    const result: string[] = []; let line = '';
+  const pageWidth = 841.89, pageHeight = 595.28; // A4 landscape, in points.
+  const margin = 34, tableWidth = pageWidth - margin * 2;
+  const widths = [55, 48, 78, 32, 40, 64, 74, 36, 70, 75, 201.89];
+  const ink = rgb(.09, .16, .34), muted = rgb(.34, .4, .51);
+  const grid = rgb(.76, .81, .88), headerFill = rgb(.09, .17, .36);
+  const alternateFill = rgb(.96, .97, .99);
+  let page = pdf.addPage([pageWidth, pageHeight]), y = 0;
+
+  const wrap = (text: string, width: number, size = 8, face = font): string[] => {
+    const lines: string[] = [];
+    let current = '';
     for (const word of text.replace(/\r/g, '').split(/\s+/)) {
-      if (line && font.widthOfTextAtSize(line + ' ' + word, size) > width) { result.push(line); line = ''; }
-      if (font.widthOfTextAtSize(word, size) <= width) line += (line ? ' ' : '') + word;
-      else for (const char of word) {
-        if (line && font.widthOfTextAtSize(line + char,size)>width) { result.push(line); line=''; }
-        line+=char;
+      if (!word) continue;
+      const proposed = current ? current + ' ' + word : word;
+      if (face.widthOfTextAtSize(proposed, size) <= width) { current = proposed; continue; }
+      if (current) { lines.push(current); current = ''; }
+      for (const char of word) {
+        if (current && face.widthOfTextAtSize(current + char, size) > width) {
+          lines.push(current); current = '';
+        }
+        current += char;
       }
     }
-    result.push(line); return result;
+    lines.push(current);
+    return lines;
   };
-  const write = (text: string, size = 10, strong = false) => {
-    for (const line of wrap(text, 790, size)) { page.drawText(line, { x: 24, y, size, font: strong ? bold : font }); y -= size + 5; }
+  const centered = (text: string, top: number, size: number, face = font, color = ink) => {
+    const width = face.widthOfTextAtSize(text, size);
+    page.drawText(text, { x: (pageWidth - width) / 2, y: top, size, font: face, color });
   };
   const heading = () => {
-    write(s.header.issuer_name, 13, true); write('NIT: ' + s.header.issuer_nit);
-    write('PLANILLA DE SERVICIOS - ACTA NRO ' + s.number, 12, true);
-    write(s.header.client_name + ' | Servicio: ' + s.header.service_name);
-    write(s.start_date + ' al ' + s.end_date + ' | ' + s.status + (s.invoice_number ? ' | Factura: ' + s.invoice_number : ''));
-    y -= 6;
+    y = pageHeight - margin - 9;
+    centered(s.header.issuer_name, y, 14, bold); y -= 18;
+    centered('NIT: ' + s.header.issuer_nit, y, 9, font, muted); y -= 25;
+    centered('ACTA DE SERVICIOS NRO ' + s.number, y, 13, bold); y -= 26;
+    const client = wrap('Cliente: ' + s.header.client_name, tableWidth / 2 - 10, 9, bold);
+    const service = wrap('Servicios: ' + s.header.service_name, tableWidth / 2 - 10, 9, bold);
+    const rows = Math.max(client.length, service.length);
+    client.forEach((line, index) => page.drawText(line, { x: margin, y: y - index * 12, size: 9, font: bold, color: ink }));
+    service.forEach((line, index) => page.drawText(line, { x: pageWidth - margin - bold.widthOfTextAtSize(line, 9), y: y - index * 12, size: 9, font: bold, color: ink }));
+    y -= rows * 12 + 14;
+    centered('PLANILLA DE SERVICIOS', y, 11, bold); y -= 17;
+    centered(s.start_date + ' - ' + s.end_date, y, 9, font, muted); y -= 16;
   };
   const tableHeader = () => {
-    let x = 24; page.drawRectangle({ x, y: y - 26, width: 790, height: 32, color: rgb(.92,.94,.97) });
-    statementColumns.forEach((text, i) => { wrap(text, widths[i] - 6).forEach((v, j) => page.drawText(v, { x: x + 2, y: y - j * 10, size: 8, font: bold })); x += widths[i]; }); y -= 38;
+    const height = 34;
+    page.drawRectangle({ x: margin, y: y - height, width: tableWidth, height, color: headerFill, borderColor: grid, borderWidth: .7 });
+    let x = margin;
+    statementColumns.forEach((label, index) => {
+      const lines = wrap(label, widths[index] - 8, 7, bold);
+      lines.forEach((line, lineIndex) => page.drawText(line, { x: x + 4, y: y - 12 - lineIndex * 9, size: 7, font: bold, color: rgb(1, 1, 1) }));
+      x += widths[index];
+      if (index < widths.length - 1) page.drawLine({ start: { x, y }, end: { x, y: y - height }, thickness: .5, color: rgb(.48, .56, .7) });
+    });
+    y -= height;
+  };
+  const nextPage = (withTableHeader: boolean) => {
+    page = pdf.addPage([pageWidth, pageHeight]);
+    heading();
+    if (withTableHeader) tableHeader();
   };
   heading(); tableHeader();
-  for (const row of statementRows(s)) {
-    const cells = row.map((v, i) => wrap([6,8,9].includes(i) ? money(Number(v)) : String(v), widths[i] - 6));
-    let offset = 0; const count = Math.max(...cells.map(c => c.length));
-    if (count * 11 + 8 > y - 45 && count * 11 + 8 < 350) { page=pdf.addPage([842,595]); y=565; heading(); tableHeader(); }
-    while (offset < count) {
-      if (y < 55) { page = pdf.addPage([842, 595]); y = 565; heading(); tableHeader(); }
-      const available = Math.max(1, Math.floor((y - 45) / 11));
-      const slice = Math.min(available, count - offset); let x = 24;
-      cells.forEach((c,i) => { c.slice(offset, offset+slice).forEach((v,j) => page.drawText(v, { x: x+2,y:y-j*11,size:8,font })); x += widths[i]; });
-      y -= slice * 11 + 8; offset += slice;
-    }
-  }
-  if (y < 100) { page = pdf.addPage([842,595]); y = 565; heading(); }
-  write('Subtotal: $' + money(s.subtotal), 11, true); write('IVA 19%: $' + money(s.vat), 11); write('TOTAL: $' + money(s.total), 12, true);
-  pdf.getPages().forEach((p,i,all) => p.drawText('Pagina ' + (i+1) + ' de ' + all.length, { x: 730, y: 16, size: 8, font }));
+  const rows = statementRows(s);
+  rows.forEach((row, rowIndex) => {
+    const cells = row.map((value, index) => wrap([6, 8, 9].includes(index) ? money(Number(value)) : String(value), widths[index] - 8, 7.5));
+    const lineCount = Math.max(...cells.map(cell => cell.length));
+    if (rowIndex === rows.length - 1 && y - Math.max(20, lineCount * 10 + 8) < margin + 91) nextPage(true);
+    let offset = 0;
+    do {
+      if (y < margin + 34) nextPage(true);
+      const capacity = Math.max(1, Math.floor((y - margin - 13) / 10));
+      const count = Math.min(capacity, lineCount - offset);
+      const height = Math.max(20, count * 10 + 8);
+      if (y - height < margin + 15) { nextPage(true); continue; }
+      let x = margin;
+      cells.forEach((cell, index) => {
+        page.drawRectangle({ x, y: y - height, width: widths[index], height,
+          color: rowIndex % 2 ? alternateFill : rgb(1, 1, 1), borderColor: grid, borderWidth: .55 });
+        cell.slice(offset, offset + count).forEach((line, lineIndex) =>
+          page.drawText(line, { x: x + 4, y: y - 11 - lineIndex * 10, size: 7.5, font, color: ink }));
+        x += widths[index];
+      });
+      y -= height;
+      offset += count;
+    } while (offset < lineCount);
+  });
+  if (y < margin + 91) nextPage(false);
+  y -= 14;
+  const totalsX = pageWidth - margin - 245;
+  const totals = [
+    ['Subtotal', s.subtotal],
+    ['IVA 19%', s.vat],
+    ['VALOR TOTAL', s.total],
+  ] as const;
+  totals.forEach(([label, amount], index) => {
+    const height = index === 2 ? 27 : 23;
+    page.drawRectangle({ x: totalsX, y: y - height, width: 245, height,
+      color: index === 2 ? headerFill : alternateFill, borderColor: grid, borderWidth: .7 });
+    const face = index === 2 ? bold : font;
+    const color = index === 2 ? rgb(1, 1, 1) : ink;
+    const value = '$ ' + money(amount);
+    page.drawText(label, { x: totalsX + 9, y: y - 15, size: 9, font: face, color });
+    page.drawText(value, { x: pageWidth - margin - 9 - face.widthOfTextAtSize(value, 9), y: y - 15, size: 9, font: face, color });
+    y -= height;
+  });
+  pdf.getPages().forEach((p, index, all) => {
+    const text = 'Página ' + (index + 1) + ' de ' + all.length;
+    p.drawText(text, { x: (pageWidth - font.widthOfTextAtSize(text, 8)) / 2, y: 17, size: 8, font, color: muted });
+  });
   return pdf.save();
 }
 export async function exportStatement(s: Statement, format: 'pdf' | 'xlsx') {
