@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="es">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Política de tratamiento de datos</title>
+<style>
+  body { margin: 0; background: #f4f6fa; color: #17213a; font: 16px system-ui; }
+  nav { position: sticky; top: 0; background: white; display: flex; gap: 8px; align-items: center; justify-content: center; padding: 8px; }
+  button { min-height: 44px; } canvas { display: block; width: 100%; height: auto; }
+</style>
+<nav><button id="prev" disabled>Anterior</button><span id="status" role="status">Cargando PDF…</span><button id="next" disabled>Siguiente</button></nav>
+<canvas aria-label="Página de la política"></canvas>
+<script type="module">
+  const status = document.querySelector("#status");
+  const prev = document.querySelector("#prev");
+  const next = document.querySelector("#next");
+  const canvas = document.querySelector("canvas");
+  let pdf, number = 1;
+  async function render(pageNumber) {
+    prev.disabled = next.disabled = true;
+    try {
+      const page = await pdf.getPage(pageNumber);
+      const base = page.getViewport({ scale: 1 });
+      const width = Math.max(document.documentElement.clientWidth, 320);
+      const viewport = page.getViewport({ scale: width * Math.min(devicePixelRatio, 2) / base.width });
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+      await page.render({ canvas, viewport }).promise;
+      number = pageNumber;
+      status.textContent = "Página " + number + " de " + pdf.numPages;
+      prev.disabled = number === 1;
+      next.disabled = number === pdf.numPages;
+      window.scrollTo(0, 0);
+      page.cleanup();
+    } catch {
+      status.textContent = "No se pudo mostrar la página. Cierra el visor y vuelve a intentarlo.";
+    }
+  }
+  try {
+    const lib = await import("./policy-pdfjs/pdf.min.mjs");
+    lib.GlobalWorkerOptions.workerSrc = "./policy-pdfjs/pdf.worker.min.mjs";
+    const url = window.frameElement?.dataset.pdf;
+    if (!url) throw new Error("PDF no disponible");
+    pdf = await lib.getDocument({ url, isEvalSupported: false, standardFontDataUrl: "./policy-pdfjs/standard_fonts/", cMapUrl: "./policy-pdfjs/cmaps/", cMapPacked: true, wasmUrl: "./policy-pdfjs/wasm/" }).promise;
+    prev.onclick = () => render(number - 1);
+    next.onclick = () => render(number + 1);
+    await render(1);
+  } catch {
+    status.textContent = "No se pudo cargar la política. Cierra el visor y vuelve a intentarlo.";
+  }
+</script>
+</html>

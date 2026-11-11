@@ -1,0 +1,24 @@
+-- Run only in a disposable PostgreSQL database. This is not a production seed.
+create role anon; create role authenticated;
+create schema auth;
+create table auth.users(id uuid primary key);
+create function auth.uid() returns uuid language sql as $$select '00000000-0000-0000-0000-000000000001'::uuid$$;
+create function public.is_active_user() returns boolean language sql as $$select coalesce(current_setting('test.active',true),'true')='true'$$;
+create function public.has_role(r text) returns boolean language sql as $$select is_active_user() and r=current_setting('test.role',true)$$;
+create table clients(id bigint primary key,name text);
+create table area(id bigint primary key,client_id bigint references clients,name text);
+create table shift(id bigint primary key,name text);
+create table operation_type(id bigint primary key,code text);
+create table service_unit_type(id bigint primary key,name text);
+create table user_profiles(id uuid primary key,name text,last_name text);
+create table operation(id bigint primary key,client_id bigint,area_id bigint,operation_date date,status text,operation_type_id bigint,shift_id bigint);
+create table operation_assignment(id bigint primary key,operation_id bigint,contractor_id bigint,worked_quantity numeric,deleted_at timestamptz);
+create table shift_sales(id bigint primary key,operation_id bigint,operation_assignment_id bigint,contractor_id bigint,worked_quantity numeric,unit_shift_sale_price numeric,extra_hours numeric,unit_extra_hour_sale_price numeric,total_sale numeric);
+create table discharge_sales(id bigint primary key,operation_id bigint,operation_assignment_id bigint,contractor_id bigint,service_unit_type_id bigint,discharged_units numeric,unit_sale_price numeric,total_sale numeric);
+insert into auth.users values(auth.uid()); insert into user_profiles values(auth.uid(),'Test','Director');
+insert into clients values(1,'CLIENTE UNO'),(2,'CLIENTE DOS'); insert into area values(1,1,'BODEGA'),(2,2,'MUELLE');
+insert into shift values(1,'Diurno');insert into operation_type values(1,'TURNO'),(2,'DESCARGUE');insert into service_unit_type values(1,'Cajas');
+insert into operation values(1,1,1,'2026-01-01','CERRADO',1,1),(2,1,1,'2026-01-02','CERRADO',2,null),(3,1,1,'2026-01-03','PENDIENTE',1,1),(4,2,2,'2026-01-01','CERRADO',1,1);
+insert into operation_assignment values(1,1,1,1,null),(2,1,2,1,null),(3,1,3,0,null),(4,2,1,1,null),(5,2,2,1,null),(6,4,3,1,null);
+insert into shift_sales values(1,1,1,1,1,100,2,10,120),(2,1,2,2,1,150,0,10,150),(3,1,3,3,0,100,0,10,0),(4,4,6,3,1,200,0,10,200);
+insert into discharge_sales values(1,2,4,1,1,3.34,10,33.4),(2,2,5,2,1,6.66,10,66.6);
