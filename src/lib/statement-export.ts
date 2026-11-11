@@ -6,7 +6,11 @@ export const statementColumns = ['Fecha', 'Ciudad', 'Cliente', 'Aux.', 'Cantidad
 export function statementRows(s: Statement): (string | number)[][] {
   return s.lines.map(l => [l.date, s.header.city, s.header.client_name, l.auxiliaries, l.quantity, l.unit, l.unit_price, l.extra_hours, l.extra_price, l.total, l.observations]);
 }
-export async function statementPdf(s: Statement): Promise<Uint8Array> {
+export function statementFileName(s: Statement, format: 'pdf' | 'xlsx') {
+  const safe = (value: string) => value.replace(/[<>:"/\\|?*\x00-\x1f]/g, ' ').trim().replace(/\s+/g, '_').replace(/[._]+$/g, '') || 'Sin_nombre';
+  return `Acta_${s.number}_${safe(s.header.client_name)}_${safe(s.header.service_name)}${s.start_date}${s.end_date}.${format}`;
+}
+export async function statementPdf(s: Statement, signer?: { name: string; imageBytes?: Uint8Array; imageType?: 'png' | 'jpg' }): Promise<Uint8Array> {
   // The web UMD bundle includes its helpers; Metro's ESM/tslib interop breaks
   // when the regular package is loaded for PDF downloads.
   const { PDFDocument, StandardFonts, rgb } = Platform.OS === 'web'
@@ -21,6 +25,7 @@ export async function statementPdf(s: Statement): Promise<Uint8Array> {
   const ink = rgb(.09, .16, .34), muted = rgb(.34, .4, .51);
   const grid = rgb(.76, .81, .88), headerFill = rgb(.09, .17, .36);
   const alternateFill = rgb(.96, .97, .99);
+  const signatureReserve = signer ? 135 : 0;
   let page = pdf.addPage([pageWidth, pageHeight]), y = 0;
 
   const wrap = (text: string, width: number, size = 8, face = font): string[] => {
@@ -85,7 +90,7 @@ export async function statementPdf(s: Statement): Promise<Uint8Array> {
     const fullHeight = Math.max(18, lineCount * 8.5 + 6);
     const freshPageCapacity = pageHeight - margin * 2 - 8 - 32 - 16;
     if (fullHeight <= freshPageCapacity) {
-      const reserve = rowIndex === rows.length - 1 ? 91 : 16;
+      const reserve = rowIndex === rows.length - 1 ? 91 + signatureReserve : 16;
       if (y - fullHeight < margin + reserve) nextPage(true);
     }
     let offset = 0;
@@ -107,7 +112,7 @@ export async function statementPdf(s: Statement): Promise<Uint8Array> {
       offset += count;
     } while (offset < lineCount);
   });
-  if (y < margin + 91) nextPage(false);
+  if (y < margin + 91 + signatureReserve) nextPage(false);
   y -= 14;
   const totalsX = pageWidth - margin - 245;
   const totals = [
@@ -126,6 +131,21 @@ export async function statementPdf(s: Statement): Promise<Uint8Array> {
     page.drawText(value, { x: pageWidth - margin - 9 - face.widthOfTextAtSize(value, 9), y: y - 15, size: 9, font: face, color });
     y -= height;
   });
+  if (signer) {
+    y -= 18;
+    if (signer.imageBytes && signer.imageType) {
+      const image = signer.imageType === 'png' ? await pdf.embedPng(signer.imageBytes) : await pdf.embedJpg(signer.imageBytes);
+      const scale = Math.min(150 / image.width, 48 / image.height);
+      const width = image.width * scale, height = image.height * scale;
+      page.drawImage(image, { x: (pageWidth - width) / 2, y: y - height, width, height });
+    }
+    y -= 52;
+    page.drawLine({ start: { x: (pageWidth - 190) / 2, y }, end: { x: (pageWidth + 190) / 2, y }, thickness: .7, color: grid });
+    y -= 16;
+    centered('Firma Gerente Emisor', y, 9, bold); y -= 14;
+    centered(signer.name, y, 9, font); y -= 13;
+    centered(s.header.issuer_name, y, 9, font, muted);
+  }
   pdf.getPages().forEach((p, index, all) => {
     const text = 'Página ' + (index + 1) + ' de ' + all.length;
     p.drawText(text, { x: (pageWidth - font.widthOfTextAtSize(text, 8)) / 2, y: 17, size: 8, font, color: muted });
@@ -134,7 +154,19 @@ export async function statementPdf(s: Statement): Promise<Uint8Array> {
 }
 export async function exportStatement(s: Statement, format: 'pdf' | 'xlsx') {
   let bytes: Uint8Array;
-  if (format === 'pdf') bytes = await statementPdf(s);
+  if (format === 'pdf') {
+    const { loadStatementSettings, statementSignatureUrl } = await import('../services/statements');
+    const issuer = (await loadStatementSettings()).issuer;
+    if (!issuer?.manager_name) throw new Error('Configura el Gerente Emisor antes de descargar el PDF.');
+    let imageBytes: Uint8Array | undefined;
+    let imageType: 'png' | 'jpg' | undefined;
+    if (issuer.signature_path) {
+      const url = await statementSignatureUrl(issuer.signature_path);
+      imageBytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
+      imageType = issuer.signature_path.toLowerCase().endsWith('.png') ? 'png' : 'jpg';
+    }
+    bytes = await statementPdf(s, { name: issuer.manager_name, imageBytes, imageType });
+  }
   else {
     const ExcelJS = await import('exceljs'); const book = new ExcelJS.Workbook(); const sheet = book.addWorksheet('Planilla');
     for (const v of [s.header.issuer_name,'NIT: '+s.header.issuer_nit,'PLANILLA DE SERVICIOS - ACTA NRO '+s.number,s.header.client_name+' | '+s.header.service_name,s.start_date+' al '+s.end_date,s.status+' | Factura: '+(s.invoice_number || '')]) sheet.addRow([v]);
@@ -144,7 +176,7 @@ export async function exportStatement(s: Statement, format: 'pdf' | 'xlsx') {
     sheet.columns.forEach((c,i) => { c.width = i===10 ? 48 : 20; c.alignment = { wrapText:true, vertical:'top' }; });
     bytes = new Uint8Array(await book.xlsx.writeBuffer());
   }
-  const fileName = 'Acta-' + s.client_id + '-' + s.number + '.' + format;
+  const fileName = statementFileName(s, format);
   const mimeType = format==='pdf' ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
   if (Platform.OS === 'web') {
     const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: mimeType }));
