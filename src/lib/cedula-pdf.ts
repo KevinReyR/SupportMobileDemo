@@ -1,6 +1,5 @@
 import * as FileSystem from "expo-file-system/legacy";
 import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
-import { PDFDocument } from "pdf-lib";
 import { Platform } from "react-native";
 
 import type { ContractorPdfFile } from "../services/data";
@@ -19,6 +18,10 @@ export async function buildPdfFromPhotos(photoUris: string[], name: string): Pro
   if (photoUris.length < 1 || photoUris.length > 2 || photoUris.some((uri) => !uri)) {
     throw new Error("Selecciona una o dos fotos para generar el PDF.");
   }
+  // pdf-lib (and its tslib dependency) is not compatible with every Metro
+  // runtime when it is evaluated during application startup. Load it only
+  // when the user actually requests PDF generation.
+  const { PDFDocument } = await import("pdf-lib");
   const attempts = [
     { width: 1400, compress: 0.72 },
     { width: 1150, compress: 0.58 },
