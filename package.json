@@ -21,8 +21,10 @@
     "expo-linear-gradient": "~15.0.8",
     "expo-linking": "~8.0.12",
     "expo-router": "~6.0.24",
+    "expo-sharing": "~14.0.8",
     "expo-status-bar": "~3.0.9",
     "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "5.4.624",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "react-native": "0.81.5",
@@ -43,6 +45,8 @@
     "typescript": "~5.9.2"
   },
   "scripts": {
+    "postinstall": "node scripts/prepare-policy-reader.mjs",
+    "preexport:web": "node scripts/prepare-policy-reader.mjs",
     "start": "expo start",
     "start:tunnel": "expo start --tunnel --clear --port 8081",
     "start:lan": "expo start --lan --clear --port 8081",

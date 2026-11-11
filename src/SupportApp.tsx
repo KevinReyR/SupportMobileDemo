@@ -33,6 +33,7 @@ import Svg, { Line, Polyline, Rect, Text as SvgText } from "react-native-svg";
 import type { Session } from "@supabase/supabase-js";
 
 import PdfViewer from "./components/pdf-viewer";
+import ServiceStatements, { StatementAdminSettings } from "./components/service-statements";
 import DirectorWebDashboard from "./components/director-web-dashboard";
 import { COLOMBIA_DEPARTMENTS, COLOMBIA_MUNICIPALITIES_BY_DEPARTMENT } from "./data/colombia-locations";
 import { buildCedulaPdfFromPhotos, buildPdfFromPhotos } from "./lib/cedula-pdf";
@@ -178,6 +179,7 @@ type Screen =
   | "document-preview"
   | "history-detail"
   | "statistics"
+  | "statements"
   | "users";
 type IconName = React.ComponentProps<typeof Ionicons>["name"];
 
@@ -343,6 +345,7 @@ const tabsByRole: Record<Role, { label: string; icon: IconName; screen: Screen }
   Director: [
     { label: "Operación", icon: "briefcase-outline", screen: "operations" },
     { label: "Personal", icon: "people-outline", screen: "staff" },
+    { label: "Actas y pagos", icon: "receipt-outline", screen: "statements" },
     { label: "Informes", icon: "bar-chart-outline", screen: "statistics" },
   ],
   Administrador: [
@@ -1209,6 +1212,9 @@ export default function SupportApp() {
             {screen === "statistics" && (
               <Statistics context={context} data={data} />
             )}
+            {screen === "statements" && context.roleCode === "DIRECTOR" && (
+              <ServiceStatements Calendar={CalendarModal} />
+            )}
             {screen === "users" && (
               <Users currentUserId={context.id} data={data} onChanged={refresh} />
             )}
@@ -1227,6 +1233,24 @@ export default function SupportApp() {
 }
 
 function PublicContractorOnboarding({ token }: { token: string }) {
+  const [policyOpen, setPolicyOpen] = useState(false);
+  useEffect(() => {
+    if (Platform.OS !== "web") return;
+    const sync = () => setPolicyOpen(window.history.state?.supportPolicyViewer === true);
+    sync();
+    window.addEventListener("popstate", sync);
+    return () => window.removeEventListener("popstate", sync);
+  }, []);
+  const openPolicy = () => {
+    if (Platform.OS === "web" && !window.history.state?.supportPolicyViewer) {
+      window.history.pushState({ ...window.history.state, supportPolicyViewer: true }, "");
+    }
+    setPolicyOpen(true);
+  };
+  const closePolicy = () => {
+    if (Platform.OS === "web" && window.history.state?.supportPolicyViewer) window.history.back();
+    else setPolicyOpen(false);
+  };
   const [form, setForm] = useState<ContractorOnboardingForm | null>(null);
   const [contract, setContract] = useState<ContractorOnboardingContract | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1558,7 +1582,7 @@ function PublicContractorOnboarding({ token }: { token: string }) {
           </FormCard>
           <FormCard title="Tratamiento de datos personales">
             <Notice icon="document-text-outline" text="Lee la política antes de enviar. El check quedará guardado como evidencia de aceptación." />
-            <SecondaryButton label="Ver política PDF" icon="open-outline" onPress={() => Linking.openURL(form.policy.url)} />
+            <SecondaryButton label="Ver política PDF" icon="document-text-outline" onPress={openPolicy} />
             <Pressable style={styles.policyCheckRow} onPress={() => update("acceptsDataPolicy", !fields.acceptsDataPolicy)}>
               <View style={[styles.checkbox, fields.acceptsDataPolicy && styles.checkboxOn]}>
                 {fields.acceptsDataPolicy ? <Ionicons name="checkmark" size={14} color={C.white} /> : null}
@@ -1579,6 +1603,19 @@ function PublicContractorOnboarding({ token }: { token: string }) {
             </View>
           ) : null}
         </ScrollView>
+        {policyOpen && (
+          <Modal visible onRequestClose={closePolicy}>
+            <View style={{ flex: 1, padding: 12, gap: 8, backgroundColor: C.white }}>
+              <SecondaryButton label="Volver al formulario" icon="arrow-back-outline" onPress={closePolicy} />
+              {Platform.OS === "web" ? React.createElement("iframe", {
+                title: "Política de tratamiento de datos personales",
+                src: "/policy-reader.html",
+                "data-pdf": form.policy.url,
+                style: { flex: 1, width: "100%", border: 0 },
+              }) : <PdfViewer uri={form.policy.url} onError={(message) => Alert.alert("PDF", message)} />}
+            </View>
+          </Modal>
+        )}
         <CalendarModal
           visible={calendarOpen}
           selectedDate={fields.birthDate || null}
@@ -2142,6 +2179,7 @@ function Header({
     "document-preview": "Documento del contratista",
     "history-detail": "Detalle del turno",
     statistics: "Informes",
+    statements: "Actas y pagos",
     users: "Administración de usuarios",
   };
   const initials = `${context.name[0] ?? ""}${context.lastName[0] ?? ""}`.toUpperCase();
@@ -8314,6 +8352,7 @@ function Statistics({ context, data }: { context: UserContext; data: AppData }) 
 }
 
 type AdminModule =
+  | "statement-settings"
   | "dashboard"
   | "users"
   | "contractors"
@@ -8326,6 +8365,7 @@ type AdminModule =
   | "workwear";
 
 const adminModules: { id: AdminModule; title: string; icon: IconName; mobile?: boolean }[] = [
+  { id: "statement-settings", title: "Configuración de actas", icon: "receipt-outline" },
   { id: "dashboard", title: "Dashboard", icon: "grid-outline" },
   { id: "users", title: "Usuarios", icon: "people-outline", mobile: true },
   { id: "contractors", title: "Contratistas", icon: "id-card-outline", mobile: true },
@@ -8575,6 +8615,7 @@ function AdminWebPortal({
     if (error || adminError) return <Notice icon="cloud-offline-outline" tone="error" text={error || adminError} />;
     if (loading || adminLoading || !adminData) return <View style={styles.centerCard}><ActivityIndicator color={C.navy} /></View>;
     if (module === "dashboard") return <AdminDashboard data={data} adminData={adminData} />;
+    if (module === "statement-settings") return <StatementAdminSettings />;
     if (module === "users") return <AdminUsersModule currentUserId={context.id} data={data} onChanged={refreshAll} />;
     if (module === "contractors") return <AdminContractorsModule contractors={data.contractors} onChanged={refreshAll} />;
     if (module === "contracts") return <AdminContractsModule adminData={adminData} contractTypes={data.contractTypes} onChanged={refreshAll} />;

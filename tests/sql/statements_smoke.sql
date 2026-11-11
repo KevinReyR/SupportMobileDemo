@@ -1,0 +1,66 @@
+\set ON_ERROR_STOP on
+set test.role='ADMIN';
+select save_statement_settings('SUPPORT COLOMBIA','900-1',1,'Bucaramanga',1);
+select save_statement_settings('SUPPORT COLOMBIA','900-1',2,'Bogota',1);
+set test.role='DIRECTOR';
+do $$ declare p jsonb; a jsonb; b jsonb; c jsonb; d date:=(now() at time zone 'America/Bogota')::date; begin
+ p:=preview_statement(1,1,'2026-01-01','2026-01-03');
+ assert (p->>'subtotal')::numeric=370, 'sales reconciliation';
+ assert (p->>'vat')::numeric=70.30 and (p->>'total')::numeric=440.30, 'IVA';
+ assert jsonb_array_length(p->'lines')=3, 'separate rates and absences';
+ a:=save_statement(1,1,'2026-01-01','2026-01-03',p->>'preview_hash','one');
+ b:=save_statement(1,1,'2026-01-01','2026-01-03',p->>'preview_hash','one');
+ assert a->>'id'=b->>'id','retry idempotency';
+ p:=preview_statement(1,1,'2026-01-01','2026-01-03');
+ assert jsonb_array_length(p->'lines')=0 and jsonb_array_length(p->'excluded')=2,'reservations';
+ begin perform save_statement(1,1,'2026-01-01','2026-01-03',p->>'preview_hash','duplicate');raise exception 'TEST failed empty';exception when others then if sqlerrm='TEST failed empty' then raise;end if;end;
+ p:=preview_statement(2,2,'2026-01-01','2026-01-01');
+ b:=save_statement(2,2,'2026-01-01','2026-01-01',p->>'preview_hash','other');
+ assert a->>'number'='1' and b->>'number'='1','per-client sequence';
+ p:=preview_statement(1,1,'2026-01-01','2026-01-01',(a->>'id')::bigint);
+ a:=save_statement(1,1,'2026-01-01','2026-01-01',p->>'preview_hash','edit',(a->>'id')::bigint,(a->>'updated_at')::timestamptz);
+ assert (a->>'subtotal')::numeric=270,'range update';
+ p:=preview_statement(1,1,'2026-01-02','2026-01-02');
+ assert (p->>'subtotal')::numeric=100,'released operation';
+ c:=save_statement(1,1,'2026-01-02','2026-01-02',p->>'preview_hash','two');
+ c:=transition_statement((c->>'id')::bigint,(c->>'updated_at')::timestamptz,'ANULAR',null,null,'Error');
+ p:=preview_statement(1,1,'2026-01-02','2026-01-02');
+ assert (p->>'subtotal')::numeric=100,'cancel releases';
+ begin perform transition_statement((a->>'id')::bigint,(a->>'updated_at')::timestamptz,'PAGAR',d,'F1');raise exception 'TEST failed premature payment';exception when others then if sqlerrm='TEST failed premature payment' then raise;end if;end;
+ a:=transition_statement((a->>'id')::bigint,(a->>'updated_at')::timestamptz,'ENVIAR',d);
+ begin perform transition_statement((a->>'id')::bigint,(a->>'updated_at')::timestamptz,'PAGAR',d,'');raise exception 'TEST failed invoice';exception when others then if sqlerrm='TEST failed invoice' then raise;end if;end;
+ a:=transition_statement((a->>'id')::bigint,(a->>'updated_at')::timestamptz,'PAGAR',d,'F001');
+ assert a->>'status'='PAGADA' and (a->>'days_since_sent')::int=0,'paid';
+ begin perform transition_statement((a->>'id')::bigint,(a->>'updated_at')::timestamptz,'ANULAR',null,null,'Error');raise exception 'TEST failed immutable';exception when others then if sqlerrm='TEST failed immutable' then raise;end if;end;
+ assert (select sum(total_sale) from shift_sales)=470,'source unchanged';
+end $$;
+set test.role='ADMIN';
+do $$ begin
+ begin perform save_statement_settings('SUPPORT','900',1,'Cali',1);raise exception 'TEST failed rewind';exception when others then if sqlerrm='TEST failed rewind' then raise;end if;end;
+ begin perform get_statement(1);raise exception 'TEST failed admin access';exception when others then if sqlerrm='TEST failed admin access' then raise;end if;end;
+end $$;
+set test.role='CLIENT';
+set role authenticated;
+do $$ begin
+ begin perform get_statement(1);raise exception 'TEST failed client access';exception when others then if sqlerrm='TEST failed client access' then raise;end if;end;
+ begin perform 1 from service_statements;raise exception 'TEST failed table access';exception when insufficient_privilege then null;end;
+ begin perform statement_source(1,1,'2026-01-01','2026-01-03');raise exception 'TEST failed helper';exception when insufficient_privilege then null;end;
+end $$;
+reset role;
+set test.role='COORDINATOR';
+do $$ begin begin perform list_statements();raise exception 'TEST failed coordinator';exception when others then if sqlerrm='TEST failed coordinator' then raise;end if;end;end $$;
+set test.role='ADMIN';
+select save_statement_settings('NUEVA RAZON SOCIAL','999-2',1,'Otra ciudad',10);
+set test.role='DIRECTOR';
+set role authenticated;
+do $$ declare a jsonb; p jsonb; begin
+ a:=get_statement(1);
+ assert a->'header'->>'issuer_name'='SUPPORT COLOMBIA','issuer snapshot';
+ assert a->'header'->>'city'='Bucaramanga','city snapshot';
+ p:=preview_statement(1,1,'2026-01-02','2026-01-02');
+ assert p->'header'->>'city'='Otra ciudad','new city configuration';
+ perform set_config('test.active','false',true);
+ begin perform list_statements();raise exception 'TEST failed inactive';exception when others then if sqlerrm='TEST failed inactive' then raise;end if;end;
+end $$;
+reset role;
+select 'PASS: snapshots, totals, reservations, idempotency, transitions, isolation' result;
