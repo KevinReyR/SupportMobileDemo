@@ -62,6 +62,7 @@ export function StatementAdminSettings() {
 export default function ServiceStatements({Calendar}: {Calendar:Calendar}) {
   const [settings,setSettings]=useState<StatementSettings|null>(null),[error,setError]=useState(''),[busy,setBusy]=useState(false);
   const [mode,setMode]=useState<'list'|'edit'|'detail'>('list');
+  const [createOpen,setCreateOpen]=useState(false),[search,setSearch]=useState('');
   const [filter,setFilter]=useState<StatementRange>({clientId:0,areaId:0,startDate:'',endDate:''}),[status,setStatus]=useState('');
   const [range,setRange]=useState<StatementRange>({clientId:0,areaId:0,startDate:today().slice(0,8)+'01',endDate:today()});
   const [items,setItems]=useState<Statement[]>([]),[more,setMore]=useState(false),[selected,setSelected]=useState<Statement|null>(null),[preview,setPreview]=useState<StatementPreview|null>(null);
@@ -72,12 +73,25 @@ export default function ServiceStatements({Calendar}: {Calendar:Calendar}) {
   async function loadList(append=false){
     const version=++loadVersion.current;
     try{const rows=await listStatements(filter,status,append?items.at(-1)?.id??null:null);if(version!==loadVersion.current)return;
+      if(search.trim()&&!append){
+        const all=[...rows.slice(0,30)];let page=rows;
+        while(page.length>30){
+          page=await listStatements(filter,status,page[29].id);
+          if(version!==loadVersion.current)return;
+          all.push(...page.slice(0,30));
+        }
+        setItems(all);setMore(false);return;
+      }
       setMore(rows.length>30);setItems(old=>append?[...old,...rows.slice(0,30)]:rows.slice(0,30));
     }catch(e){if(version===loadVersion.current)setError(message(e));}
   }
   useEffect(()=>{void loadStatementSettings().then(setSettings).catch(e=>setError(message(e)));},[]);
-  useEffect(()=>{if(mode==='list'){setError('');void loadList();}return()=>{loadVersion.current++;};},[filter,status,mode]);
+  useEffect(()=>{const timer=setTimeout(()=>{if(mode==='list'){setError('');void loadList();}},search.trim()?300:0);return()=>{clearTimeout(timer);loadVersion.current++;};},[filter,status,mode,search]);
   const newKey=()=>Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
+  const visibleItems=items.filter(a=>{
+    const query=search.trim().toLocaleLowerCase();
+    return !query||a.header.client_name.toLocaleLowerCase().includes(query)||String(a.number).includes(query);
+  });
   const open=(id:number)=>run(async()=>{const v=await getStatement(id);setSelected(v);setInvoice(v.invoice_number||'');setDate(today());setReason('');setMode('detail');});
   const alter=(action:string)=>setConfirm({text:action==='ANULAR'?'Anular conserva historial y libera operaciones. No se reutilizara el numero.':`Confirmar ${action.toLowerCase()} acta #${selected?.number} por ${money(selected?.total||0)}${action==='PAGAR'?' con factura '+invoice:''}, fecha ${dateLabel(date)}.`,run:async()=>{
     if(!selected)return;const v=await transitionStatement(selected,action,date,invoice,reason);setSelected(v);setInvoice(v.invoice_number||'');
@@ -93,19 +107,26 @@ export default function ServiceStatements({Calendar}: {Calendar:Calendar}) {
     {!settings && <Button label="Reintentar configuracion" onPress={()=>void run(async()=>setSettings(await loadStatementSettings()))}/>}
     {mode==='list' && <>
       {filters(filter,setFilter)}<Select label="Estado" value={status} options={['','GENERADA','ENVIADA','PAGADA','ANULADA'].map(id=>({id,name:id||'Todos'}))} onChange={setStatus}/>
+      <TextInput accessibilityLabel="Buscar por cliente o número de acta" placeholder="Buscar cliente o número de acta" value={search} onChangeText={setSearch} style={s.input}/>
       <View style={s.wrap}><Button label="Limpiar filtros" onPress={()=>{setFilter({clientId:0,areaId:0,startDate:'',endDate:''});setStatus('');}}/><Button label="Recargar" disabled={busy} onPress={()=>void run(()=>loadList())}/>
-      <Button label="Generar acta" disabled={!settings||busy} onPress={()=>{setSelected(null);setPreview(null);setRange({clientId:filter.clientId,areaId:filter.areaId,startDate:filter.startDate||today().slice(0,8)+'01',endDate:filter.endDate||today()});key.current=newKey();setError('');setMode('edit');}}/></View>
-      {!items.length && <Text>No hay actas para los filtros seleccionados.</Text>}
-      {items.map(a=><Pressable key={a.id} style={s.card} disabled={busy} onPress={()=>void open(a.id)}><Text style={s.title}>Acta #{a.number} · {a.header.client_name}</Text><Text>{a.header.service_name} · {a.status}</Text><Text>{dateLabel(a.start_date)} - {dateLabel(a.end_date)}</Text><Text>Subtotal {money(a.subtotal)} · IVA {money(a.vat)}</Text><Text>Total {money(a.total)} · Factura {a.invoice_number||'Sin registrar'}</Text>{a.days_since_sent!==null&&<Text>{a.days_since_sent} dias {a.paid_date?'entre envio y pago':'desde envio'}</Text>}</Pressable>)}
+      <Button label="Generar acta" disabled={!settings||busy} onPress={()=>{setSelected(null);setPreview(null);setRange({clientId:0,areaId:0,startDate:today().slice(0,8)+'01',endDate:today()});key.current=newKey();setError('');setCreateOpen(true);}}/></View>
+      {!visibleItems.length && <Text>{search.trim()?'No hay actas coincidentes entre las cargadas.':'No hay actas para los filtros seleccionados.'}</Text>}
+      {visibleItems.map(a=><Pressable key={a.id} accessibilityRole="button" style={s.statementItem} disabled={busy} onPress={()=>void open(a.id)}><View style={s.statementTop}><Text numberOfLines={1} style={s.statementName}>#{a.number} · {a.header.client_name}</Text><Text style={s.statementStatus}>{a.status}</Text></View><Text numberOfLines={1} style={s.statementMeta}>{a.header.service_name} · {dateLabel(a.start_date)}–{dateLabel(a.end_date)}</Text><View style={s.statementTop}><Text style={s.statementTotal}>{money(a.total)}</Text><Text numberOfLines={1} style={s.statementMeta}>Factura: {a.invoice_number||'Sin registrar'}</Text></View></Pressable>)}
       {more&&<Button label="Cargar mas actas" disabled={busy} onPress={()=>void run(()=>loadList(true))}/>}
     </>}
+    <Modal visible={createOpen} transparent onRequestClose={()=>setCreateOpen(false)}><View style={s.overlay}><View style={s.dialog}><Text style={s.title}>Generar acta</Text>{!!error&&<Text accessibilityRole="alert" style={s.error}>{error}</Text>}
+      <ScrollView style={s.createScroll} keyboardShouldPersistTaps="handled">{filters(range,r=>{setRange(r);setPreview(null);key.current=newKey();},true)}</ScrollView>
+      <View style={s.wrap}><Button label="Cancelar" disabled={busy} onPress={()=>setCreateOpen(false)}/><Button label={busy?'Cargando...':'Vista previa'} disabled={busy} onPress={()=>void run(async()=>{
+        if(!range.clientId||!range.areaId||!range.startDate||!range.endDate||range.startDate>range.endDate)throw Error('Selecciona cliente, servicio y rango valido');
+        const result=await previewStatement(range,null);setPreview(result);setCreateOpen(false);setMode('edit');
+      })}/></View></View></View></Modal>
     {mode==='edit'&&<>
       <Button label="Volver" disabled={busy} onPress={()=>{setPreview(null);setMode(selected?'detail':'list');}}/>
-      {filters(range,r=>{setRange(r);setPreview(null);key.current=newKey();},true)}
-      <Button label="Vista previa" disabled={busy} onPress={()=>void run(async()=>{
+      {selected&&filters(range,r=>{setRange(r);setPreview(null);key.current=newKey();},true)}
+      {selected&&<Button label="Vista previa" disabled={busy} onPress={()=>void run(async()=>{
         if(!range.clientId||!range.areaId||!range.startDate||!range.endDate||range.startDate>range.endDate)throw Error('Selecciona cliente, servicio y rango valido');
         setPreview(await previewStatement(range,selected?.id??null));
-      })}/>
+      })}/>}
       {preview&&<><Table data={preview}/>{preview.excluded.length>0&&<View style={s.card}><Text style={s.label}>Operaciones excluidas: ya reservadas</Text>{preview.excluded.map(x=><Text key={x.operation_id}>Operacion #{x.operation_id} · {dateLabel(x.date)} · Acta #{x.number}</Text>)}</View>}
         <Button label={selected?'Guardar nuevo rango':'Confirmar generacion'} disabled={busy||!preview.lines.length} onPress={()=>setConfirm({text:`${selected?'Actualizar':'Generar'} acta para ${preview.header.client_name}, ${dateLabel(range.startDate)} al ${dateLabel(range.endDate)}. Total ${money(preview.total)}. Se reservaran las operaciones indicadas.`,run:async()=>{
           const v=await saveStatement(range,preview.preview_hash,key.current,selected);setSelected(v);setInvoice(v.invoice_number||'');setDate(today());setReason('');setPreview(null);setMode('detail');
@@ -130,4 +151,4 @@ export default function ServiceStatements({Calendar}: {Calendar:Calendar}) {
     <Modal visible={!!confirm} transparent onRequestClose={()=>{if(!busy)setConfirm(null);}}><View style={s.overlay}><View style={s.dialog}><Text style={s.title}>Confirmar</Text><Text>{confirm?.text}</Text><Button label="Cancelar" disabled={busy} onPress={()=>setConfirm(null)}/><Button label="Confirmar" disabled={busy} onPress={()=>{const action=confirm;setConfirm(null);if(action)void run(action.run);}}/></View></View></Modal>
   </ScrollView>;
 }
-const s=StyleSheet.create({container:{padding:18,gap:14,paddingBottom:40},card:{padding:16,borderRadius:16,backgroundColor:'#fff',borderWidth:1,borderColor:'#e4e8f0',gap:10},title:{fontSize:19,fontWeight:'800',color:'#15285a'},label:{fontSize:13,fontWeight:'700',color:'#17213a'},field:{minWidth:180,flexGrow:1,gap:6},input:{borderWidth:1,borderColor:'#ccd3df',borderRadius:10,padding:12,minHeight:46,color:'#17213a'},button:{padding:12,borderRadius:10,backgroundColor:'#15285a',minHeight:44,justifyContent:'center'},buttonText:{color:'#fff',fontWeight:'700',textAlign:'center'},wrap:{flexDirection:'row',flexWrap:'wrap',gap:10},error:{color:'#ab2020',backgroundColor:'#fff0f0',padding:12},row:{flexDirection:'row',borderBottomWidth:1,borderColor:'#e4e8f0'},cell:{padding:8,fontSize:12},overlay:{flex:1,justifyContent:'center',backgroundColor:'#0007',padding:20},dialog:{width:'100%',maxWidth:600,alignSelf:'center',backgroundColor:'#fff',borderRadius:18,padding:20,gap:14}});
+const s=StyleSheet.create({container:{padding:18,gap:14,paddingBottom:40},card:{padding:16,borderRadius:16,backgroundColor:'#fff',borderWidth:1,borderColor:'#e4e8f0',gap:10},statementItem:{paddingHorizontal:14,paddingVertical:10,borderRadius:12,backgroundColor:'#fff',borderWidth:1,borderColor:'#e4e8f0',gap:3},statementTop:{flexDirection:'row',alignItems:'center',justifyContent:'space-between',gap:8},statementName:{fontSize:15,fontWeight:'800',color:'#15285a',flex:1},statementStatus:{fontSize:10,fontWeight:'700',color:'#15285a'},statementMeta:{fontSize:12,color:'#677187',flexShrink:1},statementTotal:{fontSize:14,fontWeight:'800',color:'#17213a'},createScroll:{maxHeight:420},title:{fontSize:19,fontWeight:'800',color:'#15285a'},label:{fontSize:13,fontWeight:'700',color:'#17213a'},field:{minWidth:180,flexGrow:1,gap:6},input:{borderWidth:1,borderColor:'#ccd3df',borderRadius:10,padding:12,minHeight:46,color:'#17213a'},button:{padding:12,borderRadius:10,backgroundColor:'#15285a',minHeight:44,justifyContent:'center'},buttonText:{color:'#fff',fontWeight:'700',textAlign:'center'},wrap:{flexDirection:'row',flexWrap:'wrap',gap:10},error:{color:'#ab2020',backgroundColor:'#fff0f0',padding:12},row:{flexDirection:'row',borderBottomWidth:1,borderColor:'#e4e8f0'},cell:{padding:8,fontSize:12},overlay:{flex:1,justifyContent:'center',backgroundColor:'#0007',padding:20},dialog:{width:'100%',maxWidth:600,alignSelf:'center',backgroundColor:'#fff',borderRadius:18,padding:20,gap:14}});
