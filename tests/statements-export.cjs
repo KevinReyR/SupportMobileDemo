@@ -17,7 +17,10 @@ const statement = {
   subtotal:29700000,vat:5643000,total:35343000,
 };
 (async()=>{
-  const bytes=await mod.exports.statementPdf(statement);
+  assert.equal(mod.exports.statementFileName(statement,'pdf'),'Acta_1_EMPRESA_CON_NOMBRE_EXTENSO_PARA_VERIFICAR_AJUSTE_BODEGA2026-01-012026-01-31.pdf');
+  assert.equal(mod.exports.statementFileName({...statement,header:{...statement.header,client_name:'Cliente / Norte',service_name:'Turno: Noche'}},'xlsx'),'Acta_1_Cliente_Norte_Turno_Noche2026-01-012026-01-31.xlsx');
+  const signature=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg==','base64');
+  const bytes=await mod.exports.statementPdf(statement,{name:'Gerente de Prueba',imageBytes:signature,imageType:'png'});
   const pdf=await PDFDocument.load(bytes);assert(pdf.getPageCount()>1);
   const size=pdf.getPage(0).getSize();assert(Math.abs(size.width-595.28)<.01);assert(Math.abs(size.height-841.89)<.01);
   assert.equal(mod.exports.statementRows(statement).length,75);

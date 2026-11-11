@@ -17,7 +17,7 @@ export interface Statement extends Omit<StatementPreview, 'preview_hash' | 'excl
   audit: { action: string; at: string; actor: string; before: unknown; after: unknown }[];
 }
 export interface StatementSettings {
-  issuer: { legal_name: string; nit: string } | null;
+  issuer: { legal_name: string; nit: string; manager_name: string | null; signature_path: string | null } | null;
   clients: { id: number; name: string; city: string | null; next_number: number }[];
   areas: { id: number; name: string; client_id: number }[];
 }
@@ -28,8 +28,26 @@ async function rpc<T>(name: string, args = {}): Promise<T> {
   return data as T;
 }
 export const loadStatementSettings = () => rpc<StatementSettings>('statement_settings');
-export const saveStatementSettings = (legalName: string, nit: string, clientId: number | null, city: string, nextNumber: number) =>
-  rpc<void>('save_statement_settings', { p_legal_name: legalName, p_nit: nit, p_client_id: clientId, p_city: city, p_next_number: nextNumber });
+export const saveStatementSettings = (legalName: string, nit: string, managerName: string, signaturePath: string | null, clientId: number | null, city: string, nextNumber: number) =>
+  rpc<void>('save_statement_settings_v2', { p_legal_name: legalName, p_nit: nit, p_manager_name: managerName, p_signature_path: signaturePath,
+    p_client_id: clientId, p_city: city, p_next_number: nextNumber });
+export async function uploadStatementSignature(uri: string): Promise<string> {
+  const content = await (await fetch(uri)).arrayBuffer();
+  const bytes = new Uint8Array(content);
+  if (!bytes.length || bytes.length > 524288) throw new Error('La firma debe pesar máximo 512 KB.');
+  const png = bytes.length >= 8 && [137,80,78,71,13,10,26,10].every((value,index)=>bytes[index]===value);
+  const jpg = bytes.length >= 3 && bytes[0]===255 && bytes[1]===216 && bytes[2]===255;
+  if (!png && !jpg) throw new Error('Adjunta una firma en PNG o JPG.');
+  const path = `manager/${Date.now()}-${Math.random().toString(36).slice(2)}.${png?'png':'jpg'}`;
+  const { error } = await supabase.storage.from('statement-signatures').upload(path, content, { contentType: png?'image/png':'image/jpeg', upsert: false });
+  if (error) throw new Error(error.message);
+  return path;
+}
+export async function statementSignatureUrl(path: string): Promise<string> {
+  const { data, error } = await supabase.storage.from('statement-signatures').createSignedUrl(path, 300);
+  if (error || !data?.signedUrl) throw new Error(error?.message || 'No fue posible abrir la firma del gerente.');
+  return data.signedUrl;
+}
 const rangeArgs = (r: StatementRange) => ({ p_client_id: r.clientId, p_area_id: r.areaId, p_start_date: r.startDate, p_end_date: r.endDate });
 export const previewStatement = (r: StatementRange, id: number | null) => rpc<StatementPreview>('preview_statement', { ...rangeArgs(r), p_statement_id: id });
 export const saveStatement = (r: StatementRange, hash: string, key: string, previous: Statement | null) => rpc<Statement>('save_statement', {
