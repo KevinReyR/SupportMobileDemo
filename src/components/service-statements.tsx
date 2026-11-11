@@ -22,9 +22,10 @@ function Select({label,value,options,onChange,disabled=false,compact=false}: {la
       <ScrollView style={{maxHeight:360}}>{options.filter(x=>x.name.toLocaleLowerCase().includes(search.toLocaleLowerCase())).map(x=><Button key={x.id} label={x.name} onPress={()=>{onChange(x.id);setOpen(false);}} />)}</ScrollView>
       <Button label="Cerrar" onPress={()=>setOpen(false)}/></View></View></Modal></View>;
 }
-function DateField({label,value,onChange,Calendar,disabled=false,compact=false}: {label:string;value:string;onChange:(v:string)=>void;Calendar:Calendar;disabled?:boolean;compact?:boolean}) {
+function DateField({label,value,onChange,Calendar,disabled=false,compact=false,emptyLabel='Todas'}: {label:string;value:string;onChange:(v:string)=>void;Calendar:Calendar;disabled?:boolean;compact?:boolean;emptyLabel?:string}) {
   const [open,setOpen]=useState(false);
-  return <View style={[s.field,compact&&s.compactField]}><Text style={s.label}>{label}</Text><Pressable accessibilityRole="button" accessibilityLabel={`${label}: ${dateLabel(value)}`} disabled={disabled} onPress={()=>setOpen(true)} style={[compact?s.filterControl:s.button,disabled&&{opacity:.45}]}><Text style={compact?s.filterControlText:s.buttonText}>{dateLabel(value)}{compact?'  ▾':''}</Text></Pressable><Calendar visible={open} selectedDate={value || null} title={label} onClose={()=>setOpen(false)} onSelect={v=>{onChange(v);setOpen(false);}}/></View>;
+  const displayValue=value?dateLabel(value):emptyLabel;
+  return <View style={[s.field,compact&&s.compactField]}><Text style={s.label}>{label}</Text><Pressable accessibilityRole="button" accessibilityLabel={`${label}: ${displayValue}`} disabled={disabled} onPress={()=>setOpen(true)} style={[compact?s.filterControl:s.button,disabled&&{opacity:.45}]}><Text style={compact?s.filterControlText:s.buttonText}>{displayValue}{compact?'  ▾':''}</Text></Pressable><Calendar visible={open} selectedDate={value || null} title={label} onClose={()=>setOpen(false)} onSelect={v=>{onChange(v);setOpen(false);}}/></View>;
 }
 function Table({data}: {data: StatementPreview | Statement}) {
   const [expanded,setExpanded]=useState(false);
@@ -95,7 +96,7 @@ export default function ServiceStatements({Calendar}: {Calendar:Calendar}) {
     const query=search.trim().toLocaleLowerCase();
     return !query||a.header.client_name.toLocaleLowerCase().includes(query)||String(a.number).includes(query);
   });
-  const open=(id:number)=>run(async()=>{const v=await getStatement(id);setSelected(v);setInvoice(v.invoice_number||'');setDate(today());setReason('');setMode('detail');});
+  const open=(id:number)=>run(async()=>{const v=await getStatement(id);setSelected(v);setInvoice(v.invoice_number||'');setDate(v.status==='ENVIADA'?'':today());setReason('');setMode('detail');});
   const alter=(action:'ENVIAR'|'PAGAR'|'ANULAR')=>{
     if(action==='ANULAR'&&!reason.trim()){setManageError('Indica el motivo de la anulación.');return;}
     if(action==='PAGAR'&&!invoice.trim()){setManageError('Indica el número de factura.');return;}
@@ -157,7 +158,7 @@ export default function ServiceStatements({Calendar}: {Calendar:Calendar}) {
       <View style={s.detailActions}>
         {(['pdf','xlsx'] as const).map(f=><Pressable key={f} accessibilityRole="button" disabled={busy} onPress={()=>void run(async()=>{const current=await getStatement(selected.id);setSelected(current);await exportStatement(current,f);})} style={[s.detailAction,busy&&{opacity:.45}]}><Text style={s.detailActionText}>↓  {f.toUpperCase()}</Text></Pressable>)}
         {selected.status==='GENERADA'&&<Pressable accessibilityRole="button" disabled={busy} onPress={()=>{setRange({clientId:selected.client_id,areaId:selected.area_id,startDate:selected.start_date,endDate:selected.end_date});setPreview(null);key.current=newKey();setMode('edit');}} style={s.detailAction}><Text style={s.detailActionText}>Modificar rango</Text></Pressable>}
-        {['GENERADA','ENVIADA'].includes(selected.status)&&<Pressable accessibilityRole="button" disabled={busy} onPress={()=>{setManageAction('pay');setManageError('');setManageOpen(true);}} style={[s.detailAction,s.manageAction]}><Text style={s.manageActionText}>{selected.status==='GENERADA'?'Registrar envío':'Gestionar acta'}  →</Text></Pressable>}
+        {['GENERADA','ENVIADA'].includes(selected.status)&&<Pressable accessibilityRole="button" disabled={busy} onPress={()=>{setManageAction('pay');setManageError('');setDate(selected.status==='ENVIADA'?'':today());setManageOpen(true);}} style={[s.detailAction,s.manageAction]}><Text style={s.manageActionText}>{selected.status==='GENERADA'?'Registrar envío':'Gestionar acta'}  →</Text></Pressable>}
       </View>
       <Table data={selected}/>
       <View style={s.card}><Text style={s.title}>Historial</Text>{selected.audit?.map((a,i)=><Text key={i}>{new Date(a.at).toLocaleString('es-CO',{timeZone:'America/Bogota'})} · {a.actor} · {a.action}</Text>)}</View>
@@ -166,7 +167,7 @@ export default function ServiceStatements({Calendar}: {Calendar:Calendar}) {
       {!!manageError&&<Text accessibilityRole="alert" style={s.error}>{manageError}</Text>}
       {selected?.status==='GENERADA'?<View style={s.manageSections}><Text style={s.statementMeta}>Selecciona la fecha en que se envió el acta.</Text><DateField label="Fecha de envío" value={date} onChange={setDate} Calendar={Calendar}/><Button label="Registrar envío" disabled={busy} onPress={()=>alter('ENVIAR')}/></View>:selected?.status==='ENVIADA'?<View style={s.manageSections}>
         <View style={s.manageChoices}><Pressable accessibilityRole="button" accessibilityState={{selected:manageAction==='pay'}} onPress={()=>{setManageAction('pay');setManageError('');}} style={[s.manageChoice,manageAction==='pay'&&s.manageChoiceActive]}><Text style={manageAction==='pay'?s.manageChoiceTextActive:s.detailActionText}>Registrar pago</Text></Pressable><Pressable accessibilityRole="button" accessibilityState={{selected:manageAction==='cancel'}} onPress={()=>{setManageAction('cancel');setManageError('');}} style={[s.manageChoice,manageAction==='cancel'&&s.manageChoiceActive]}><Text style={manageAction==='cancel'?s.manageChoiceTextActive:s.detailActionText}>Anular acta</Text></Pressable></View>
-        {manageAction==='pay'?<View style={s.manageSections}><DateField label="Fecha de pago" value={date} onChange={setDate} Calendar={Calendar}/><Field label="Número de factura" value={invoice} onChangeText={setInvoice}/><Button label="Registrar pago" disabled={busy} onPress={()=>alter('PAGAR')}/></View>:<View style={s.manageSections}><Field label="Motivo de anulación" value={reason} onChangeText={setReason}/><Button label="Anular acta" disabled={busy} onPress={()=>alter('ANULAR')}/></View>}
+        {manageAction==='pay'?<View style={s.manageSections}><DateField label="Fecha de pago" value={date} emptyLabel="Seleccione fecha de pago" onChange={setDate} Calendar={Calendar}/><Field label="Número de factura" value={invoice} onChangeText={setInvoice}/><Button label="Registrar pago" disabled={busy} onPress={()=>alter('PAGAR')}/></View>:<View style={s.manageSections}><Field label="Motivo de anulación" value={reason} onChangeText={setReason}/><Button label="Anular acta" disabled={busy} onPress={()=>alter('ANULAR')}/></View>}
       </View>:null}</View></View></Modal>
     <Modal visible={!!confirm} transparent onRequestClose={()=>{if(!busy)setConfirm(null);}}><View style={s.overlay}><View style={s.dialog}><Text style={s.title}>Confirmar</Text><Text>{confirm?.text}</Text><Button label="Cancelar" disabled={busy} onPress={()=>setConfirm(null)}/><Button label="Confirmar" disabled={busy} onPress={()=>{const action=confirm;setConfirm(null);if(action)void run(action.run);}}/></View></View></Modal>
   </ScrollView>;
