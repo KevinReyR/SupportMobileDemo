@@ -1,4 +1,3 @@
-import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import { Platform } from 'react-native';
 import type { Statement } from '../services/statements';
 
@@ -8,6 +7,9 @@ export function statementRows(s: Statement): (string | number)[][] {
   return s.lines.map(l => [l.date, s.header.city, s.header.client_name, l.auxiliaries, l.quantity, l.unit, l.unit_price, l.extra_hours, l.extra_price, l.total, l.observations]);
 }
 export async function statementPdf(s: Statement): Promise<Uint8Array> {
+  // Keep pdf-lib out of the startup bundle evaluation. In some Metro web
+  // builds its tslib interop fails before React can render the first screen.
+  const { PDFDocument, StandardFonts, rgb } = await import('pdf-lib');
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
