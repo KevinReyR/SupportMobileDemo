@@ -173,7 +173,11 @@ export function DirectorStatementCoverage({ startDate, endDate, clientId, areaId
   useEffect(() => {
     let alive = true;
     setResult(null); setError('');
-    if (startDate<=endDate) loadStatementCoverage(startDate,endDate,clientId,areaId,operationType)
+    if (startDate>endDate) {
+      setError('La fecha inicial no puede ser posterior a la fecha final.');
+      return () => { alive=false; };
+    }
+    loadStatementCoverage(startDate,endDate,clientId,areaId,operationType)
       .then((value) => { if (alive) setResult(value); })
       .catch((cause) => { if (alive) setError(cause instanceof Error ? cause.message : 'No se pudo cargar la cobertura.'); });
     return () => { alive=false; };
@@ -203,7 +207,7 @@ export function DirectorStatementCoverage({ startDate, endDate, clientId, areaId
         <Text style={[styles.rowValue,item.missing_sales && {color:red}]}>{item.missing_sales ? 'Sin venta' : 'Sin acta'}</Text>
       </View>)}
       {result.has_more && !compact && <Pressable onPress={() => void more()} disabled={busy} style={styles.chip}><Text style={styles.chipText}>Cargar más operaciones</Text></Pressable>}
-    </> : <ActivityIndicator color={navy} />}
+    </> : error ? null : <ActivityIndicator color={navy} />}
     {error ? <Text style={styles.error}>{error}</Text> : null}
   </View>;
 }
