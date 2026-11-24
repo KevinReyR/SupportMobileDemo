@@ -1,6 +1,6 @@
 import { supabase } from '../lib/supabase';
 
-export type StatementStatus = 'GENERADA' | 'ENVIADA' | 'PAGADA' | 'ANULADA';
+export type StatementStatus = 'GENERADA' | 'ENVIADA' | 'EN_MORA' | 'PAGADA' | 'ANULADA';
 export interface StatementHeader { issuer_name: string; issuer_nit: string; client_name: string; city: string; service_name: string }
 export interface StatementLine {
   operation_id: number; date: string; kind: 'TURNO' | 'DESCARGUE'; unit: string; auxiliaries: number;
@@ -14,6 +14,7 @@ export interface Statement extends Omit<StatementPreview, 'preview_hash' | 'excl
   id: number; client_id: number; area_id: number; number: number; start_date: string; end_date: string;
   status: StatementStatus; sent_date: string | null; paid_date: string | null; invoice_number: string | null;
   cancellation_reason: string | null; updated_at: string; days_since_sent: number | null;
+  credit_days: number; due_date: string | null; days_overdue: number | null;
   audit: { action: string; at: string; actor: string; before: unknown; after: unknown }[];
 }
 export interface StatementSettings {
@@ -50,14 +51,20 @@ export async function statementSignatureUrl(path: string): Promise<string> {
 }
 const rangeArgs = (r: StatementRange) => ({ p_client_id: r.clientId, p_area_id: r.areaId, p_start_date: r.startDate, p_end_date: r.endDate });
 export const previewStatement = (r: StatementRange, id: number | null) => rpc<StatementPreview>('preview_statement', { ...rangeArgs(r), p_statement_id: id });
-export const saveStatement = (r: StatementRange, hash: string, key: string, previous: Statement | null) => rpc<Statement>('save_statement', {
-  ...rangeArgs(r), p_preview_hash: hash, p_request_key: key, p_id: previous?.id ?? null, p_version: previous?.updated_at ?? null,
-});
-export const getStatement = (id: number) => rpc<Statement>('get_statement', { p_id: id });
-export const transitionStatement = (s: Statement, action: string, date: string, invoice: string, reason: string) => rpc<Statement>('transition_statement', {
-  p_id: s.id, p_version: s.updated_at, p_action: action, p_date: date || null, p_invoice: invoice || null, p_reason: reason || null,
-});
-export const listStatements = (r: StatementRange, status: string, beforeId: number | null) => rpc<Statement[]>('list_statements', {
+export async function saveStatement(r: StatementRange, hash: string, key: string, previous: Statement | null): Promise<Statement> {
+  const saved = await rpc<{ id: number }>('save_statement', {
+    ...rangeArgs(r), p_preview_hash: hash, p_request_key: key, p_id: previous?.id ?? null, p_version: previous?.updated_at ?? null,
+  });
+  return getStatement(saved.id);
+}
+export const getStatement = (id: number) => rpc<Statement>('get_statement_v2', { p_id: id });
+export async function transitionStatement(s: Statement, action: string, date: string, invoice: string, reason: string): Promise<Statement> {
+  await rpc<{ id: number }>('transition_statement', {
+    p_id: s.id, p_version: s.updated_at, p_action: action, p_date: date || null, p_invoice: invoice || null, p_reason: reason || null,
+  });
+  return getStatement(s.id);
+}
+export const listStatements = (r: StatementRange, status: string, beforeId: number | null) => rpc<Statement[]>('list_statements_v2', {
   p_client_id: r.clientId || null, p_area_id: r.areaId || null, p_start_date: r.startDate || null, p_end_date: r.endDate || null,
   p_status: status || null, p_before_id: beforeId,
 });
