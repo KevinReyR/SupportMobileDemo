@@ -1327,7 +1327,7 @@ export default function DirectorWebDashboard() {
                     : page === "receivables" ? "Cartera" : "Nómina"}
             </Text>
             <Text style={styles.periodText}>
-              {page === "receivables" ? "Saldo actual · filtros de cliente y área" : "Período actual:"}{" "}
+              {page === "receivables" ? "Saldo actual · fechas solo para cobertura de actas" : "Período actual:"}{" "}
               <Text style={styles.linkText}>
                 {page === "receivables" ? "" : `${dateLabel(startDate)} – ${dateLabel(endDate)}`}
               </Text>
@@ -1376,20 +1376,20 @@ export default function DirectorWebDashboard() {
           </View>
         </View>
         <View style={styles.filters}>
-          {page !== "receivables" && <FilterBox icon="calendar-outline" label="Desde">
+          <FilterBox icon="calendar-outline" label="Desde">
             <DateControl
               value={startDate}
               onChange={setStartDate}
               label="Fecha inicial"
             />
-          </FilterBox>}
-          {page !== "receivables" && <FilterBox icon="calendar-outline" label="Hasta">
+          </FilterBox>
+          <FilterBox icon="calendar-outline" label="Hasta">
             <DateControl
               value={endDate}
               onChange={setEndDate}
               label="Fecha final"
             />
-          </FilterBox>}
+          </FilterBox>
           <FilterBox icon="people-outline" label="Cliente">
             <NativeWebControl
               ariaLabel="Cliente"
@@ -1462,7 +1462,11 @@ export default function DirectorWebDashboard() {
             </Pressable>
           </View>
         ) : page === "receivables" ? (
-          <DirectorReceivablesPanel clientId={Number(clientId) || null} areaId={Number(areaId) || null} />
+          <>
+            <DirectorReceivablesPanel clientId={Number(clientId) || null} areaId={Number(areaId) || null} />
+            <DirectorStatementCoverage startDate={startDate} endDate={endDate} clientId={Number(clientId) || null}
+              areaId={Number(areaId) || null} operationType={null} />
+          </>
         ) : page === "payroll" ? (
           payrollReport ? (
             <>
@@ -1600,7 +1604,6 @@ export default function DirectorWebDashboard() {
           ) : null
         ) : !report ? null : page === "executive" ? (
           <>
-            <ReceivablesSnapshot clientId={Number(clientId) || null} areaId={Number(areaId) || null} />
             <View style={styles.kpiGrid}>
               <KpiCard
                 title="Venta"
@@ -1703,11 +1706,10 @@ export default function DirectorWebDashboard() {
                 detail={`${number(report.current.workedShifts)} de ${number(report.current.plannedShifts)} turnos`}
               />
             </View>
+            <ReceivablesSnapshot clientId={Number(clientId) || null} areaId={Number(areaId) || null} />
           </>
         ) : page === "operations" ? (
           <>
-            <DirectorStatementCoverage startDate={startDate} endDate={endDate} clientId={Number(clientId) || null}
-              areaId={Number(areaId) || null} operationType={operationType || null} />
             <View style={styles.kpiGrid}>
               <KpiCard
                 title="Turnos planeados"
@@ -1845,7 +1847,6 @@ export default function DirectorWebDashboard() {
           </>
         ) : (
           <>
-            <ReceivablesSnapshot clientId={Number(clientId) || null} areaId={Number(areaId) || null} />
             <View style={styles.kpiGrid}>
               <KpiCard
                 title="Venta"
@@ -1894,6 +1895,7 @@ export default function DirectorWebDashboard() {
                 )}
               />
             </View>
+            <ReceivablesSnapshot clientId={Number(clientId) || null} areaId={Number(areaId) || null} />
             <View style={styles.twoColumns}>
               <Card title="Tendencia financiera" style={styles.wideCard}>
                 <LineChart

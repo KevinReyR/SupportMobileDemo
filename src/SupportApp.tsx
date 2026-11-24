@@ -7606,12 +7606,12 @@ function DirectorReports({ context, data }: { context: UserContext; data: AppDat
       </View>
       <FormCard title="Filtros">
         <View style={styles.reportFilterGrid}>
-          {activeTab !== "receivables" && <View style={styles.reportFilterField}>
-            <Choice label="Fecha inicial" value={formatDate(startDate)} icon="calendar-outline" onPress={() => setOpenFilter("startDate")} />
-          </View>}
-          {activeTab !== "receivables" && <View style={styles.reportFilterField}>
-            <Choice label="Fecha final" value={formatDate(endDate)} icon="calendar-outline" onPress={() => setOpenFilter("endDate")} />
-          </View>}
+          <View style={styles.reportFilterField}>
+            <Choice label={activeTab === "receivables" ? "Fecha inicial (cobertura)" : "Fecha inicial"} value={formatDate(startDate)} icon="calendar-outline" onPress={() => setOpenFilter("startDate")} />
+          </View>
+          <View style={styles.reportFilterField}>
+            <Choice label={activeTab === "receivables" ? "Fecha final (cobertura)" : "Fecha final"} value={formatDate(endDate)} icon="calendar-outline" onPress={() => setOpenFilter("endDate")} />
+          </View>
           <View style={styles.reportFilterField}>
             <Choice label="Empresa" value={selectedClientName} icon="business-outline" onPress={() => setOpenFilter("client")} />
           </View>
@@ -7638,7 +7638,11 @@ function DirectorReports({ context, data }: { context: UserContext; data: AppDat
         ))}
       </View>
       {activeTab === "receivables" ? (
-        <DirectorReceivablesPanel clientId={clientId || null} areaId={null} compact />
+        <>
+          <DirectorReceivablesPanel clientId={clientId || null} areaId={null} compact />
+          <DirectorStatementCoverage startDate={startDate} endDate={endDate}
+            clientId={clientId || null} areaId={null} operationType={null} compact />
+        </>
       ) : loading ? (
         <View style={styles.centerCard}><ActivityIndicator color={C.navy} /></View>
       ) : error ? (
@@ -7648,8 +7652,6 @@ function DirectorReports({ context, data }: { context: UserContext; data: AppDat
       ) : !hasData ? (
         <>
           {activeTab === "client" && <ReceivablesSnapshot clientId={clientId || null} areaId={null} compact />}
-          {activeTab === "operation" && <DirectorStatementCoverage startDate={startDate} endDate={endDate}
-            clientId={clientId || null} areaId={null} operationType={null} compact />}
           <EmptyState icon="bar-chart-outline" text="No hay operaciones para los filtros seleccionados." />
         </>
       ) : (
@@ -7773,8 +7775,6 @@ function DirectorReportTabContent({
     return (
       <>
         {periodSummary}
-        <DirectorStatementCoverage startDate={startDate} endDate={endDate} clientId={clientId}
-          areaId={null} operationType={null} compact />
         <View style={styles.reportMetricGrid}>
           {metric("Operaciones cerradas", String(report.operationsClosed), "checkmark-circle-outline", C.green, report.operationsClosed, previousReport.operationsClosed, report.trendSeries.map((item) => item.closedOperations ?? 0))}
           {metric("Pendientes", String(report.operationsPending), "alert-circle-outline", C.orange, report.operationsPending, previousReport.operationsPending)}
@@ -7855,13 +7855,13 @@ function DirectorReportTabContent({
     return (
       <>
         {periodSummary}
-        <ReceivablesSnapshot clientId={clientId} areaId={null} compact />
         <View style={styles.reportMetricGrid}>
           {metric("Venta total", formatCurrency(report.saleTotal), "cash-outline", C.navy, report.saleTotal, previousReport.saleTotal, report.trendSeries.map((item) => item.saleTotal ?? 0))}
           {metric("Costos", formatCurrency(report.costTotal), "receipt-outline", "#287C9E", report.costTotal, previousReport.costTotal)}
           {metric("Clientes", String(report.clientsCount), "business-outline", C.orange, report.clientsCount, previousReport.clientsCount)}
           {metric("Promedio por cliente", formatCurrency(averageSale), "trending-up-outline", C.green, averageSale, previousAverageSale)}
         </View>
+        <ReceivablesSnapshot clientId={clientId} areaId={null} compact />
         <View style={styles.reportGrid}>
           <View style={styles.reportGridItem}>
             <ReportBarChart
