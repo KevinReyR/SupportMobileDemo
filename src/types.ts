@@ -295,6 +295,9 @@ export interface AdminUser {
 
 export interface AdminClient extends NamedRecord {
   documentNumber: string | null;
+  statementCity: string | null;
+  nextStatementNumber: number;
+  creditDays: number;
   isActive: boolean;
 }
 

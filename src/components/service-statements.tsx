@@ -52,7 +52,7 @@ function Table({data}: {data: StatementPreview | Statement}) {
 }
 export function StatementAdminSettings() {
   const [settings,setSettings]=useState<StatementSettings|null>(null),[error,setError]=useState(''),[busy,setBusy]=useState(false);
-  const [name,setName]=useState(''),[nit,setNit]=useState(''),[manager,setManager]=useState(''),[client,setClient]=useState(''),[city,setCity]=useState(''),[next,setNext]=useState('1');
+  const [name,setName]=useState(''),[nit,setNit]=useState(''),[manager,setManager]=useState('');
   const [signatureUri,setSignatureUri]=useState(''),[signaturePreview,setSignaturePreview]=useState('');
   const lock=useRef(false);
   async function load(){try{const v=await loadStatementSettings();setSettings(v);setName(v.issuer?.legal_name||'');setNit(v.issuer?.nit||'');setManager(v.issuer?.manager_name||'');setError('');
@@ -73,13 +73,12 @@ export function StatementAdminSettings() {
       <Button label={signatureUri?'Cambiar firma':'Adjuntar firma PNG o JPG'} onPress={()=>void pickSignature()}/>
       <Text style={s.statementMeta}>Máximo 512 KB. La firma aparecerá al final del PDF.</Text>
     </View>
-    <Select label="Cliente (opcional para guardar solo emisor)" value={client} options={[{id:'',name:'Solo emisor'},...settings.clients.map(x=>({id:String(x.id),name:x.name}))]} onChange={v=>{setClient(v);const c=settings.clients.find(x=>String(x.id)===v);setCity(c?.city||'');setNext(String(c?.next_number||1));}}/>
-    {client && <><Field label="Ciudad del cliente" value={city} onChangeText={setCity}/><Field label="Proximo consecutivo" value={next} onChangeText={setNext} numeric/></>}
+    <Text>Ciudad, consecutivo y días de crédito se editan en Clientes.</Text>
     <Button label={busy?'Guardando...':'Guardar configuracion'} disabled={busy} onPress={()=>void(async()=>{
       if(lock.current)return;lock.current=true;setBusy(true);setError('');
-      try{if(!name.trim()||!nit.trim()||!manager.trim()||(client&&(!city.trim()||!/^\d+$/.test(next)||Number(next)<1)))throw Error('Completa razón social, NIT, gerente emisor, ciudad y consecutivo positivo');
+      try{if(!name.trim()||!nit.trim()||!manager.trim())throw Error('Completa razón social, NIT y gerente emisor');
         const path=signatureUri?await uploadStatementSignature(signatureUri):settings.issuer?.signature_path||null;
-        await saveStatementSettings(name,nit,manager,path,client?Number(client):null,city,Number(next));setSignatureUri('');const v=await load();setNext(String(v?.clients.find(x=>String(x.id)===client)?.next_number||1));
+        await saveStatementSettings(name,nit,manager,path,null,'',1);setSignatureUri('');await load();
       }catch(e){setError(message(e));}finally{lock.current=false;setBusy(false);}
     })()}/></>}
   </View>;

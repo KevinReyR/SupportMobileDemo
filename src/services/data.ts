@@ -2019,7 +2019,7 @@ export async function loadAdminData(): Promise<AdminData> {
     workwearMovementsResult,
     contractsResult,
   ] = await Promise.all([
-    supabase.from("clients").select("id,name,document_number,is_active").order("name"),
+    supabase.from("clients").select("id,name,document_number,is_active,statement_city,next_statement_number,credit_days").order("name"),
     supabase.from("area").select("id,name,client_id,is_active,clients(name)").order("name"),
     supabase.from("shift").select("id,name,area_id,is_active,area(name,client_id,clients(name))").order("name"),
     supabase
@@ -2077,6 +2077,9 @@ export async function loadAdminData(): Promise<AdminData> {
       id: row.id,
       name: cleanText(row.name),
       documentNumber: row.document_number,
+      statementCity: row.statement_city,
+      nextStatementNumber: Number(row.next_statement_number),
+      creditDays: Number(row.credit_days),
       isActive: Boolean(row.is_active),
     })),
     areas: (areasResult.data ?? []).map((row: any) => ({
@@ -2221,16 +2224,25 @@ export async function saveAdminClient(input: {
   id?: number;
   name: string;
   documentNumber: string;
+  statementCity: string;
+  nextStatementNumber: number;
+  creditDays: number;
   isActive: boolean;
 }) {
-  const payload = {
-    name: input.name.trim(),
-    document_number: input.documentNumber.trim() || null,
-    is_active: input.isActive,
-  };
-  const result = input.id
-    ? await supabase.from("clients").update(payload).eq("id", input.id)
-    : await supabase.from("clients").insert(payload);
+  const result = await supabase.rpc("save_admin_client_details", {
+    p_id: input.id ?? null,
+    p_name: input.name.trim(),
+    p_document_number: input.documentNumber.trim() || null,
+    p_statement_city: input.statementCity.trim(),
+    p_next_statement_number: input.nextStatementNumber,
+    p_credit_days: input.creditDays,
+    p_is_active: input.isActive,
+  });
+  fail(result.error);
+}
+
+export async function setAdminClientActive(id: number, isActive: boolean) {
+  const result = await supabase.from("clients").update({ is_active: isActive }).eq("id", id);
   fail(result.error);
 }
 

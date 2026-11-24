@@ -1,5 +1,8 @@
 -- Run only in a disposable PostgreSQL database. This is not a production seed.
-create role anon; create role authenticated;
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname='anon') then create role anon; end if;
+  if not exists (select 1 from pg_roles where rolname='authenticated') then create role authenticated; end if;
+end $$;
 create schema auth;
 create table auth.users(id uuid primary key);
 create function auth.uid() returns uuid language sql as $$select '00000000-0000-0000-0000-000000000001'::uuid$$;
@@ -22,3 +25,7 @@ insert into operation values(1,1,1,'2026-01-01','CERRADO',1,1),(2,1,1,'2026-01-0
 insert into operation_assignment values(1,1,1,1,null),(2,1,2,1,null),(3,1,3,0,null),(4,2,1,1,null),(5,2,2,1,null),(6,4,3,1,null);
 insert into shift_sales values(1,1,1,1,1,100,2,10,120),(2,1,2,2,1,150,0,10,150),(3,1,3,3,0,100,0,10,0),(4,4,6,3,1,200,0,10,200);
 insert into discharge_sales values(1,2,4,1,1,3.34,10,33.4),(2,2,5,2,1,6.66,10,66.6);
+-- Match the production client columns needed by later migration smoke tests.
+alter table clients add column document_number text, add column is_active boolean default true;
+create sequence clients_id_seq start with 3;
+alter table clients alter column id set default nextval('clients_id_seq');

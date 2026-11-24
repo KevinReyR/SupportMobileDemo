@@ -91,6 +91,7 @@ import {
   reviewDischargeOperation,
   saveAdminArea,
   saveAdminClient,
+  setAdminClientActive,
   saveAdminContract,
   saveAdminCostConcept,
   saveAdminCostRule,
@@ -8502,7 +8503,7 @@ function AdminCatalogsMobile({ onRefresh }: { onRefresh: () => void }) {
             subtitle: item.documentNumber ?? "Sin documento",
             active: item.isActive,
             onToggle: async (active) => {
-              await saveAdminClient({ id: item.id, name: item.name, documentNumber: item.documentNumber ?? "", isActive: active });
+              await setAdminClientActive(item.id, active);
               await reloadAll();
             },
           }))} />
@@ -8784,7 +8785,7 @@ function AdminCatalogsModule({ adminData, onChanged }: { adminData: AdminData; o
           rows={adminData.clients}
           onNew={() => setClient("new")}
           onEdit={setClient}
-          subtitle={(item) => item.documentNumber ?? "Sin documento"}
+          subtitle={(item) => `${item.documentNumber ?? "Sin documento"} · ${item.statementCity ?? "Ciudad pendiente"} · Crédito ${item.creditDays} días · Acta #${item.nextStatementNumber}`}
           active={(item) => item.isActive}
           emptyText="No hay clientes registrados."
         />
@@ -9996,28 +9997,43 @@ function AdminContractModal({
 function AdminClientModal({ visible, item, onClose, onSaved }: { visible: boolean; item: AdminData["clients"][number] | null; onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState("");
   const [documentNumber, setDocumentNumber] = useState("");
+  const [statementCity, setStatementCity] = useState("");
+  const [nextStatementNumber, setNextStatementNumber] = useState("1");
+  const [creditDays, setCreditDays] = useState("");
+  const [error, setError] = useState("");
   const [isActive, setIsActive] = useState(true);
   const [saving, setSaving] = useState(false);
   useEffect(() => {
     if (!visible) return;
     setName(item?.name ?? "");
     setDocumentNumber(item?.documentNumber ?? "");
+    setStatementCity(item?.statementCity ?? "");
+    setNextStatementNumber(String(item?.nextStatementNumber ?? 1));
+    setCreditDays(item ? String(item.creditDays) : "");
+    setError("");
     setIsActive(item?.isActive ?? true);
   }, [item, visible]);
   return (
     <AdminModalShell visible={visible} title={item ? "Editar cliente" : "Crear cliente"} saving={saving} onClose={onClose} onSave={async () => {
       setSaving(true);
       try {
-        await saveAdminClient({ id: item?.id, name, documentNumber, isActive });
+        if (!name.trim() || !statementCity.trim()) throw new Error("Completa nombre y ciudad del cliente.");
+        if (!/^[1-9][0-9]*$/.test(nextStatementNumber) || !Number.isSafeInteger(Number(nextStatementNumber)) || Number(nextStatementNumber) > 2147483647) throw new Error("Próximo consecutivo: ingresa un entero entre 1 y 2.147.483.647.");
+        if (!/^(0|[1-9][0-9]*)$/.test(creditDays) || !Number.isSafeInteger(Number(creditDays))) throw new Error("Días de crédito: ingresa un entero desde 0.");
+        await saveAdminClient({ id: item?.id, name, documentNumber, statementCity, nextStatementNumber: Number(nextStatementNumber), creditDays: Number(creditDays), isActive });
         await onSaved();
       } catch (cause) {
-        Alert.alert("No fue posible guardar", errorMessage(cause));
+        setError(errorMessage(cause));
       } finally {
         setSaving(false);
       }
     }}>
       <AdminField label="Nombre" value={name} onChangeText={setName} icon="business-outline" />
       <AdminField label="Documento" value={documentNumber} onChangeText={setDocumentNumber} icon="document-outline" />
+      <AdminField label="Ciudad del cliente" value={statementCity} onChangeText={setStatementCity} icon="location-outline" />
+      <AdminField label="Próximo consecutivo (Actas)" value={nextStatementNumber} onChangeText={setNextStatementNumber} icon="receipt-outline" keyboardType="numeric" />
+      <AdminField label="Días de crédito" value={creditDays} onChangeText={setCreditDays} icon="calendar-outline" keyboardType="numeric" />
+      {error ? <Notice icon="alert-circle-outline" text={error} tone="error" /> : null}
       <AdminSwitch label="Estado" value={isActive} onValueChange={setIsActive} />
     </AdminModalShell>
   );
