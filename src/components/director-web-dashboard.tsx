@@ -17,6 +17,7 @@ import Svg, {
   Rect,
   Text as SvgText,
 } from "react-native-svg";
+import { DirectorReceivablesPanel, DirectorStatementCoverage, ReceivablesSnapshot } from "./director-receivables";
 
 import {
   loadDirectorDashboard,
@@ -31,7 +32,7 @@ import type {
   DirectorPayrollRow,
 } from "../types";
 
-type DashboardPage = "executive" | "operations" | "clients" | "payroll";
+type DashboardPage = "executive" | "operations" | "clients" | "payroll" | "receivables";
 type ClientSortKey = keyof Pick<
   DirectorDashboardClient,
   | "name"
@@ -1208,6 +1209,7 @@ export default function DirectorWebDashboard() {
       label: "Nómina",
       icon: "wallet-outline" as const,
     },
+    { id: "receivables" as const, label: "Cartera", icon: "receipt-outline" as const },
   ];
   const filters = report?.filters;
   const selectedClientLabel =
@@ -1216,8 +1218,8 @@ export default function DirectorWebDashboard() {
   const activeLoading =
     page === "payroll"
       ? payrollLoading || (!payrollReport && !payrollError)
-      : loading;
-  const activeError = page === "payroll" ? payrollError : error;
+      : page === "receivables" ? false : loading;
+  const activeError = page === "payroll" ? payrollError : page === "receivables" ? "" : error;
   const activeRefresh = page === "payroll" ? refreshPayroll : refresh;
   const activeGeneratedAt =
     page === "payroll" ? payrollReport?.generatedAt : report?.generatedAt;
@@ -1322,28 +1324,28 @@ export default function DirectorWebDashboard() {
                   ? "Operación y personal"
                   : page === "clients"
                     ? "Clientes y finanzas"
-                    : "Nómina"}
+                    : page === "receivables" ? "Cartera" : "Nómina"}
             </Text>
             <Text style={styles.periodText}>
-              Período actual:{" "}
+              {page === "receivables" ? "Saldo actual · filtros de cliente y área" : "Período actual:"}{" "}
               <Text style={styles.linkText}>
-                {dateLabel(startDate)} – {dateLabel(endDate)}
+                {page === "receivables" ? "" : `${dateLabel(startDate)} – ${dateLabel(endDate)}`}
               </Text>
-              {report && page !== "payroll"
+              {report && page !== "payroll" && page !== "receivables"
                 ? `  ·  Comparado con ${dateLabel(report.period.previousStartDate)} – ${dateLabel(report.period.previousEndDate)}`
                 : ""}
             </Text>
           </View>
           <View style={styles.actionRow}>
-            <Pressable
+            {page !== "receivables" && <Pressable
               style={styles.actionButton}
               disabled={page === "payroll" && !payrollReport}
               onPress={() => window.print()}
             >
               <Ionicons name="document-text-outline" size={17} color={BLUE} />
               <Text style={styles.actionText}>PDF</Text>
-            </Pressable>
-            <Pressable
+            </Pressable>}
+            {page !== "receivables" && <Pressable
               style={styles.actionButton}
               disabled={page === "payroll" ? !payrollReport : !report}
               onPress={() => {
@@ -1361,7 +1363,7 @@ export default function DirectorWebDashboard() {
             >
               <Ionicons name="grid-outline" size={17} color={GREEN} />
               <Text style={styles.actionText}>Excel</Text>
-            </Pressable>
+            </Pressable>}
             {activeGeneratedAt ? (
               <View style={styles.updated}>
                 <Ionicons name="refresh-outline" size={17} color={BLUE} />
@@ -1374,20 +1376,20 @@ export default function DirectorWebDashboard() {
           </View>
         </View>
         <View style={styles.filters}>
-          <FilterBox icon="calendar-outline" label="Desde">
+          {page !== "receivables" && <FilterBox icon="calendar-outline" label="Desde">
             <DateControl
               value={startDate}
               onChange={setStartDate}
               label="Fecha inicial"
             />
-          </FilterBox>
-          <FilterBox icon="calendar-outline" label="Hasta">
+          </FilterBox>}
+          {page !== "receivables" && <FilterBox icon="calendar-outline" label="Hasta">
             <DateControl
               value={endDate}
               onChange={setEndDate}
               label="Fecha final"
             />
-          </FilterBox>
+          </FilterBox>}
           <FilterBox icon="people-outline" label="Cliente">
             <NativeWebControl
               ariaLabel="Cliente"
@@ -1427,7 +1429,7 @@ export default function DirectorWebDashboard() {
                   ]}
                 />
               </FilterBox>
-              <FilterBox icon="briefcase-outline" label="Tipo de operación">
+              {page !== "receivables" && <FilterBox icon="briefcase-outline" label="Tipo de operación">
                 <NativeWebControl
                   ariaLabel="Tipo de operación"
                   value={operationType}
@@ -1440,7 +1442,7 @@ export default function DirectorWebDashboard() {
                     })),
                   ]}
                 />
-              </FilterBox>
+              </FilterBox>}
             </>
           )}
         </View>
@@ -1459,6 +1461,8 @@ export default function DirectorWebDashboard() {
               <Text style={styles.retryText}>Reintentar</Text>
             </Pressable>
           </View>
+        ) : page === "receivables" ? (
+          <DirectorReceivablesPanel clientId={Number(clientId) || null} areaId={Number(areaId) || null} />
         ) : page === "payroll" ? (
           payrollReport ? (
             <>
@@ -1596,6 +1600,7 @@ export default function DirectorWebDashboard() {
           ) : null
         ) : !report ? null : page === "executive" ? (
           <>
+            <ReceivablesSnapshot clientId={Number(clientId) || null} areaId={Number(areaId) || null} />
             <View style={styles.kpiGrid}>
               <KpiCard
                 title="Venta"
@@ -1701,6 +1706,8 @@ export default function DirectorWebDashboard() {
           </>
         ) : page === "operations" ? (
           <>
+            <DirectorStatementCoverage startDate={startDate} endDate={endDate} clientId={Number(clientId) || null}
+              areaId={Number(areaId) || null} operationType={operationType || null} />
             <View style={styles.kpiGrid}>
               <KpiCard
                 title="Turnos planeados"
@@ -1838,6 +1845,7 @@ export default function DirectorWebDashboard() {
           </>
         ) : (
           <>
+            <ReceivablesSnapshot clientId={Number(clientId) || null} areaId={Number(areaId) || null} />
             <View style={styles.kpiGrid}>
               <KpiCard
                 title="Venta"

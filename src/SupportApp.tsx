@@ -35,6 +35,7 @@ import type { Session } from "@supabase/supabase-js";
 import PdfViewer from "./components/pdf-viewer";
 import ServiceStatements, { StatementAdminSettings } from "./components/service-statements";
 import DirectorWebDashboard from "./components/director-web-dashboard";
+import { DirectorReceivablesPanel, DirectorStatementCoverage, ReceivablesSnapshot } from "./components/director-receivables";
 import { COLOMBIA_DEPARTMENTS, COLOMBIA_MUNICIPALITIES_BY_DEPARTMENT } from "./data/colombia-locations";
 import { buildCedulaPdfFromPhotos, buildPdfFromPhotos } from "./lib/cedula-pdf";
 import { supabase } from "./lib/supabase";
@@ -7488,13 +7489,14 @@ function ClientHistoryDetail({ history }: { history: ContractorHistory }) {
   );
 }
 
-type DirectorReportTab = "operation" | "contractors" | "client" | "payroll";
+type DirectorReportTab = "operation" | "contractors" | "client" | "payroll" | "receivables";
 
 const directorReportTabs: { id: DirectorReportTab; title: string; icon: IconName }[] = [
   { id: "operation", title: "Operación", icon: "briefcase-outline" },
   { id: "contractors", title: "Contratistas", icon: "people-outline" },
   { id: "client", title: "Cliente", icon: "business-outline" },
   { id: "payroll", title: "Nómina", icon: "wallet-outline" },
+  { id: "receivables", title: "Cartera", icon: "receipt-outline" },
 ];
 
 function DirectorReports({ context, data }: { context: UserContext; data: AppData }) {
@@ -7604,16 +7606,16 @@ function DirectorReports({ context, data }: { context: UserContext; data: AppDat
       </View>
       <FormCard title="Filtros">
         <View style={styles.reportFilterGrid}>
-          <View style={styles.reportFilterField}>
+          {activeTab !== "receivables" && <View style={styles.reportFilterField}>
             <Choice label="Fecha inicial" value={formatDate(startDate)} icon="calendar-outline" onPress={() => setOpenFilter("startDate")} />
-          </View>
-          <View style={styles.reportFilterField}>
+          </View>}
+          {activeTab !== "receivables" && <View style={styles.reportFilterField}>
             <Choice label="Fecha final" value={formatDate(endDate)} icon="calendar-outline" onPress={() => setOpenFilter("endDate")} />
-          </View>
+          </View>}
           <View style={styles.reportFilterField}>
             <Choice label="Empresa" value={selectedClientName} icon="business-outline" onPress={() => setOpenFilter("client")} />
           </View>
-          <View style={styles.reportFilterField}>
+          {activeTab !== "receivables" && <View style={styles.reportFilterField}>
             <Choice
               label="Contratista"
               value={selectedContractorName}
@@ -7621,7 +7623,7 @@ function DirectorReports({ context, data }: { context: UserContext; data: AppDat
               disabled={contractorOptions.length === 0}
               onPress={() => setOpenFilter("contractor")}
             />
-          </View>
+          </View>}
         </View>
       </FormCard>
       <View style={styles.adminRateTabs}>
@@ -7635,12 +7637,21 @@ function DirectorReports({ context, data }: { context: UserContext; data: AppDat
           />
         ))}
       </View>
-      {loading ? (
+      {activeTab === "receivables" ? (
+        <DirectorReceivablesPanel clientId={clientId || null} areaId={null} compact />
+      ) : loading ? (
         <View style={styles.centerCard}><ActivityIndicator color={C.navy} /></View>
       ) : error ? (
         <Notice icon="cloud-offline-outline" tone="error" text={error} />
-      ) : !report || !previousReport || !hasData ? (
+      ) : !report || !previousReport ? (
         <EmptyState icon="bar-chart-outline" text="No hay informes para los filtros seleccionados." />
+      ) : !hasData ? (
+        <>
+          {activeTab === "client" && <ReceivablesSnapshot clientId={clientId || null} areaId={null} compact />}
+          {activeTab === "operation" && <DirectorStatementCoverage startDate={startDate} endDate={endDate}
+            clientId={clientId || null} areaId={null} operationType={null} compact />}
+          <EmptyState icon="bar-chart-outline" text="No hay operaciones para los filtros seleccionados." />
+        </>
       ) : (
         <DirectorReportTabContent
           report={report}
@@ -7648,6 +7659,7 @@ function DirectorReports({ context, data }: { context: UserContext; data: AppDat
           tab={activeTab}
           startDate={startDate}
           endDate={endDate}
+          clientId={clientId || null}
         />
       )}
       <CalendarModal
@@ -7708,12 +7720,14 @@ function DirectorReportTabContent({
   tab,
   startDate,
   endDate,
+  clientId,
 }: {
   report: DirectorReportsSummary;
   previousReport: DirectorReportsSummary;
   tab: DirectorReportTab;
   startDate: string;
   endDate: string;
+  clientId: number | null;
 }) {
   const { width } = useWindowDimensions();
   const previousRange = previousInclusiveDateRange(startDate, endDate);
@@ -7759,6 +7773,8 @@ function DirectorReportTabContent({
     return (
       <>
         {periodSummary}
+        <DirectorStatementCoverage startDate={startDate} endDate={endDate} clientId={clientId}
+          areaId={null} operationType={null} compact />
         <View style={styles.reportMetricGrid}>
           {metric("Operaciones cerradas", String(report.operationsClosed), "checkmark-circle-outline", C.green, report.operationsClosed, previousReport.operationsClosed, report.trendSeries.map((item) => item.closedOperations ?? 0))}
           {metric("Pendientes", String(report.operationsPending), "alert-circle-outline", C.orange, report.operationsPending, previousReport.operationsPending)}
@@ -7839,6 +7855,7 @@ function DirectorReportTabContent({
     return (
       <>
         {periodSummary}
+        <ReceivablesSnapshot clientId={clientId} areaId={null} compact />
         <View style={styles.reportMetricGrid}>
           {metric("Venta total", formatCurrency(report.saleTotal), "cash-outline", C.navy, report.saleTotal, previousReport.saleTotal, report.trendSeries.map((item) => item.saleTotal ?? 0))}
           {metric("Costos", formatCurrency(report.costTotal), "receipt-outline", "#287C9E", report.costTotal, previousReport.costTotal)}
